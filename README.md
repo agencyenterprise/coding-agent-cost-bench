@@ -84,7 +84,8 @@ GLM_MODELS="modal,GLM" python3 aggregate.py    # re-aggregate with real GPU cost
 ## 5. Outputs
 - `results/results_detailed.csv` — per (task,model,run): status, tokens, `cost_tokens`,
   `cost_final`, `cost_source` (`modal_gpu` | `ccusage_estimate` | `ccusage_tokens`).
-- `results/summary.csv` — per model: `success_rate`, avg tokens, **`cost_per_successful_task`**.
+- `results/summary.csv` — per model: `success_rate`, pass/fail counts, avg tokens in/out,
+  avg/median duration, total cost, **`cost_per_successful_task`**.
 
 ## 6. Clean up
 ```bash

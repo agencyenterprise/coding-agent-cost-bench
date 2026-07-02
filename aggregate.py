@@ -116,6 +116,20 @@ def is_glm(model):
     return any(g in model for g in GLM_MODELS)
 
 
+def _fmt_dur(seconds):
+    s = float(seconds)
+    return f"{s/60:.1f}m" if s >= 60 else f"{s:.0f}s"
+
+
+def _fmt_int(n):
+    n = int(n)
+    if n >= 1_000_000:
+        return f"{n/1e6:.1f}M"
+    if n >= 10_000:
+        return f"{n/1e3:.0f}k"
+    return str(n)
+
+
 def main():
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
@@ -172,16 +186,27 @@ def main():
     for model, runs in by_model.items():
         n = len(runs)
         passes = [r for r in runs if r["status"] == "pass"]
+        fails = [r for r in runs if r["status"] == "fail"]
         total_cost = sum(r["cost_final"] for r in runs)
+        pass_tokens_in = statistics.mean(r["tokens_in"] for r in passes) if passes else 0
+        pass_tokens_out = statistics.mean(r["tokens_out"] for r in passes) if passes else 0
         sum_rows.append({
             "model": model,
             "runs": n,
+            "passes": len(passes),
+            "fails": len(fails),
             "success_rate": round(len(passes) / n, 3) if n else 0,
             "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)) if n else 0,
             "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)) if n else 0,
+            "avg_tokens_in_pass": round(pass_tokens_in) if passes else None,
+            "avg_tokens_out_pass": round(pass_tokens_out) if passes else None,
+            "avg_duration_s": round(statistics.mean(float(r["duration_s"]) for r in runs), 1) if n else 0,
+            "median_duration_s": round(statistics.median(float(r["duration_s"]) for r in runs), 1) if n else 0,
+            "total_duration_s": round(sum(float(r["duration_s"]) for r in runs), 1),
             "total_cost_usd": round(total_cost, 4),
             "cost_per_successful_task": round(total_cost / len(passes), 4) if passes else None,
             "missing_gpu_cost": sum(1 for r in runs if r["cost_source"] == "MISSING"),
+            "ccusage_estimate_runs": sum(1 for r in runs if r["cost_source"] == "ccusage_estimate"),
         })
 
     sum_path = os.path.join(RESULTS_DIR, "summary.csv")
@@ -194,9 +219,20 @@ def main():
     for r in sorted(sum_rows, key=lambda x: (x["cost_per_successful_task"] is None,
                                              x["cost_per_successful_task"] or 0)):
         cpt = r["cost_per_successful_task"]
-        warn = f"  ⚠ {r['missing_gpu_cost']} runs missing GPU cost" if r["missing_gpu_cost"] else ""
-        print(f"  {r['model']:<30} success={r['success_rate']:<5} "
-              f"$/task={cpt if cpt is not None else 'n/a':<8}{warn}")
+        warn_parts = []
+        if r["missing_gpu_cost"]:
+            warn_parts.append(f"{r['missing_gpu_cost']} missing GPU cost")
+        if r["ccusage_estimate_runs"]:
+            warn_parts.append(f"{r['ccusage_estimate_runs']} ccusage_estimate (not real GPU $)")
+        warn = f"  ⚠ {', '.join(warn_parts)}" if warn_parts else ""
+        rec = f"{r['passes']}/{r['runs']}"
+        print(
+            f"  {r['model']:<30} success={r['success_rate']:<5} ({rec}) "
+            f"$/task={cpt if cpt is not None else 'n/a':<8} "
+            f"total=${r['total_cost_usd']:<7} "
+            f"in={_fmt_int(r['avg_tokens_in']):<5} out={_fmt_int(r['avg_tokens_out']):<5} "
+            f"time={_fmt_dur(r['avg_duration_s']):<6}{warn}"
+        )
 
 
 if __name__ == "__main__":
