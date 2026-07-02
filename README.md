@@ -258,6 +258,8 @@ results/                # logs, ccusage snapshots, *.csv  (gitignored)
 - **`Unexpected server error` after the first run** → opencode state race when runs fire
   back-to-back. `--retries`/`--delay` mitigate; each run now uses an isolated
   `XDG_DATA_HOME`. Use `-j, --jobs N` for parallelism (watch API rate limits).
+- **`results/*/output.log` is JSONL** — `run_bench.sh` uses `opencode run --format json --auto`
+  (no TTY status spam; permissions auto-approved for unattended runs).
 - **`big-pickle`** is opencode's own hosted model, **not** the Modal GLM — don't confuse
   its `$0.00` ccusage cost with GLM's.
 - **`cost_source=ccusage_estimate`** means the number is a hosted-price estimate, not real

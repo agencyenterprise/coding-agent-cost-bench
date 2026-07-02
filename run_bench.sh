@@ -205,7 +205,8 @@ run_one_job() {
     start="$(now)"
     mkdir -p "$outdir"
     ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
-        opencode run "$prompt" -m "$model" > "$outdir/output.log" 2>&1 ) || true
+        opencode run "$prompt" -m "$model" --format json --auto \
+        > "$outdir/output.log" 2>&1 ) || true
     end="$(now)"
     perl -i -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$outdir/output.log" 2>/dev/null || true
     if grep -qi "UnknownError\|Unexpected server error" "$outdir/output.log" && [ "$attempt" -lt "$max" ]; then
