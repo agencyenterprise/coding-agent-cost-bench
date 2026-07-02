@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "modal": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Modal (GLM-5.2)",
+      "options": {
+        "baseURL": "{env:MODAL_ENDPOINT}",
+        "apiKey": "dummy",
+        "headers": {
+          "Modal-Key": "{env:MODAL_KEY}",
+          "Modal-Secret": "{env:MODAL_SECRET}"
+        }
+      },
+      "models": {
+        "zai-org/GLM-5.2-FP8": { "name": "GLM-5.2 (Modal)" }
+      }
+    },
+    "anthropic": { "options": { "apiKey": "{env:ANTHROPIC_API_KEY}" } },
+    "openai": { "options": { "apiKey": "{env:OPENAI_API_KEY}" } },
+    "google": { "options": { "apiKey": "{env:GEMINI_API_KEY}" } }
+  }
+}

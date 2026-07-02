@@ -1,0 +1,8 @@
+# Track task definitions (prompt.txt, verify.sh, repo/, repo.path, ...).
+# Ignore stray files dropped directly in tasks/.
+*
+!.gitignore
+!*/
+!*/**
+__pycache__/
+*.pyc

@@ -1,0 +1,8 @@
+.env
+**/.venv/
+node_modules/
+__pycache__/
+.claude/settings.local.json
+# tasks: only demo-* are shared; everything else (private repos, WIP) stays local
+tasks/*
+!tasks/demo-*/
