@@ -203,6 +203,40 @@ See [SWEBENCH.md](SWEBENCH.md).
 
 ---
 
+## Automation: the `/create-bench-task` skill + `task-smith` agent
+
+Making a task by hand (clone → find a testable function → inject a bug → validate) is
+repetitive, so it's codified into a **skill** (guided flow) and an **agent** (the worker).
+Both are committed, so teammates get them on clone (`.claude/`).
+
+### `/create-bench-task` — the skill (how to use)
+In Claude Code, run the slash command or just ask in plain language:
+```
+/create-bench-task
+# or: "add a task from pallets/flask @ 3.0.0, break url_for"
+```
+It (1) asks only what it still needs — source (public repo / local repo / self-contained /
+SWE-bench), the repo + **pinned ref**, task kind, and name; (2) hands the build to the
+`task-smith` agent; (3) offers to smoke-run the new task. Defined in
+`.claude/skills/create-bench-task/SKILL.md`.
+> A skill created mid-session only registers after creation — new sessions pick it up automatically.
+
+### `task-smith` — the agent (how it works)
+A subagent (`.claude/agents/task-smith.md`) that does the heavy lifting in its own context:
+1. Clones the repo at the pinned ref into a **temp dir**; confirms the suite is green (baseline).
+2. Finds a **pure function with direct test coverage** and crafts a **minimal string-swap**
+   injection with an assert-anchor (fails loudly if the repo layout drifts).
+3. Writes `tasks/<name>/{prompt.txt,verify.sh,setup.sh,repo.git|repo.path|repo/}` following the
+   conventions (demo-* naming, offline verify, `.venv` bootstrap).
+4. **Validates before returning:** clone → inject → `verify` FAILS → apply the fix →
+   `verify` PASSES, reporting `N failed → M passed`.
+
+It never touches your real repos (works in temp dirs) and **refuses to ship a task it
+couldn't validate** — so nothing noisy lands in the benchmark. You can also invoke it
+directly (Task tool / `@task-smith`) when you already know the repo and bug.
+
+---
+
 ## Layout
 ```
 opencode.jsonc          # provider config (committed, secrets via {env:...})
