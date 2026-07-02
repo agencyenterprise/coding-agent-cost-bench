@@ -4,12 +4,12 @@ Aggregate benchmark results into a cost-per-task CSV.
 
 Joins three sources per run:
   1. results/manifest.csv         -> which (task,model,run), status, duration
-  2. per-run ccusage snapshots    -> tokens + $ (diff before/after in each outdir)
-     legacy fallback: results/ccusage.NNNN.json diffed between consecutive snaps
+  2. per-run usage.json           -> tokens + $ from this run's isolated opencode DB
+     legacy fallback: ccusage before/after diff in outdir, or global ccusage.NNNN snaps
   3. modal_costs.csv (optional)   -> real GPU $ for the self-hosted GLM/Modal model
 
-Why the diff: ccusage reports ALL sessions. Each `opencode run` creates one new
-session, so sessions in the after-snapshot but not the before-snapshot belong to that run.
+Per-run usage.json is produced by run_bench.sh (ccusage against a temp HOME copy of
+the job's isolated opencode.db). All sessions in that file belong to the run.
 
 Two currencies (this is the crux of the study):
   - Claude / OpenAI  -> $ comes from ccusage (it knows per-token prices)
@@ -84,6 +84,19 @@ def session_delta(before_path, after_path):
     return new_ids, after
 
 
+def load_run_usage(outdir):
+    """Return (session_ids, sessions_dict) for one benchmark run."""
+    usage = os.path.join(outdir, "usage.json")
+    if os.path.exists(usage):
+        sess = load_sessions(usage)
+        return set(sess.keys()), sess
+    after = os.path.join(outdir, "ccusage.after.json")
+    before = os.path.join(outdir, "ccusage.before.json")
+    if os.path.exists(after):
+        return session_delta(before, after)
+    return set(), {}
+
+
 def load_modal_costs():
     """Return dict: (task,model,run) -> gpu_cost_usd (or None)."""
     costs = {}
@@ -113,10 +126,8 @@ def main():
     with open(manifest) as f:
         for row in csv.DictReader(f):
             outdir = row.get("outdir", "")
-            after = os.path.join(outdir, "ccusage.after.json")
-            before = os.path.join(outdir, "ccusage.before.json")
-            if outdir and os.path.exists(after):
-                new_ids, sess = session_delta(before, after)
+            if outdir:
+                new_ids, sess = load_run_usage(outdir)
             elif row.get("snap_index", "").strip():
                 snap = int(row["snap_index"])
                 new_ids, sess = session_delta(snap_path(snap - 1), snap_path(snap))

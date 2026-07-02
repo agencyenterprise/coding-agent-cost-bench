@@ -262,3 +262,6 @@ results/                # logs, ccusage snapshots, *.csv  (gitignored)
   its `$0.00` ccusage cost with GLM's.
 - **`cost_source=ccusage_estimate`** means the number is a hosted-price estimate, not real
   GPU spend — fill `modal_costs.csv` to get `modal_gpu`.
+- **`$/task` is $0 after a parallel run** — older runs may lack per-job `usage.json`.
+  Backfill best-effort from the global opencode DB, then re-aggregate:
+  `python3 backfill_usage.py && python3 aggregate.py`

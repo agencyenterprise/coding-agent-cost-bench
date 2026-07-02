@@ -139,6 +139,29 @@ _running_jobs() {
 
 _log() { echo "$*" >&2; }
 
+# ccusage always reads $HOME/.local/share/opencode/opencode.db (ignores XDG_DATA_HOME).
+# Copy this run's isolated DB into a temp HOME so usage belongs to this job only.
+_snapshot_run_usage() {
+  local state_dir="$1" outfile="$2"
+  local db="$state_dir/opencode/opencode.db"
+  if [ ! -f "$db" ]; then
+    echo '{"sessions":[]}' > "$outfile"
+    return 0
+  fi
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$db" 'PRAGMA wal_checkpoint(FULL);' 2>/dev/null || true
+  fi
+  local fake_home
+  fake_home="$(mktemp -d)"
+  mkdir -p "$fake_home/.local/share/opencode"
+  cp "$db" "$fake_home/.local/share/opencode/"
+  cp "$state_dir/opencode/opencode.db-wal" "$fake_home/.local/share/opencode/" 2>/dev/null || true
+  cp "$state_dir/opencode/opencode.db-shm" "$fake_home/.local/share/opencode/" 2>/dev/null || true
+  HOME="$fake_home" $CCUSAGE opencode session --json > "$outfile" 2>/dev/null \
+    || echo '{"sessions":[]}' > "$outfile"
+  rm -rf "$fake_home"
+}
+
 _parallel_pids=()
 _kill_parallel_jobs() {
   _log "interrupted — stopping background jobs..."
@@ -176,10 +199,6 @@ run_one_job() {
   agent_path="$PATH"
   [ -x "$work/.venv/bin/python" ] && agent_path="$work/.venv/bin:$agent_path"
 
-  mkdir -p "$outdir"
-  $CCUSAGE opencode session --json > "$outdir/ccusage.before.json" 2>/dev/null \
-    || echo '[]' > "$outdir/ccusage.before.json"
-
   _log "    running agent..."
   attempt=1; max=$((RETRIES + 1))
   while :; do
@@ -205,8 +224,7 @@ run_one_job() {
   fi
 
   mkdir -p "$outdir"
-  $CCUSAGE opencode session --json > "$outdir/ccusage.after.json" 2>/dev/null \
-    || echo '[]' > "$outdir/ccusage.after.json"
+  _snapshot_run_usage "$state_dir" "$outdir/usage.json"
 
   _manifest_append "$task_name,$model,$run,$outdir,,$start,$end,$dur,$status"
   _log "    done ($status, ${dur}s)"
