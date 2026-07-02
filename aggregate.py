@@ -3,12 +3,13 @@
 Aggregate benchmark results into a cost-per-task CSV.
 
 Joins three sources per run:
-  1. results/manifest.csv         -> which (task,model,run), status, duration, snap index
-  2. results/ccusage.NNNN.json    -> tokens + $ per session (diffed between consecutive snaps)
+  1. results/manifest.csv         -> which (task,model,run), status, duration
+  2. per-run ccusage snapshots    -> tokens + $ (diff before/after in each outdir)
+     legacy fallback: results/ccusage.NNNN.json diffed between consecutive snaps
   3. modal_costs.csv (optional)   -> real GPU $ for the self-hosted GLM/Modal model
 
 Why the diff: ccusage reports ALL sessions. Each `opencode run` creates one new
-session, so the sessions present in snapshot N but not in N-1 belong to run N.
+session, so sessions in the after-snapshot but not the before-snapshot belong to that run.
 
 Two currencies (this is the crux of the study):
   - Claude / OpenAI  -> $ comes from ccusage (it knows per-token prices)
@@ -75,6 +76,14 @@ def snap_path(n):
     return os.path.join(RESULTS_DIR, f"ccusage.{int(n):04d}.json")
 
 
+def session_delta(before_path, after_path):
+    """Return (new_session_ids, after_sessions_dict)."""
+    before = load_sessions(before_path)
+    after = load_sessions(after_path)
+    new_ids = set(after) - set(before)
+    return new_ids, after
+
+
 def load_modal_costs():
     """Return dict: (task,model,run) -> gpu_cost_usd (or None)."""
     costs = {}
@@ -103,9 +112,16 @@ def main():
     detailed = []
     with open(manifest) as f:
         for row in csv.DictReader(f):
-            snap = int(row["snap_index"])
-            new_ids = set(load_sessions(snap_path(snap))) - set(load_sessions(snap_path(snap - 1)))
-            sess = load_sessions(snap_path(snap))
+            outdir = row.get("outdir", "")
+            after = os.path.join(outdir, "ccusage.after.json")
+            before = os.path.join(outdir, "ccusage.before.json")
+            if outdir and os.path.exists(after):
+                new_ids, sess = session_delta(before, after)
+            elif row.get("snap_index", "").strip():
+                snap = int(row["snap_index"])
+                new_ids, sess = session_delta(snap_path(snap - 1), snap_path(snap))
+            else:
+                new_ids, sess = set(), {}
             tin  = sum(sess[s]["in"]   for s in new_ids)
             tout = sum(sess[s]["out"]  for s in new_ids)
             ccost = sum(sess[s]["cost"] for s in new_ids)

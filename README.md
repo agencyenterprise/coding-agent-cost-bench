@@ -60,12 +60,13 @@ opencode run "say hi" -m modal/zai-org/GLM-5.2-FP8
 | Flag | Meaning | Default |
 |---|---|---|
 | `--runs N` | repeats per (task, model) — agents are stochastic | 3 |
-| `--models "a b"` | space-separated model refs | built-in set |
+| `--models "a b"` | space- or comma-separated model refs | built-in set |
 | `--tasks DIR` | tasks directory | `./tasks` |
+| `-j, --jobs N` | run up to N (task,model,run) jobs in parallel | 1 |
 | `--timeout SECS` | kill a stuck/looping agent | 900 |
 | `--glm "modal,GLM"` | model substrings routed to Modal GPU cost | `modal,GLM` |
 | `--retries N` | retries on opencode server error | 2 |
-| `--delay SECS` | pause between runs (avoids state races) | 2 |
+| `--delay SECS` | pause between sequential runs (`--jobs 1` only) | 2 |
 | `--keep-repo` | keep the mutated repo per run | off |
 | `--no-aggregate` | skip `aggregate.py` at the end | off |
 
@@ -255,8 +256,8 @@ results/                # logs, ccusage snapshots, *.csv  (gitignored)
 - **`opencode models` shows only `opencode/*`** → provider config not loaded. Ensure
   `OPENCODE_CONFIG` points to `opencode.jsonc` (run_bench sets this automatically).
 - **`Unexpected server error` after the first run** → opencode state race when runs fire
-  back-to-back. `--retries`/`--delay` mitigate; if it persists, per-run state isolation
-  (`XDG_DATA_HOME`) is the next step.
+  back-to-back. `--retries`/`--delay` mitigate; each run now uses an isolated
+  `XDG_DATA_HOME`. Use `-j, --jobs N` for parallelism (watch API rate limits).
 - **`big-pickle`** is opencode's own hosted model, **not** the Modal GLM — don't confuse
   its `$0.00` ccusage cost with GLM's.
 - **`cost_source=ccusage_estimate`** means the number is a hosted-price estimate, not real
