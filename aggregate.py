@@ -1,133 +1,67 @@
 #!/usr/bin/env python3
 """
-Aggregate benchmark results into a cost-per-task CSV.
+Aggregate benchmark results -> results/{results_detailed,summary}.csv.
 
-Joins three sources per run:
-  1. results/manifest.csv         -> which (task,model,run), status, duration
-  2. per-run usage.json           -> tokens + $ from this run's isolated opencode DB
-     legacy fallback: ccusage before/after diff in outdir, or global ccusage.NNNN snaps
-  3. modal_costs.csv (optional)   -> real GPU $ for the self-hosted GLM/Modal model
+ONE cost per row, always labeled with its basis. Two currencies:
+  * API models (Claude/GPT/Gemini) -> cost = tokens x per-token price (how the provider
+    bills). From ccusage. basis "api_ccusage".
+  * GLM on Modal (self-host)        -> you pay GPU TIME (billed even while idle). The honest
+    number is the real Modal spend for the run window / successful tasks. basis "gpu_billing".
+    Fetched automatically from modal.billing (needs: pip install modal && modal setup).
 
-Per-run usage.json is produced by run_bench.sh (ccusage against a temp HOME copy of
-the job's isolated opencode.db). All sessions in that file belong to the run.
-
-Two currencies (this is the crux of the study):
-  - Claude / OpenAI  -> $ comes from ccusage (it knows per-token prices)
-  - GLM on Modal     -> ccusage shows $0.00 (self-hosted). Real $ = GPU-seconds * rate,
-                        supplied via modal_costs.csv (preferred) or duration * MODAL_RATE.
+Inputs: results/manifest.csv + results/<outdir>/usage.json (ccusage session --json shape).
+Self-host detection: any model served via the `modal/` provider (e.g. modal/zai-org/GLM-5.2-FP8).
 """
-import csv, json, os, sys, glob, statistics
+import csv
+import json
+import os
+import statistics
+import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 
 RESULTS_DIR = os.environ.get("RESULTS_DIR", "./results")
-MODAL_COSTS = os.environ.get("MODAL_COSTS", "./modal_costs.csv")
-# Fallback only if modal_costs.csv is missing a row: $ = duration_s * MODAL_RATE_PER_SEC.
-# NOTE: duration overestimates GPU time (includes harness/network). Prefer modal_costs.csv.
-MODAL_RATE_PER_SEC = float(os.environ.get("MODAL_RATE_PER_SEC", "0") or 0)
-
-# Models whose $ must come from Modal GPU billing, not ccusage. Match by substring.
-GLM_MODELS = [m.strip() for m in os.environ.get(
-    "GLM_MODELS", "modal,glm,big-pickle").split(",") if m.strip()]
-
-# --- ccusage session --json schema: adjust these once you paste a real sample ---
-SESSION_ID_KEYS = ["sessionId", "session", "id"]
-INPUT_KEYS      = ["inputTokens", "input", "input_tokens", "inputTokensTotal"]
-OUTPUT_KEYS     = ["outputTokens", "output", "output_tokens", "outputTokensTotal"]
-COST_KEYS       = ["costUSD", "cost", "totalCost", "totalCostUSD"]
-LIST_WRAPPER_KEYS = ["sessions", "data", "opencode"]  # if json is a dict, sessions live here
+_GPU = ("gpu", "b200", "h200", "h100", "a100", "l40", "l4", "t4", "rtx")
 
 
-def _first(d, keys, default=None):
-    for k in keys:
-        if isinstance(d, dict) and k in d and d[k] is not None:
-            return d[k]
-    return default
+def is_self_hosted(model):
+    """Self-hosted (GPU-billed) = served via the modal/ provider."""
+    return model.lower().startswith("modal/")
 
 
-def load_sessions(path):
-    """Return dict: session_id -> {'in':int,'out':int,'cost':float}."""
+def load_usage(outdir):
+    """(tokens_in, tokens_out, ccusage_cost) for a run from its usage.json."""
     try:
-        with open(path) as f:
-            raw = json.load(f)
+        with open(os.path.join(outdir, "usage.json")) as f:
+            sessions = json.load(f).get("sessions", [])
     except Exception:
-        return {}
-    if isinstance(raw, dict):
-        rows = None
-        for k in LIST_WRAPPER_KEYS:
-            if isinstance(raw.get(k), list):
-                rows = raw[k]; break
-        rows = rows if rows is not None else [raw]
-    else:
-        rows = raw
-    out = {}
-    for i, r in enumerate(rows):
-        if not isinstance(r, dict):
-            continue
-        sid = _first(r, SESSION_ID_KEYS, default=f"_idx{i}")
-        out[str(sid)] = {
-            "in":   int(_first(r, INPUT_KEYS, 0) or 0),
-            "out":  int(_first(r, OUTPUT_KEYS, 0) or 0),
-            "cost": float(_first(r, COST_KEYS, 0.0) or 0.0),
-        }
-    return out
+        return 0, 0, 0.0
+    tin = sum(int(s.get("inputTokens", 0) or 0) for s in sessions)
+    tout = sum(int(s.get("outputTokens", 0) or 0) for s in sessions)
+    cost = sum(float(s.get("totalCost", 0) or 0) for s in sessions)
+    return tin, tout, cost
 
 
-def snap_path(n):
-    return os.path.join(RESULTS_DIR, f"ccusage.{int(n):04d}.json")
+def modal_window_usd(starts, ends):
+    """Real Modal GPU $ for [min(starts), max(ends)] via modal.billing (ImportError if absent)."""
+    from modal.billing import workspace_billing_report
+    s = datetime.fromtimestamp(min(starts), timezone.utc)
+    e = datetime.fromtimestamp(max(ends), timezone.utc)
+    total = 0.0
+    for item in workspace_billing_report(start=s, end=e, resolution="h", tag_names=["*"]):
+        by_res = getattr(item, "cost_by_resource", None)
+        if isinstance(by_res, dict):
+            total += float(sum(v for k, v in by_res.items() if any(g in k.lower() for g in _GPU)))
+        else:
+            total += float(getattr(item, "cost", 0) or 0)
+    return total
 
 
-def session_delta(before_path, after_path):
-    """Return (new_session_ids, after_sessions_dict)."""
-    before = load_sessions(before_path)
-    after = load_sessions(after_path)
-    new_ids = set(after) - set(before)
-    return new_ids, after
-
-
-def load_run_usage(outdir):
-    """Return (session_ids, sessions_dict) for one benchmark run."""
-    usage = os.path.join(outdir, "usage.json")
-    if os.path.exists(usage):
-        sess = load_sessions(usage)
-        return set(sess.keys()), sess
-    after = os.path.join(outdir, "ccusage.after.json")
-    before = os.path.join(outdir, "ccusage.before.json")
-    if os.path.exists(after):
-        return session_delta(before, after)
-    return set(), {}
-
-
-def load_modal_costs():
-    """Return dict: (task,model,run) -> gpu_cost_usd (or None)."""
-    costs = {}
-    if not os.path.exists(MODAL_COSTS):
-        return costs
-    with open(MODAL_COSTS) as f:
-        for row in csv.DictReader(f):
-            key = (row["task"], row["model"], str(row["run"]))
-            if row.get("gpu_cost_usd"):
-                costs[key] = float(row["gpu_cost_usd"])
-            elif row.get("gpu_seconds") and MODAL_RATE_PER_SEC:
-                costs[key] = float(row["gpu_seconds"]) * MODAL_RATE_PER_SEC
-    return costs
-
-
-def is_glm(model):
-    return any(g in model for g in GLM_MODELS)
-
-
-def _fmt_dur(seconds):
-    s = float(seconds)
-    return f"{s/60:.1f}m" if s >= 60 else f"{s:.0f}s"
-
-
-def _fmt_int(n):
-    n = int(n)
-    if n >= 1_000_000:
-        return f"{n/1e6:.1f}M"
-    if n >= 10_000:
-        return f"{n/1e3:.0f}k"
-    return str(n)
+def _f(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
 def main():
@@ -135,104 +69,81 @@ def main():
     if not os.path.exists(manifest):
         sys.exit(f"no manifest at {manifest} — run run_bench.sh first")
 
-    modal_costs = load_modal_costs()
     detailed = []
+    times = defaultdict(lambda: ([], []))   # model -> (starts, ends)
     with open(manifest) as f:
         for row in csv.DictReader(f):
-            outdir = row.get("outdir", "")
-            if outdir:
-                new_ids, sess = load_run_usage(outdir)
-            elif row.get("snap_index", "").strip():
-                snap = int(row["snap_index"])
-                new_ids, sess = session_delta(snap_path(snap - 1), snap_path(snap))
-            else:
-                new_ids, sess = set(), {}
-            tin  = sum(sess[s]["in"]   for s in new_ids)
-            tout = sum(sess[s]["out"]  for s in new_ids)
-            ccost = sum(sess[s]["cost"] for s in new_ids)
-
-            key = (row["task"], row["model"], row["run"])
-            if is_glm(row["model"]):
-                gpu = modal_costs.get(key)
-                if gpu is None and MODAL_RATE_PER_SEC:
-                    gpu = float(row["duration_s"]) * MODAL_RATE_PER_SEC
-                if gpu is not None:
-                    cost_final, cost_src = gpu, "modal_gpu"          # real GPU spend (best)
-                else:
-                    cost_final, cost_src = ccost, "ccusage_estimate"  # fallback: hosted-price est., NOT GPU
-            else:
-                cost_final = ccost
-                cost_src = "ccusage_tokens"
-
+            m = row["model"]
+            tin, tout, ccost = load_usage(row.get("outdir", ""))
+            s, e = _f(row.get("start")), _f(row.get("end"))
+            if s:
+                times[m][0].append(s)
+            if e:
+                times[m][1].append(e)
             detailed.append({
-                "task": row["task"], "model": row["model"], "run": row["run"],
-                "status": row["status"], "duration_s": row["duration_s"],
+                "task": row["task"], "model": m, "run": row["run"],
+                "status": row["status"], "duration_s": row.get("duration_s", ""),
                 "tokens_in": tin, "tokens_out": tout,
-                "cost_tokens": round(ccost, 6), "cost_final": round(cost_final, 6),
-                "cost_source": cost_src, "n_sessions": len(new_ids),
+                "cost_usd": "" if is_self_hosted(m) else round(ccost, 6),
+                "cost_basis": "gpu_amortized" if is_self_hosted(m) else "api_ccusage",
             })
+    if not detailed:
+        sys.exit("manifest has no rows")
 
-    det_path = os.path.join(RESULTS_DIR, "results_detailed.csv")
-    with open(det_path, "w", newline="") as f:
+    with open(os.path.join(RESULTS_DIR, "results_detailed.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(detailed[0].keys()))
-        w.writeheader(); w.writerows(detailed)
+        w.writeheader()
+        w.writerows(detailed)
 
-    # summary per model: success rate + $/successful-task (the number for James's graph)
     by_model = defaultdict(list)
     for d in detailed:
         by_model[d["model"]].append(d)
 
-    sum_rows = []
+    rows = []
     for model, runs in by_model.items():
         n = len(runs)
-        passes = [r for r in runs if r["status"] == "pass"]
-        fails = [r for r in runs if r["status"] == "fail"]
-        total_cost = sum(r["cost_final"] for r in runs)
-        pass_tokens_in = statistics.mean(r["tokens_in"] for r in passes) if passes else 0
-        pass_tokens_out = statistics.mean(r["tokens_out"] for r in passes) if passes else 0
-        sum_rows.append({
-            "model": model,
-            "runs": n,
-            "passes": len(passes),
-            "fails": len(fails),
-            "success_rate": round(len(passes) / n, 3) if n else 0,
-            "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)) if n else 0,
-            "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)) if n else 0,
-            "avg_tokens_in_pass": round(pass_tokens_in) if passes else None,
-            "avg_tokens_out_pass": round(pass_tokens_out) if passes else None,
-            "avg_duration_s": round(statistics.mean(float(r["duration_s"]) for r in runs), 1) if n else 0,
-            "median_duration_s": round(statistics.median(float(r["duration_s"]) for r in runs), 1) if n else 0,
-            "total_duration_s": round(sum(float(r["duration_s"]) for r in runs), 1),
-            "total_cost_usd": round(total_cost, 4),
-            "cost_per_successful_task": round(total_cost / len(passes), 4) if passes else None,
-            "missing_gpu_cost": sum(1 for r in runs if r["cost_source"] == "MISSING"),
-            "ccusage_estimate_runs": sum(1 for r in runs if r["cost_source"] == "ccusage_estimate"),
-        })
+        passes = sum(1 for r in runs if r["status"] == "pass")
+        durs = [_f(r["duration_s"]) for r in runs if _f(r["duration_s"]) is not None]
+        row = {
+            "model": model, "runs": n, "passes": passes,
+            "success_rate": round(passes / n, 3),
+            "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)),
+            "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)),
+            "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
+            "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
+        }
+        if is_self_hosted(model):
+            starts, ends = times[model]
+            if not (starts and ends):
+                row["cost_basis"] = "gpu_pending (no timestamps)"
+            else:
+                try:
+                    w_usd = modal_window_usd(starts, ends)
+                    row["cost_basis"] = "gpu_billing"
+                    row["total_cost_usd"] = round(w_usd, 4)
+                    if passes:
+                        row["cost_per_successful_task"] = round(w_usd / passes, 4)
+                except ImportError:
+                    row["cost_basis"] = "gpu_pending (pip install modal && modal setup)"
+                except Exception as ex:
+                    row["cost_basis"] = f"gpu_pending ({type(ex).__name__})"
+        else:
+            total = sum(r["cost_usd"] for r in runs if r["cost_usd"] != "")
+            row["total_cost_usd"] = round(total, 4)
+            row["cost_per_successful_task"] = round(total / passes, 4) if passes else ""
+            row["cost_basis"] = "api_ccusage"
+        rows.append(row)
 
-    sum_path = os.path.join(RESULTS_DIR, "summary.csv")
-    with open(sum_path, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=list(sum_rows[0].keys()))
-        w.writeheader(); w.writerows(sum_rows)
+    with open(os.path.join(RESULTS_DIR, "summary.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
 
-    print(f"wrote {det_path}")
-    print(f"wrote {sum_path}\n")
-    for r in sorted(sum_rows, key=lambda x: (x["cost_per_successful_task"] is None,
-                                             x["cost_per_successful_task"] or 0)):
-        cpt = r["cost_per_successful_task"]
-        warn_parts = []
-        if r["missing_gpu_cost"]:
-            warn_parts.append(f"{r['missing_gpu_cost']} missing GPU cost")
-        if r["ccusage_estimate_runs"]:
-            warn_parts.append(f"{r['ccusage_estimate_runs']} ccusage_estimate (not real GPU $)")
-        warn = f"  ⚠ {', '.join(warn_parts)}" if warn_parts else ""
-        rec = f"{r['passes']}/{r['runs']}"
-        print(
-            f"  {r['model']:<30} success={r['success_rate']:<5} ({rec}) "
-            f"$/task={cpt if cpt is not None else 'n/a':<8} "
-            f"total=${r['total_cost_usd']:<7} "
-            f"in={_fmt_int(r['avg_tokens_in']):<5} out={_fmt_int(r['avg_tokens_out']):<5} "
-            f"time={_fmt_dur(r['avg_duration_s']):<6}{warn}"
-        )
+    print("wrote results/results_detailed.csv + results/summary.csv\n")
+    for r in rows:
+        print(f"  {r['model']:<32} {r['passes']}/{r['runs']} pass  "
+              f"{str(r['avg_duration_s']):<6}s  in={r['avg_tokens_in']:<6} out={r['avg_tokens_out']:<6} "
+              f"total=${str(r['total_cost_usd'] or '—'):<8} $/task=${str(r['cost_per_successful_task'] or '—'):<8} [{r['cost_basis']}]")
 
 
 if __name__ == "__main__":

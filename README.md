@@ -10,11 +10,14 @@ Running every model inside opencode isolates the **model** as the only variable.
 (Product overhead can still be noted qualitatively in the write-up.)
 
 ## The two-currency cost rule
-- **Claude / OpenAI / Gemini** → `$` comes from `ccusage` (it knows per-token prices).
-- **GLM on Modal** → real `$` = GPU-seconds × Modal rate, filled via `modal_costs.csv`
-  (export from the Modal dashboard). If that's missing, aggregate falls back to
-  ccusage's per-token *estimate* and labels it `ccusage_estimate` — that is a
-  hosted-price equivalent, **NOT** your actual GPU spend.
+Every cost carries a `cost_basis` so it's auditable.
+- **Claude / OpenAI / Gemini** → `cost = tokens × per-token price` (that's how the provider
+  actually bills). From ccusage. `cost_basis = api_ccusage`.
+- **GLM on Modal** → self-host, so you pay **GPU time** (the endpoint bills even while idle),
+  not tokens. The honest number is the **real Modal spend for the benchmark window**,
+  amortized: `cost/task = window_$ ÷ successful_tasks`. `cost_basis = gpu_billing`.
+  `aggregate.py` fetches `window_$` automatically from `modal.billing` (needs `pip install
+  modal && modal setup`). This captures idle and shrinks with `--jobs` — the crux of self-host vs API.
 
 ---
 
@@ -22,6 +25,8 @@ Running every model inside opencode isolates the **model** as the only variable.
 - **opencode** installed (`opencode --version`).
 - **python3** (tasks may need `pytest`, `dbt`, etc. — the agent installs those itself per task).
 - **macOS:** `brew install coreutils` (for `gtimeout`).
+- **Optional helpers:** `pip install -r requirements.txt` (`modal` for real GLM cost,
+  `datasets` for SWE-bench) — then `modal setup` to auth. Not needed for a basic run.
 - Provider credentials (next step).
 
 ## 2. Setup
@@ -56,7 +61,7 @@ opencode run "say hi" -m modal/zai-org/GLM-5.2-FP8
 ./run_bench.sh --runs 3
 ```
 
-### Flags (all long-form; env vars work as fallbacks)
+### Flags (all long-form)
 | Flag | Meaning | Default |
 |---|---|---|
 | `--runs N` | repeats per (task, model) — agents are stochastic | 3 |
@@ -64,28 +69,31 @@ opencode run "say hi" -m modal/zai-org/GLM-5.2-FP8
 | `--tasks DIR` | tasks directory | `./tasks` |
 | `-j, --jobs N` | run up to N (task,model,run) jobs in parallel | 1 |
 | `--timeout SECS` | kill a stuck/looping agent | 900 |
-| `--glm "modal,GLM"` | model substrings routed to Modal GPU cost | `modal,GLM` |
 | `--retries N` | retries on opencode server error | 2 |
 | `--delay SECS` | pause between sequential runs (`--jobs 1` only) | 2 |
-| `--keep-repo` | keep the mutated repo per run | off |
+| `--delete-repo` | discard the mutated repo (default keeps it in `results/<run>/final_repo`) | off |
 | `--no-aggregate` | skip `aggregate.py` at the end | off |
 
 `./run_bench.sh --help` prints this.
 
-## 4. Fill the real Modal GPU cost
-After a run, get GPU-seconds/$ from the Modal dashboard for each run's window
-(`results/manifest.csv` has `start`/`end` per run), then:
+## 4. GLM cost — automatic
+GLM cost = **real Modal spend for the window ÷ successful tasks**, fetched **automatically**
+by `aggregate.py` from `modal.billing`. One-time setup:
 ```bash
-cp modal_costs.example.csv modal_costs.csv
-# edit: one row per (task,model,run) with gpu_cost_usd (or gpu_seconds + MODAL_RATE_PER_SEC)
-GLM_MODELS="modal,GLM" python3 aggregate.py    # re-aggregate with real GPU cost
+pip install modal && modal setup     # install + auth; then run as usual
 ```
+Basis becomes `gpu_billing`. Without modal installed/authed it shows `gpu_pending`
+(API costs still compute).
 
 ## 5. Outputs
-- `results/results_detailed.csv` — per (task,model,run): status, tokens, `cost_tokens`,
-  `cost_final`, `cost_source` (`modal_gpu` | `ccusage_estimate` | `ccusage_tokens`).
-- `results/summary.csv` — per model: `success_rate`, pass/fail counts, avg tokens in/out,
-  avg/median duration, total cost, **`cost_per_successful_task`**.
+- `results/results_detailed.csv` — per (task,model,run): status, tokens, `cost_usd`,
+  `cost_basis` (`api_ccusage` for APIs; GLM per-run is `gpu_amortized` — see summary).
+- `results/summary.csv` — per model: `runs`, `passes`, `success_rate`, `avg_tokens_in/out`,
+  `avg_duration_s`, `total_cost_usd`, **`cost_per_successful_task`**, `cost_basis`
+  (`gpu_billing` for GLM, `api_ccusage` for APIs).
+- `results/<task>__<model>__runN/` — per run: `output.log` (agent transcript, JSON),
+  `verify.log`, `setup.log`, `usage.json`, and `final_repo/` (the agent's edited code —
+  handy for eyeballing output quality; pass `--delete-repo` to skip and save disk).
 
 ## 6. Clean up
 ```bash
@@ -244,9 +252,8 @@ directly (Task tool / `@task-smith`) when you already know the repo and bug.
 opencode.jsonc          # provider config (committed, secrets via {env:...})
 .env.example            # keys template -> copy to .env
 run_bench.sh            # runs task × model × run; auto-aggregates
-aggregate.py            # manifest + ccusage snapshots + modal_costs -> CSVs
+aggregate.py            # manifest + per-run usage.json -> cost CSVs (API=tokens, GLM=GPU)
 clean.sh                # wipe results/
-modal_costs.example.csv # real GPU cost template
 make_swebench_task.py   # generate a SWE-bench Verified task (see SWEBENCH.md)
 tasks/demo-*/           # committed tasks: prompt.txt, verify.sh, [setup.sh], [repo/ | repo.path | repo.git]
 tasks/<other>/          # any non-demo task -> git-ignored (private/local)
@@ -263,8 +270,13 @@ results/                # logs, ccusage snapshots, *.csv  (gitignored)
   (no TTY status spam; permissions auto-approved for unattended runs).
 - **`big-pickle`** is opencode's own hosted model, **not** the Modal GLM — don't confuse
   its `$0.00` ccusage cost with GLM's.
-- **`cost_source=ccusage_estimate`** means the number is a hosted-price estimate, not real
-  GPU spend — fill `modal_costs.csv` to get `modal_gpu`.
-- **`$/task` is $0 after a parallel run** — older runs may lack per-job `usage.json`.
-  Backfill best-effort from the global opencode DB, then re-aggregate:
-  `python3 backfill_usage.py && python3 aggregate.py`
+- **GLM `$/task` looks huge** → the idle tax. The container bills even when no task runs,
+  so the window's total spend ÷ few tasks is large. Run tasks densely / in parallel
+  (`--jobs`) within one window so the same spend covers more tasks.
+- **Idle cost is real** → the 8×B200 endpoint bills ~$52/hr whenever it's up (≈$1.25k/day
+  24/7), regardless of tasks. Turn it off when not benchmarking.
+- **GLM shows `gpu_pending`** → `pip install modal && modal setup` (aggregate.py fetches the
+  real GPU $ from `modal.billing`); API costs compute without it.
+- **Anthropic/OpenAI 404 "Not Found"** → a stray `*_BASE_URL` env var (e.g. Claude Desktop's
+  `ANTHROPIC_BASE_URL` without `/v1`). `run_bench.sh` unsets these; if running opencode by
+  hand, `unset ANTHROPIC_BASE_URL`.

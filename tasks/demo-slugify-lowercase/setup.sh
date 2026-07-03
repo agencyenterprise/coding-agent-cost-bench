@@ -8,6 +8,6 @@ p = pathlib.Path("slugify/slugify.py")
 t = p.read_text()
 old = "        text = text.lower()"
 assert t.count(old) == 1, "anchor not found — slugify changed; update setup.sh"
-p.write_text(t.replace(old, "        text = text  # injected bug", 1))
+p.write_text(t.replace(old, "        text = text", 1))
 print("injected: lowercase step skipped")
 PY

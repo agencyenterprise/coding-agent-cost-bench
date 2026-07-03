@@ -6,3 +6,4 @@ __pycache__/
 # tasks: only demo-* are shared; everything else (private repos, WIP) stays local
 tasks/*
 !tasks/demo-*/
+.cache/

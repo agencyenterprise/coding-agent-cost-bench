@@ -1,4 +1,0 @@
-task,model,run,gpu_seconds,gpu_cost_usd
-sample-median-bug,big-pickle,1,,
-sample-median-bug,big-pickle,2,,
-sample-median-bug,big-pickle,3,,

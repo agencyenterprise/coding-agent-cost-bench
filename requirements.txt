@@ -1,1 +1,5 @@
-datasets
+# Optional. The core harness (run_bench.sh) needs only python3 stdlib + opencode + `npx ccusage`.
+# Per-task deps (pytest, dbt, ...) are installed by the agent inside each cloned repo.
+
+modal        # aggregate.py — real GLM $ via modal.billing  (then: modal setup, to auth)
+datasets     # make_swebench_task.py — pull a real SWE-bench Verified instance

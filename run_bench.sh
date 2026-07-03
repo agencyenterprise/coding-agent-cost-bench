@@ -1,93 +1,85 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Cost/quality benchmark for coding agents.
-# Same tasks, many models, ONE harness (opencode) -> clean apples-to-apples.
+# Cost/quality benchmark for coding agents: same tasks, many models, one harness
+# (opencode). Writes results/manifest.csv + per-run logs, then aggregate.py ->
+# results/summary.csv (cost per successful task).
 #
-# A task is a dir under tasks/ with:
-#   prompt.txt   (required) the instruction given to the agent
+# A task is a dir under tasks/<name>/:
+#   prompt.txt   (required) instruction given to the agent
 #   verify.sh    (optional) exit 0 = success; runs in the work dir
 #   setup.sh     (optional) runs in the work dir BEFORE the agent; gets $TASK_REPO_SRC
-#   repo/        (optional) self-contained starting code (copied fresh)
-#   repo.path    (optional) abs path to an external git repo -> cloned fresh per run
-#
-# Usage:
-#   ./run_bench.sh [options]
-#     -r, --runs N          repeats per (task,model)          [default 3]
-#     -m, --models "a b"    space- or comma-separated models  [default: built-in set]
-#     -t, --tasks DIR       tasks directory                   [default ./tasks]
-#     -j, --jobs N          parallel (task,model,run) jobs    [default 1]
-#         --timeout SECS    kill a stuck agent                [default 900]
-#         --glm "modal,GLM" substrings routed to Modal GPU $  [default modal,GLM]
-#         --retries N       retries on opencode server error  [default 2]
-#         --delay SECS      pause between sequential runs     [default 2]
-#         --keep-repo       keep the mutated repo per run
-#         --no-aggregate    skip aggregate.py at the end
-#     -h, --help
-#
-# Env vars are accepted as fallbacks (MODELS, RUNS_PER_PAIR, TIMEOUT_SECS, ...).
+#   one source:  repo/ (self-contained) | repo.path (local git) | repo.git (<url> [ref])
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-# ---- defaults (env fallback, overridden by CLI args below) -----------------
-MODELS_STR="${MODELS:-}"
-TASKS_DIR="${TASKS_DIR:-./tasks}"
-RESULTS_DIR="${RESULTS_DIR:-./results}"
-RUNS_PER_PAIR="${RUNS_PER_PAIR:-3}"
-TIMEOUT_SECS="${TIMEOUT_SECS:-900}"
-KEEP_REPO="${KEEP_REPO:-0}"
-CCUSAGE="${CCUSAGE:-npx ccusage}"
-GLM_MODELS="${GLM_MODELS:-modal,GLM}"
-RETRIES="${RETRIES:-2}"
-RUN_DELAY="${RUN_DELAY:-2}"
-JOBS="${JOBS:-1}"
+MODELS_STR=""
+TASKS_DIR="./tasks"
+RUNS=3
+TIMEOUT_SECS=900
+RETRIES=2
+RUN_DELAY=2
+JOBS=1
+KEEP_REPO=1
 AGGREGATE=1
+CCUSAGE="npx -y ccusage"   # -y: auto-install without the interactive prompt (would hang the run)
 
-usage() { sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() {
+  cat >&2 <<'EOF'
+Usage: ./run_bench.sh [options]
+  -r, --runs N        repeats per (task,model)       [3]
+  -m, --models "a b"  space/comma-separated models   [built-in set]
+  -t, --tasks DIR     tasks directory                [./tasks]
+  -j, --jobs N        parallel jobs                  [1]
+      --timeout SECS  kill a stuck agent             [900]
+      --retries N     retries on opencode server err [2]
+      --delay SECS    pause between sequential runs  [2]
+      --delete-repo   discard the mutated repo (default: keep in results/<run>/final_repo)
+      --no-aggregate  skip aggregate.py at the end
+  -h, --help
+EOF
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -r|--runs)       RUNS_PER_PAIR="$2"; shift 2;;
-    -m|--models)     MODELS_STR="$2"; shift 2;;
-    -t|--tasks)      TASKS_DIR="$2"; shift 2;;
-    -j|--jobs)       JOBS="$2"; shift 2;;
-    --timeout)       TIMEOUT_SECS="$2"; shift 2;;
-    --glm)           GLM_MODELS="$2"; shift 2;;
-    --retries)       RETRIES="$2"; shift 2;;
-    --delay)         RUN_DELAY="$2"; shift 2;;
-    --keep-repo)     KEEP_REPO=1; shift;;
-    --no-aggregate)  AGGREGATE=0; shift;;
-    -h|--help)       usage; exit 0;;
+    -r|--runs) RUNS="$2"; shift 2;;
+    -m|--models) MODELS_STR="$2"; shift 2;;
+    -t|--tasks) TASKS_DIR="$2"; shift 2;;
+    -j|--jobs) JOBS="$2"; shift 2;;
+    --timeout) TIMEOUT_SECS="$2"; shift 2;;
+    --retries) RETRIES="$2"; shift 2;;
+    --delay) RUN_DELAY="$2"; shift 2;;
+    --delete-repo) KEEP_REPO=0; shift;;
+    --no-aggregate) AGGREGATE=0; shift;;
+    -h|--help) usage; exit 0;;
     *) echo "unknown arg: $1" >&2; usage; exit 1;;
   esac
 done
 
 if [ -n "$MODELS_STR" ]; then
-  MODELS_STR="${MODELS_STR//,/ }"   # accept comma- or space-separated lists
-  read -r -a MODELS <<< "$MODELS_STR"
+  read -r -a MODELS <<< "${MODELS_STR//,/ }"
 else
   MODELS=(
-    "modal/zai-org/GLM-5.2-FP8"      # GLM via your Modal endpoint (provider/model)
-    "anthropic/claude-opus-4-8"      # confirm exact IDs with: opencode models
-    "anthropic/claude-fable-5"
-    "openai/gpt-5-codex"
-    "google/gemini-2.5-pro"
+    "modal/zai-org/GLM-5.2-FP8"      # the challenger (self-host)
+    "anthropic/claude-opus-4-8"      # frontier baseline (latest Opus)
+    # expand later: "openai/gpt-5-codex"  "google/gemini-3-flash-preview"
   )
 fi
-# ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export OPENCODE_CONFIG="${OPENCODE_CONFIG:-$SCRIPT_DIR/opencode.jsonc}"   # honored from /tmp too
-export NO_COLOR="${NO_COLOR:-1}"                                          # stop ANSI codes in logs
+RESULTS_DIR="$SCRIPT_DIR/results"
+CACHE_DIR="$SCRIPT_DIR/.cache/repos"   # remote repos cloned once, reused per run
+export OPENCODE_CONFIG="$SCRIPT_DIR/opencode.jsonc"   # honored from /tmp clones too
+export NO_COLOR=1                                     # no ANSI in logs
+unset ANTHROPIC_BASE_URL OPENAI_BASE_URL GOOGLE_BASE_URL 2>/dev/null || true  # avoid 404 hijack
 
-# preflight: fail fast if a selected provider's env vars are missing
+# preflight: fail fast if a selected provider's keys are missing
 _miss=""
-_need() { for v in "$@"; do [ -z "${!v:-}" ] && _miss="$_miss $v"; done; return 0; }
 for m in "${MODELS[@]}"; do
   case "$m" in
-    modal/*)     _need MODAL_ENDPOINT MODAL_KEY MODAL_SECRET;;
-    anthropic/*) _need ANTHROPIC_API_KEY;;
-    openai/*)    _need OPENAI_API_KEY;;
-    google/*)    _need GEMINI_API_KEY;;
+    modal/*)     for v in MODAL_ENDPOINT MODAL_KEY MODAL_SECRET; do [ -z "${!v:-}" ] && _miss="$_miss $v"; done;;
+    anthropic/*) [ -z "${ANTHROPIC_API_KEY:-}" ] && _miss="$_miss ANTHROPIC_API_KEY";;
+    openai/*)    [ -z "${OPENAI_API_KEY:-}" ]    && _miss="$_miss OPENAI_API_KEY";;
+    google/*)    [ -z "${GEMINI_API_KEY:-}" ]    && _miss="$_miss GEMINI_API_KEY";;
   esac
 done
 if [ -n "$_miss" ]; then
@@ -96,122 +88,93 @@ if [ -n "$_miss" ]; then
   exit 1
 fi
 
-mkdir -p "$RESULTS_DIR"
-RESULTS_DIR="$(cd "$RESULTS_DIR" && pwd)"
-now() { python3 -c 'import time; print(time.time())'; }         # macOS date lacks %N
-TO="$(command -v timeout || command -v gtimeout || true)"       # macOS: brew install coreutils
-
+mkdir -p "$RESULTS_DIR" "$CACHE_DIR"
+$CCUSAGE --help >/dev/null 2>&1 || true   # pre-install ccusage once so per-run usage.json is clean JSON
+TO="$(command -v timeout || command -v gtimeout || true)"   # macOS: brew install coreutils
+now() { python3 -c 'import time; print(time.time())'; }
 MANIFEST="$RESULTS_DIR/manifest.csv"
-echo "task,model,run,outdir,snap_index,start,end,duration_s,status" > "$MANIFEST"
+echo "task,model,run,outdir,start,end,duration_s,status" > "$MANIFEST"
 
-prepare_work() {
+_log() { echo "$*" >&2; }
+
+_manifest_append() {   # append one CSV line under a lock (safe with --jobs)
+  local lock="$RESULTS_DIR/.manifest.lock"
+  while ! mkdir "$lock" 2>/dev/null; do sleep 0.05; done
+  echo "$1" >> "$MANIFEST"; rmdir "$lock"
+}
+
+prepare_work() {   # populate $2 (work dir) from the task's source; echo external src path (or "")
   local task_abs="$1" work="$2"
   if [ -d "$task_abs/repo" ]; then
     cp -R "$task_abs/repo/." "$work/"; echo ""
   elif [ -f "$task_abs/repo.path" ]; then
     local src; src="$(cat "$task_abs/repo.path")"; src="${src/#\~/$HOME}"
-    if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      git clone --local --quiet "$src" "$work"
-    else
-      cp -R "$src/." "$work/"
-    fi
-    echo "$src"
+    git clone --local --quiet "$src" "$work"; echo "$src"
   elif [ -f "$task_abs/repo.git" ]; then
-    local url ref; read -r url ref < "$task_abs/repo.git"   # "<url> [ref]"  (ref = branch/tag/SHA)
-    git clone --quiet "$url" "$work"
-    [ -n "${ref:-}" ] && git -C "$work" -c advice.detachedHead=false checkout --quiet "$ref"
+    local url ref key cache lock n
+    read -r url ref < "$task_abs/repo.git"
+    key="$(echo "${url}__${ref:-HEAD}" | tr -c 'A-Za-z0-9' '_')"
+    cache="$CACHE_DIR/$key"; lock="$cache.lock"
+    while ! mkdir "$lock" 2>/dev/null; do sleep 0.2; done      # populate cache once (safe under --jobs)
+    if [ ! -d "$cache/.git" ]; then
+      rm -rf "$cache"; n=1
+      until git clone --quiet "$url" "$cache" 2>/dev/null; do
+        [ "$n" -ge 3 ] && { rmdir "$lock"; return 1; }          # give up after 3 tries
+        n=$((n + 1)); sleep 3
+      done
+      [ -n "${ref:-}" ] && git -C "$cache" -c advice.detachedHead=false checkout --quiet "$ref"
+    fi
+    rmdir "$lock"
+    git clone --local --quiet "$cache" "$work"                 # fast local clone from cache
     echo ""
-  else
-    echo ""
-  fi
+  else echo ""; fi
 }
 
-_manifest_append() {
-  local line="$1" lock="$RESULTS_DIR/.manifest.lock"
-  while ! mkdir "$lock" 2>/dev/null; do sleep 0.05; done
-  echo "$line" >> "$MANIFEST"
-  rmdir "$lock"
+# ccusage reads $HOME/.local/share/opencode/opencode.db (ignores XDG). Copy this run's
+# isolated DB into a temp HOME so usage.json belongs to this job alone.
+_snapshot_usage() {
+  local state_dir="$1" outfile="$2" db="$1/opencode/opencode.db" home
+  [ -f "$db" ] || { echo '{"sessions":[]}' > "$outfile"; return 0; }
+  command -v sqlite3 >/dev/null 2>&1 && sqlite3 "$db" 'PRAGMA wal_checkpoint(FULL);' 2>/dev/null || true
+  home="$(mktemp -d)"; mkdir -p "$home/.local/share/opencode"
+  cp "$db" "$home/.local/share/opencode/"
+  cp "$state_dir"/opencode/opencode.db-wal "$home/.local/share/opencode/" 2>/dev/null || true
+  cp "$state_dir"/opencode/opencode.db-shm "$home/.local/share/opencode/" 2>/dev/null || true
+  HOME="$home" $CCUSAGE opencode session --json > "$outfile" 2>/dev/null || true
+  python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$outfile" 2>/dev/null \
+    || echo '{"sessions":[]}' > "$outfile"   # guard: never leave non-JSON in usage.json
+  rm -rf "$home"
 }
 
-_running_jobs() {
-  jobs -pr | wc -l | tr -d ' '
-}
-
-_log() { echo "$*" >&2; }
-
-# ccusage always reads $HOME/.local/share/opencode/opencode.db (ignores XDG_DATA_HOME).
-# Copy this run's isolated DB into a temp HOME so usage belongs to this job only.
-_snapshot_run_usage() {
-  local state_dir="$1" outfile="$2"
-  local db="$state_dir/opencode/opencode.db"
-  if [ ! -f "$db" ]; then
-    echo '{"sessions":[]}' > "$outfile"
-    return 0
-  fi
-  if command -v sqlite3 >/dev/null 2>&1; then
-    sqlite3 "$db" 'PRAGMA wal_checkpoint(FULL);' 2>/dev/null || true
-  fi
-  local fake_home
-  fake_home="$(mktemp -d)"
-  mkdir -p "$fake_home/.local/share/opencode"
-  cp "$db" "$fake_home/.local/share/opencode/"
-  cp "$state_dir/opencode/opencode.db-wal" "$fake_home/.local/share/opencode/" 2>/dev/null || true
-  cp "$state_dir/opencode/opencode.db-shm" "$fake_home/.local/share/opencode/" 2>/dev/null || true
-  HOME="$fake_home" $CCUSAGE opencode session --json > "$outfile" 2>/dev/null \
-    || echo '{"sessions":[]}' > "$outfile"
-  rm -rf "$fake_home"
-}
-
-_parallel_pids=()
-_kill_parallel_jobs() {
-  _log "interrupted — stopping background jobs..."
-  for pid in "${_parallel_pids[@]}"; do kill "$pid" 2>/dev/null; done
-  wait 2>/dev/null || true
-  exit 130
-}
-
-run_one_job() {
-  set +e
+run_one_job() {   # task_name task_abs prompt model run
+  set +e   # one bad task must not abort the whole batch
   local task_name="$1" task_abs="$2" prompt="$3" model="$4" run="$5"
-  local safe outdir work state_dir src agent_path start end dur status
-  local attempt max rc=0
-
+  local safe outdir work state_dir src agent_path start end dur status attempt
   safe="$(echo "$model" | tr '/ :' '___')"
-  outdir="$RESULTS_DIR/${task_name}__${safe}__run${run}"
-  mkdir -p "$outdir"
+  outdir="$RESULTS_DIR/${task_name}__${safe}__run${run}"; mkdir -p "$outdir"
   _log ">>> $task_name | $model | run $run"
 
-  work="$(mktemp -d)"
-  state_dir="$(mktemp -d)"
-  export XDG_DATA_HOME="$state_dir"
-  export XDG_STATE_HOME="$state_dir"
-  export XDG_CONFIG_HOME="$state_dir"
-
-  _log "    preparing workspace..."
+  work="$(mktemp -d)"; state_dir="$(mktemp -d)"
+  export XDG_DATA_HOME="$state_dir" XDG_STATE_HOME="$state_dir" XDG_CONFIG_HOME="$state_dir"
   src="$(prepare_work "$task_abs" "$work")"
 
   if [ -f "$task_abs/setup.sh" ]; then
-    mkdir -p "$outdir"
-    ( cd "$work" && TASK_REPO_SRC="$src" bash "$task_abs/setup.sh" ) \
-      > "$outdir/setup.log" 2>&1 || _log "    setup.sh FAILED (see $outdir/setup.log)"
+    ( cd "$work" && TASK_REPO_SRC="$src" bash "$task_abs/setup.sh" ) > "$outdir/setup.log" 2>&1 \
+      || _log "    setup.sh failed (see $outdir/setup.log)"
   fi
 
   agent_path="$PATH"
   [ -x "$work/.venv/bin/python" ] && agent_path="$work/.venv/bin:$agent_path"
 
-  _log "    running agent..."
-  attempt=1; max=$((RETRIES + 1))
+  attempt=1
   while :; do
     start="$(now)"
-    mkdir -p "$outdir"
     ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
-        opencode run "$prompt" -m "$model" --format json --auto \
-        > "$outdir/output.log" 2>&1 ) || true
+        opencode run "$prompt" -m "$model" --format json --auto > "$outdir/output.log" 2>&1 ) || true
     end="$(now)"
     perl -i -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$outdir/output.log" 2>/dev/null || true
-    if grep -qi "UnknownError\|Unexpected server error" "$outdir/output.log" && [ "$attempt" -lt "$max" ]; then
-      _log "    server error — retry $attempt/$((max-1)) after ${RUN_DELAY}s"
-      attempt=$((attempt + 1)); sleep "$RUN_DELAY"; continue
+    if grep -qi "UnknownError\|Unexpected server error" "$outdir/output.log" && [ "$attempt" -lt $((RETRIES + 1)) ]; then
+      _log "    server error — retry $attempt after ${RUN_DELAY}s"; attempt=$((attempt + 1)); sleep "$RUN_DELAY"; continue
     fi
     break
   done
@@ -219,66 +182,46 @@ run_one_job() {
 
   status="n/a"
   if [ -f "$task_abs/verify.sh" ]; then
-    mkdir -p "$outdir"
-    if ( cd "$work" && PATH="$agent_path" bash "$task_abs/verify.sh" ) > "$outdir/verify.log" 2>&1; then
-      status="pass"; else status="fail"; fi
+    ( cd "$work" && PATH="$agent_path" bash "$task_abs/verify.sh" ) > "$outdir/verify.log" 2>&1 \
+      && status="pass" || status="fail"
   fi
 
-  mkdir -p "$outdir"
-  _snapshot_run_usage "$state_dir" "$outdir/usage.json"
-
-  _manifest_append "$task_name,$model,$run,$outdir,,$start,$end,$dur,$status"
+  _snapshot_usage "$state_dir" "$outdir/usage.json"
+  _manifest_append "$task_name,$model,$run,$outdir,$start,$end,$dur,$status"
   _log "    done ($status, ${dur}s)"
   [ "$KEEP_REPO" = "1" ] && { mkdir -p "$outdir/final_repo"; cp -R "$work/." "$outdir/final_repo/"; }
   rm -rf "$work" "$state_dir"
-  [ "$JOBS" -le 1 ] && sleep "$RUN_DELAY"
-  return "$rc"
 }
 
-JOB_TASK_NAMES=()
-JOB_TASK_ABSS=()
-JOB_PROMPTS=()
-JOB_MODELS_LIST=()
-JOB_RUNS=()
+# build the job list (task x model x run)
+TN=() TA=() PR=() MD=() RN=()
 for task in "$TASKS_DIR"/*/; do
   [ -f "$task/prompt.txt" ] || continue
-  task_name="$(basename "$task")"
-  task_abs="$(cd "$task" && pwd)"
-  prompt="$(cat "$task/prompt.txt")"
+  tn="$(basename "$task")"; ta="$(cd "$task" && pwd)"; pr="$(cat "$task/prompt.txt")"
   for model in "${MODELS[@]}"; do
-    for run in $(seq 1 "$RUNS_PER_PAIR"); do
-      JOB_TASK_NAMES+=("$task_name")
-      JOB_TASK_ABSS+=("$task_abs")
-      JOB_PROMPTS+=("$prompt")
-      JOB_MODELS_LIST+=("$model")
-      JOB_RUNS+=("$run")
+    for run in $(seq 1 "$RUNS"); do
+      TN+=("$tn"); TA+=("$ta"); PR+=("$pr"); MD+=("$model"); RN+=("$run")
     done
   done
 done
 
 if [ "$JOBS" -le 1 ]; then
-  for i in "${!JOB_TASK_NAMES[@]}"; do
-    run_one_job "${JOB_TASK_NAMES[$i]}" "${JOB_TASK_ABSS[$i]}" "${JOB_PROMPTS[$i]}" \
-      "${JOB_MODELS_LIST[$i]}" "${JOB_RUNS[$i]}"
+  for i in "${!TN[@]}"; do
+    run_one_job "${TN[$i]}" "${TA[$i]}" "${PR[$i]}" "${MD[$i]}" "${RN[$i]}"
+    sleep "$RUN_DELAY"
   done
 else
-  echo "running ${#JOB_TASK_NAMES[@]} jobs with --jobs $JOBS"
-  trap '_kill_parallel_jobs' INT TERM
-  for i in "${!JOB_TASK_NAMES[@]}"; do
-    while [ "$(_running_jobs)" -ge "$JOBS" ]; do sleep 0.3; done
-    run_one_job "${JOB_TASK_NAMES[$i]}" "${JOB_TASK_ABSS[$i]}" "${JOB_PROMPTS[$i]}" \
-      "${JOB_MODELS_LIST[$i]}" "${JOB_RUNS[$i]}" &
-    _parallel_pids+=($!)
+  echo "running ${#TN[@]} jobs, $JOBS in parallel" >&2
+  pids=()
+  trap 'kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
+  for i in "${!TN[@]}"; do
+    while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
+    run_one_job "${TN[$i]}" "${TA[$i]}" "${PR[$i]}" "${MD[$i]}" "${RN[$i]}" &
+    pids+=($!)
   done
   wait || true
   trap - INT TERM
 fi
 
 echo "Done -> $MANIFEST"
-if [ "$AGGREGATE" = "1" ]; then
-  echo "== aggregating =="
-  GLM_MODELS="$GLM_MODELS" RESULTS_DIR="$RESULTS_DIR" python3 "$SCRIPT_DIR/aggregate.py" \
-    || echo "aggregate.py failed — run it manually"
-else
-  echo "Next: GLM_MODELS=\"$GLM_MODELS\" python3 aggregate.py"
-fi
+[ "$AGGREGATE" = "1" ] && RESULTS_DIR="$RESULTS_DIR" python3 "$SCRIPT_DIR/aggregate.py"

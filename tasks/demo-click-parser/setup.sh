@@ -10,6 +10,6 @@ p = pathlib.Path("src/click/parser.py")
 t = p.read_text()
 old = "        out.append(lex.token)"
 assert t.count(old) == 1, "anchor not found — click layout changed; update setup.sh"
-p.write_text(t.replace(old, "        pass  # injected bug", 1))
+p.write_text(t.replace(old, "        pass", 1))
 print("injected: except now drops the partial token")
 PY
