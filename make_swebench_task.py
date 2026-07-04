@@ -62,14 +62,25 @@ def main() -> None:
         f'git apply "{patch}"\n'
         'echo "applied SWE-bench test patch"\n'
     )
-    # verify: the FAIL_TO_PASS tests must pass.
-    tests = " ".join(f2p)
+    # verify: the FAIL_TO_PASS tests must pass. Read node ids from f2p.txt one-per-line into an
+    # array (space-safe: some ids contain spaces, e.g. pytest params like `[a: int]`), so a naive
+    # space-join doesn't split them into broken args.
+    f2p_path = (d / "f2p.txt").resolve()
     (d / "verify.sh").write_text(
         "#!/usr/bin/env bash\n"
+        "# run the SWE-bench FAIL_TO_PASS tests (node ids from f2p.txt, space-safe)\n"
         "set -e\n"
         'root="$(pwd)"; py="$root/.venv/bin/python"; [ -x "$py" ] || py=python3\n'
-        f'"$py" -m pytest {tests} -q\n'
+        "tests=()\n"
+        f'while IFS= read -r t; do [ -n "$t" ] && tests+=("$t"); done < "{f2p_path}"\n'
+        '"$py" -m pytest "${tests[@]}" -q\n'
     )
+    bad = [x for x in f2p if "::" not in x or " " in x or x.count("[") != x.count("]")]
+    if bad:
+        print(f"WARNING: {len(bad)}/{len(f2p)} FAIL_TO_PASS ids for {iid} look malformed "
+              f"(not a pytest node id, or a space / unbalanced brackets from dataset mangling) — "
+              f"e.g. {bad[0]!r}. verify.sh likely can't resolve them, so the task may never pass. "
+              "Pick a different instance.")
     (d / "prompt.txt").write_text(
         row["problem_statement"].strip()
         + "\n\nThis is a fresh clone with no virtualenv. Create `.venv` at the repo "
