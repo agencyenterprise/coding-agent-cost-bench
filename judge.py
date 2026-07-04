@@ -57,7 +57,8 @@ def blind(s):
 
 
 def transcript(outdir):
-    """Readable transcript from output.log (opencode JSON-lines): text says + tool calls."""
+    """Readable transcript from output.log — handles both opencode JSON-lines and Claude Code
+    stream-json: agent text + tool calls, either format."""
     out = []
     try:
         for line in open(os.path.join(outdir, "output.log")):
@@ -68,15 +69,23 @@ def transcript(outdir):
                 ev = json.loads(line)
             except Exception:
                 continue
-            part = ev.get("part", {}) if isinstance(ev, dict) else {}
-            if ev.get("type") == "text":
-                t = (part.get("text") or "").strip()
-                if t:
-                    out.append(f"· {t}")
-            elif ev.get("type") == "tool_use":
-                tool = part.get("tool", "?")
-                inp = part.get("state", {}).get("input", {})
-                out.append(f"  [{tool}] {json.dumps(inp)[:200]}")
+            t = ev.get("type") if isinstance(ev, dict) else None
+            if t == "text":                                    # opencode
+                txt = ((ev.get("part", {}) or {}).get("text") or "").strip()
+                if txt:
+                    out.append(f"· {txt}")
+            elif t == "tool_use":                              # opencode
+                part = ev.get("part", {}) or {}
+                inp = (part.get("state", {}) or {}).get("input", {})
+                out.append(f"  [{part.get('tool', '?')}] {json.dumps(inp)[:200]}")
+            elif t == "assistant":                             # Claude Code stream-json
+                for b in ev.get("message", {}).get("content", []) or []:
+                    if b.get("type") == "text":
+                        txt = (b.get("text") or "").strip()
+                        if txt:
+                            out.append(f"· {txt}")
+                    elif b.get("type") == "tool_use":
+                        out.append(f"  [{b.get('name', '?')}] {json.dumps(b.get('input', {}))[:200]}")
     except Exception:
         return ""
     return "\n".join(out)
@@ -177,54 +186,45 @@ def cost_model(summary):
 
 
 def efficiency(rows):
-    """Steps / tool-calls / output tokens per task per model, parsed from output.log. Same harness
-    and prompts, so it's model behavior: fewer turns to the fix = fewer output tokens = less
-    generation time = less GPU cost for the self-hosted model. `rows` = manifest DictReader rows."""
+    """Steps / tool-calls / output tokens per task, per (harness, model), from output.log (both
+    opencode and Claude Code formats). Same tasks/prompts, so it reflects agent behavior: fewer
+    turns to the fix = fewer output tokens = less generation time = less GPU cost. Reuses the
+    aggregate.py parsers so it can't drift from the cost numbers. `rows` = manifest DictReader rows."""
+    import aggregate
     agg = {}
     for r in rows:
         m = r["model"]
-        a = agg.setdefault(m, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
+        h = r.get("harness") or aggregate.harness_of(m)
+        key = (h, m)
+        a = agg.setdefault(key, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
         a["runs"] += 1
-        log = os.path.join(r.get("outdir", ""), "output.log")
-        if not os.path.exists(log):
-            continue
-        for line in open(log):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                ev = json.loads(line)
-            except Exception:
-                continue
-            t = ev.get("type")
-            if t == "step_start":
-                a["steps"] += 1
-            elif t == "tool_use":
-                a["tools"] += 1
-            elif t == "step_finish":
-                a["out"] += (ev.get("part", {}).get("tokens", {}) or {}).get("output", 0) or 0
+        st = aggregate.claude_stats(r.get("outdir", "")) if h == "claude" \
+            else aggregate.log_stats(r.get("outdir", ""))
+        a["steps"] += st["steps"]
+        a["tools"] += st["tools"]
+        a["out"] += st["out"]
     if not agg:
         return []
-    L = ["## Efficiency — how much work each model did\n",
-         "Same harness, same prompts — so this is **model behavior**, not setup. Per task, averaged:",
+    L = ["## Efficiency — how much work each run did\n",
+         "Same tasks and prompts, so this reflects **agent behavior** (model + harness). Per task, averaged:",
          "",
-         "| model | steps/task | tool calls/task | output tokens/task |",
-         "|---|---|---|---|"]
+         "| harness | model | steps/task | tool calls/task | output tokens/task |",
+         "|---|---|---|---|---|"]
     per = {}
-    for m, a in agg.items():
+    for (h, m), a in agg.items():
         n = max(a["runs"], 1)
-        per[m] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
-        L.append(f"| {m} | {per[m][0]:.0f} | {per[m][1]:.0f} | {per[m][2]:.0f} |")
+        per[(h, m)] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
+        L.append(f"| {h} | {aggregate.model_id(m)} | {per[(h, m)][0]:.0f} | "
+                 f"{per[(h, m)][1]:.0f} | {per[(h, m)][2]:.0f} |")
     L.append("")
-    gpu = next((m for m in agg if m.startswith("modal/")), None)
-    api = next((m for m in agg if not m.startswith("modal/")), None)
-    if gpu and api and per[api][1] and per[api][2]:
-        L += [f"The self-hosted model runs **~{per[gpu][1] / per[api][1]:.1f}× more tool calls** and emits "
-              f"**~{per[gpu][2] / per[api][2]:.1f}× more output tokens** for the same fixes — more "
-              "exploration and edits per task (the prose is comparable; the extra tokens are tool-call "
-              "arguments). That compounds cost: more output ⇒ more generation time ⇒ more GPU-seconds "
-              "billed. So the self-hosted model loses twice — pricier hardware *and* more work done on it.",
-              ""]
+    gpu = next((k for k in agg if aggregate.is_self_hosted(k[1])), None)
+    if gpu:
+        for k in agg:
+            if k != gpu and per[k][1] and per[k][2]:
+                L.append(f"- vs **{k[0]}:{aggregate.model_id(k[1])}**, the self-hosted run does "
+                         f"~{per[gpu][1] / per[k][1]:.1f}× the tool calls and ~{per[gpu][2] / per[k][2]:.1f}× "
+                         "the output tokens for the same fixes — more work per task, which compounds its GPU cost.")
+        L.append("")
     return L
 
 
@@ -311,12 +311,13 @@ def main():
         sys.exit("no results/manifest.csv — run run_bench.sh first")
 
     rows = list(csv.DictReader(open(manifest)))
-    verdicts = {}  # model -> list of (task, status, verdict)
+    verdicts = {}  # (harness, model) -> list of (task, status, verdict)
     for i, row in enumerate(rows, 1):
         m, task, outdir, status = row["model"], row["task"], row.get("outdir", ""), row["status"]
-        sys.stderr.write(f"[{i}/{len(rows)}] judging {task} | {m}\n")
+        h = row.get("harness", "opencode")
+        sys.stderr.write(f"[{i}/{len(rows)}] judging {task} | {h} | {m}\n")
         v = judge_run(model, task, status, blind(transcript(outdir)), blind(diff(outdir)))
-        verdicts.setdefault(m, []).append((task, status, v))
+        verdicts.setdefault(f"{h} · {m}", []).append((task, status, v))
 
     # build report: numbers (summary.csv) + qualitative notes
     lines = ["# Benchmark report\n", f"_Judge: {model} (blinded review)_\n"]

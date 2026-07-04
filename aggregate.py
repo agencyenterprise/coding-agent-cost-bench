@@ -189,23 +189,25 @@ def main():
     with open(manifest) as f:
         for row in csv.DictReader(f):
             m = row["model"]
+            h = row.get("harness") or harness_of(m)   # harness recorded by run_bench (fallback for old data)
+            key = (h, m)
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
-                intervals[m].append((s, e))
-            if m.startswith("claude-code/"):          # Claude Code reports its own cost/usage/turns
+                intervals[key].append((s, e))
+            if h == "claude":                          # Claude Code reports its own cost/usage/turns
                 st = claude_stats(row.get("outdir", ""))
                 tin, tout, ccost, cs, basis = st["tin"], st["tout"], st["cost"], st["call_s"], "claude_code"
-                for k in eff[m]:
-                    eff[m][k] += st[k]
+                for k in eff[key]:
+                    eff[key][k] += st[k]
             else:
                 tin, tout, ccost = load_usage(row.get("outdir", ""))
                 ls = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log
                 cs = ls["call_s"]
-                for k in eff[m]:
-                    eff[m][k] += ls[k]
+                for k in eff[key]:
+                    eff[key][k] += ls[k]
                 basis = "gpu_calls" if is_self_hosted(m) else "api_ccusage"
             detailed.append({
-                "task": row["task"], "harness": harness_of(m), "model": m, "run": row["run"],
+                "task": row["task"], "harness": h, "model": m, "run": row["run"],
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
                 "call_s": round(cs, 1),
@@ -223,27 +225,28 @@ def main():
 
     by_model = defaultdict(list)
     for d in detailed:
-        by_model[d["model"]].append(d)
+        by_model[(d["harness"], d["model"])].append(d)
 
     rows = []
-    for model, runs in by_model.items():
+    for (harness, model), runs in by_model.items():
+        key = (harness, model)
         n = len(runs)
         passes = sum(1 for r in runs if r["status"] == "pass")
         durs = [_f(r["duration_s"]) for r in runs if _f(r["duration_s"]) is not None]
-        active = union_seconds(intervals[model])                        # wall-clock union = sole-tenant uptime
-        overlap = sum(e - s for s, e in intervals[model]) - active      # time compressed by parallelism
+        active = union_seconds(intervals[key])                        # wall-clock union = sole-tenant uptime
+        overlap = sum(e - s for s, e in intervals[key]) - active      # time compressed by parallelism
         call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)
-        idle = max(0.0, active - call_total)                            # up but NOT generating
+        idle = max(0.0, active - call_total)                          # up but NOT generating
         row = {
-            "harness": harness_of(model), "model": model, "runs": n, "passes": passes,
+            "harness": harness, "model": model, "runs": n, "passes": passes,
             "success_rate": round(passes / n, 3),
             "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)),
             "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)),
             "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
             "call_s": round(call_total, 1) if call_total else "",
             "active_s": round(active, 1) if active else "",
-            "idle_s": round(idle, 1) if (intervals[model] and call_total) else "",
-            "overlap_s": round(overlap, 1) if intervals[model] else "",
+            "idle_s": round(idle, 1) if (intervals[key] and call_total) else "",
+            "overlap_s": round(overlap, 1) if intervals[key] else "",
             "gen_usd_task": "", "idle_usd_task": "", "sole_usd_task": "",
             "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
         }
@@ -275,7 +278,7 @@ def main():
     def _show(v):
         return "—" if v in ("", None) else str(v)
 
-    print("wrote results/results_detailed.csv + results/summary.csv")
+    print(f"wrote {RESULTS_DIR}/results_detailed.csv + {RESULTS_DIR}/summary.csv")
     print(f"(GLM GPU rate: ${GPU_HOURLY_USD:.2f}/hr, charged on endpoint call time only)\n")
     headers = ["harness", "model", "pass", "succ", "avg_s", "call_s", "uptime_s", "idle_s",
                "overlap_s", "tok_in", "tok_out", "$/task", "basis"]
@@ -308,18 +311,19 @@ def main():
             print(f"\n  {r['model']} — sole-tenant ${r['sole_usd_task']}/task  =  "
                   f"generation ${r['gen_usd_task']} (floor)  +  idle tax ${r['idle_usd_task']}")
 
-    # efficiency comparison (transposed: metric rows x model columns) + ratio vs GLM
-    order = [r["model"] for r in rows]
-    glm = next((m for m in order if is_self_hosted(m)), None)
-    short = lambda m: ("cc:" if m.startswith("claude-code/") else "") + m.split("/")[-1]
-    others = [m for m in order if m != glm]
+    # efficiency comparison (transposed: metric rows x (harness,model) columns) + ratio vs GLM
+    order = [(r["harness"], r["model"]) for r in rows]
+    glm = next((k for k in order if is_self_hosted(k[1])), None)
+    abbr = {"opencode": "oc", "claude": "cc"}
+    lab = lambda k: abbr.get(k[0], k[0]) + ":" + model_id(k[1])
+    others = [k for k in order if k != glm]
     metrics = [("steps (turns)", "steps"), ("tool calls", "tools"), ("output tokens", "out"),
                ("prose chars", "prose"), ("reasoning tokens", "reason")]
-    et = [["metric"] + [short(m) for m in order] + ([f"GLM÷{short(m)}" for m in others] if glm else [])]
-    for label, key in metrics:
-        line = [label] + [f"{eff[m][key]:,}" for m in order]
+    et = [["metric"] + [lab(k) for k in order] + ([f"GLM÷{lab(k)}" for k in others] if glm else [])]
+    for name, mk in metrics:
+        line = [name] + [f"{eff[k][mk]:,}" for k in order]
         if glm:
-            line += [f"{eff[glm][key] / eff[m][key]:.1f}×" if eff[m][key] else "—" for m in others]
+            line += [f"{eff[glm][mk] / eff[k][mk]:.1f}×" if eff[k][mk] else "—" for k in others]
         et.append(line)
     ew = [max(len(str(row[i])) for row in et) for i in range(len(et[0]))]
     print("\n  efficiency (totals; same harness & prompts):")

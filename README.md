@@ -33,27 +33,35 @@ Re-run `./setup.sh` anytime; it only creates what's missing. `./setup.sh --help`
 
 ## 2. Run
 ```bash
-./run_bench.sh                 # GLM + Claude, all tasks, 30 parallel jobs, auto-aggregates
+./run_bench.sh                 # default matrix, auto-aggregates
 ```
-Defaults: `--runs 1`, both models, `--jobs 30`. Common flags:
+Each entry is **`harness:model-ref`** (`harness` = `opencode` | `claude`). The same model can appear
+under both harnesses — that's the point (model isolation vs real-world). Default matrix:
+```
+opencode:modal/zai-org/GLM-5.2-FP8      # GLM (model isolation)
+opencode:anthropic/claude-opus-4-8      # Opus, same harness as GLM (clean comparison)
+claude:anthropic/claude-opus-4-8        # Opus in Claude Code's own CLI (real-world product comp)
+```
+`claude:` needs the `claude` CLI on PATH; it can't serve GLM/GPT/Gemini (Anthropic-only).
+
+Common flags:
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `-r, --runs N` | repeats per (task, model) | 1 |
-| `-m, --models "a b"` | model refs (space/comma) | GLM + Claude Opus |
-| `-j, --jobs N` | parallel jobs — **the cost lever for GLM** | 30 |
+| `-r, --runs N` | repeats per (harness, model, task) | 1 |
+| `-m, --models "a,b"` | comma/space list of `harness:model` | the matrix above |
+| `--model H:REF` | add one entry (**repeatable**) | — |
+| `-j, --jobs N` | max (harness,model) **groups** in parallel | 30 |
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
-| `--timeout SECS` | kill a stuck agent | 500 |
 | `--delete-repo` | discard the mutated repo | keep |
 
-Writes `results/manifest.csv` + per-run logs, then runs `aggregate.py` →
-`results/summary.csv` + `results_detailed.csv`.
+**Parallelism is grouped.** Each `(harness, model)` runs its tasks **in sequence** (clean per-model
+timing, no self-contention on the GLM endpoint); the different groups run **in parallel** (they hit
+independent backends). So wall-clock still collapses without skewing any one model's numbers.
 
-**Two harnesses.** Every model runs in **opencode** (isolates the *model* — the clean comparison).
-Anthropic models *additionally* run in **Claude Code's own CLI** (`claude -p`), the real-world
-product comp — since that's how people actually use Opus. GLM/GPT/Gemini can't run in Claude Code
-(Anthropic-only), so they're opencode-only. Claude Code reports its own cost/usage/turns, so those
-rows carry `cost_basis = claude_code`. Requires the `claude` CLI on PATH.
+Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/summary.csv` +
+`results_detailed.csv`. Claude Code reports its own cost/usage/turns → those rows carry
+`cost_basis = claude_code`; opencode API rows are `api_ccusage`; GLM is `gpu_calls`.
 
 ## 3. Judge
 Turn the raw runs into the final report — numbers + a blinded LLM review of each transcript+diff:

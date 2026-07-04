@@ -12,8 +12,9 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-# expand later: "openai/gpt-5-codex"  "google/gemini-3-flash-preview"
-MODELS_STR="modal/zai-org/GLM-5.2-FP8,anthropic/claude-opus-4-8"
+# Each entry is  <harness>:<model-ref>  (harness = opencode | claude). The same model can
+# appear under both harnesses on purpose (model-isolation vs real-world Claude Code comp).
+MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
 RUNS=1
 TIMEOUT_SECS=500
@@ -22,18 +23,20 @@ RUN_DELAY=2
 JOBS=30
 KEEP_REPO=1
 CCUSAGE="npx -y ccusage"   # -y: auto-install without the interactive prompt (would hang the run)
+MODEL_ENTRIES=()           # collected from repeatable --model
 
 usage() {
   cat >&2 <<EOF
 Usage: ./run_bench.sh [options]
-  -r, --runs N        repeats per (task,model)       [$RUNS]
-  -m, --models "a b"  space/comma-separated models   [$MODELS_STR]
-  -t, --tasks DIR     tasks directory                [$TASKS_DIR]
-  -j, --jobs N        parallel jobs                  [$JOBS]
-      --timeout SECS  kill a stuck agent             [$TIMEOUT_SECS]
-      --retries N     retries on opencode server err [$RETRIES]
-      --delay SECS    pause between sequential runs  [$RUN_DELAY]
-      --delete-repo   discard the mutated repo       [$KEEP_REPO]
+  -r, --runs N          repeats per (harness,model,task)  [$RUNS]
+  -m, --models "a,b"    comma/space list of harness:model [$MODELS_STR]
+      --model H:REF     add one harness:model (repeatable), e.g. --model claude:anthropic/claude-opus-4-8
+  -t, --tasks DIR       tasks directory                   [$TASKS_DIR]
+  -j, --jobs N          max (harness,model) GROUPS in parallel; each group runs its tasks in sequence [$JOBS]
+      --timeout SECS    kill a stuck agent                [$TIMEOUT_SECS]
+      --retries N       retries on opencode server err    [$RETRIES]
+      --delay SECS      pause between a group's runs       [$RUN_DELAY]
+      --delete-repo     discard the mutated repo          [$KEEP_REPO]
   -h, --help
 EOF
 }
@@ -42,6 +45,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -r|--runs) RUNS="$2"; shift 2;;
     -m|--models) MODELS_STR="$2"; shift 2;;
+    --model) MODEL_ENTRIES+=("$2"); shift 2;;
     -t|--tasks) TASKS_DIR="$2"; shift 2;;
     -j|--jobs) JOBS="$2"; shift 2;;
     --timeout) TIMEOUT_SECS="$2"; shift 2;;
@@ -53,7 +57,22 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-read -r -a MODELS <<< "${MODELS_STR//,/ }"
+# explicit --model wins; otherwise split the (default or -m) MODELS_STR
+if [ "${#MODEL_ENTRIES[@]}" -eq 0 ]; then
+  read -r -a MODEL_ENTRIES <<< "${MODELS_STR//,/ }"
+fi
+
+# split each "harness:ref" into parallel arrays HARN[] / MREF[] (bare ref defaults to opencode)
+HARN=() MREF=()
+for e in "${MODEL_ENTRIES[@]}"; do
+  case "$e" in
+    opencode:*) HARN+=("opencode"); MREF+=("${e#opencode:}");;
+    claude:*)   HARN+=("claude");   MREF+=("${e#claude:}");;
+    *)          HARN+=("opencode"); MREF+=("$e");;
+  esac
+done
+
+model_id() { echo "${1#*/}"; }   # anthropic/claude-opus-4-8 -> claude-opus-4-8 (for `claude --model`)
 
 if [ -f .env ]; then
   source .env
@@ -66,13 +85,16 @@ export OPENCODE_CONFIG="$SCRIPT_DIR/opencode.jsonc"   # honored from /tmp clones
 export NO_COLOR=1                                     # no ANSI in logs
 unset ANTHROPIC_BASE_URL OPENAI_BASE_URL GOOGLE_BASE_URL 2>/dev/null || true  # avoid 404 hijack
 
-# preflight: fail fast if a selected provider's keys are missing
+# preflight: fail fast if a selected harness/provider requirement is missing
 _miss=""
-for m in "${MODELS[@]}"; do
-  case "$m" in
+for i in "${!MREF[@]}"; do
+  if [ "${HARN[$i]}" = "claude" ]; then
+    command -v claude >/dev/null 2>&1 || _miss="$_miss claude-CLI"   # Claude Code uses its own auth
+    continue
+  fi
+  case "${MREF[$i]}" in
     modal/*)     for v in MODAL_ENDPOINT MODAL_KEY MODAL_SECRET; do [ -z "${!v:-}" ] && _miss="$_miss $v"; done;;
-    anthropic/*) [ -z "${ANTHROPIC_API_KEY:-}" ] && _miss="$_miss ANTHROPIC_API_KEY"
-                 command -v claude >/dev/null 2>&1 || _miss="$_miss claude-CLI(needed-for-claude-code-variant)";;
+    anthropic/*) [ -z "${ANTHROPIC_API_KEY:-}" ] && _miss="$_miss ANTHROPIC_API_KEY";;
     openai/*)    [ -z "${OPENAI_API_KEY:-}" ]    && _miss="$_miss OPENAI_API_KEY";;
     google/*)    [ -z "${GEMINI_API_KEY:-}" ]    && _miss="$_miss GEMINI_API_KEY";;
   esac
@@ -88,7 +110,7 @@ $CCUSAGE --help >/dev/null 2>&1 || true   # pre-install ccusage once so per-run 
 TO="$(command -v timeout || command -v gtimeout || true)"   # macOS: brew install coreutils
 now() { python3 -c 'import time; print(time.time())'; }
 MANIFEST="$RESULTS_DIR/manifest.csv"
-echo "task,model,run,outdir,start,end,duration_s,status" > "$MANIFEST"
+echo "task,harness,model,run,outdir,start,end,duration_s,status" > "$MANIFEST"
 
 _log() { echo "$*" >&2; }
 
@@ -141,13 +163,13 @@ _snapshot_usage() {
   rm -rf "$home"
 }
 
-run_one_job() {   # task_name task_abs prompt model run
+run_one_job() {   # task_name task_abs prompt harness model run
   set +e   # one bad task must not abort the whole batch
-  local task_name="$1" task_abs="$2" prompt="$3" model="$4" run="$5"
+  local task_name="$1" task_abs="$2" prompt="$3" harness="$4" model="$5" run="$6"
   local safe outdir work state_dir src agent_path start end dur status attempt
-  safe="$(echo "$model" | tr '/ :' '___')"
+  safe="$(echo "${harness}_${model}" | tr '/ :' '___')"
   outdir="$RESULTS_DIR/${task_name}__${safe}__run${run}"; mkdir -p "$outdir"
-  _log ">>> $task_name | $model | run $run"
+  _log ">>> $task_name | $harness | $model | run $run"
 
   work="$(mktemp -d)"; state_dir="$(mktemp -d)"
   export XDG_DATA_HOME="$state_dir" XDG_STATE_HOME="$state_dir" XDG_CONFIG_HOME="$state_dir"
@@ -170,12 +192,12 @@ run_one_job() {   # task_name task_abs prompt model run
   attempt=1
   while :; do
     start="$(now)"
-    case "$model" in
-      claude-code/*)   # real-world harness: Claude Code's own CLI (Anthropic models only)
+    case "$harness" in
+      claude)   # real-world harness: Claude Code's own CLI (Anthropic models only)
         ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
-            claude -p "$prompt" --model "${model#claude-code/}" --output-format stream-json \
+            claude -p "$prompt" --model "$(model_id "$model")" --output-format stream-json \
             --verbose --dangerously-skip-permissions > "$outdir/output.log" 2>&1 ) || true ;;
-      *)
+      *)        # opencode
         ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
             opencode run "$prompt" -m "$model" --format json --auto > "$outdir/output.log" 2>&1 ) || true ;;
     esac
@@ -194,49 +216,42 @@ run_one_job() {   # task_name task_abs prompt model run
       && status="pass" || status="fail"
   fi
 
-  case "$model" in
-    claude-code/*) : ;;   # cost/usage/efficiency come from output.log (stream-json), parsed by aggregate.py
+  case "$harness" in
+    claude) : ;;   # cost/usage/efficiency come from output.log (stream-json), parsed by aggregate.py
     *) _snapshot_usage "$state_dir" "$outdir/usage.json" ;;
   esac
-  _manifest_append "$task_name,$model,$run,$outdir,$start,$end,$dur,$status"
+  _manifest_append "$task_name,$harness,$model,$run,$outdir,$start,$end,$dur,$status"
   _log "    done ($status, ${dur}s)"
   [ "$KEEP_REPO" = "1" ] && { mkdir -p "$outdir/final_repo"; cp -R "$work/." "$outdir/final_repo/"; }
   rm -rf "$work" "$state_dir"
 }
 
-# build the job list (task x model x run)
-TN=() TA=() PR=() MD=() RN=()
-for task in "$TASKS_DIR"/*/; do
-  [ -f "$task/prompt.txt" ] || continue
-  tn="$(basename "$task")"; ta="$(cd "$task" && pwd)"; pr="$(cat "$task/prompt.txt")"
-  for model in "${MODELS[@]}"; do
+# A GROUP is one (harness, model): it runs every task × run in SEQUENCE (clean per-model timing,
+# no self-contention). Different groups run in PARALLEL (they hit independent backends), bounded
+# by JOBS. So GLM's endpoint isn't hammered by its own concurrent runs, but the wall-clock still
+# collapses because GLM / opencode-Claude / Claude-Code proceed side by side.
+run_group() {
+  local harness="$1" model="$2" task tn ta pr run
+  for task in "$TASKS_DIR"/*/; do
+    [ -f "$task/prompt.txt" ] || continue
+    tn="$(basename "$task")"; ta="$(cd "$task" && pwd)"; pr="$(cat "$task/prompt.txt")"
     for run in $(seq 1 "$RUNS"); do
-      TN+=("$tn"); TA+=("$ta"); PR+=("$pr"); MD+=("$model"); RN+=("$run")
-      # Anthropic models also run through Claude Code's own harness (real-world comp)
-      case "$model" in
-        anthropic/*) TN+=("$tn"); TA+=("$ta"); PR+=("$pr"); MD+=("claude-code/${model#anthropic/}"); RN+=("$run") ;;
-      esac
+      run_one_job "$tn" "$ta" "$pr" "$harness" "$model" "$run"
+      sleep "$RUN_DELAY"
     done
   done
-done
+}
 
-if [ "$JOBS" -le 1 ]; then
-  for i in "${!TN[@]}"; do
-    run_one_job "${TN[$i]}" "${TA[$i]}" "${PR[$i]}" "${MD[$i]}" "${RN[$i]}"
-    sleep "$RUN_DELAY"
-  done
-else
-  echo "running ${#TN[@]} jobs, $JOBS in parallel" >&2
-  pids=()
-  trap 'kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
-  for i in "${!TN[@]}"; do
-    while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
-    run_one_job "${TN[$i]}" "${TA[$i]}" "${PR[$i]}" "${MD[$i]}" "${RN[$i]}" &
-    pids+=($!)
-  done
-  wait || true
-  trap - INT TERM
-fi
+echo "running ${#MREF[@]} (harness,model) groups, up to $JOBS in parallel; tasks sequential within a group" >&2
+gpids=()
+trap 'kill "${gpids[@]}" 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
+for i in "${!MREF[@]}"; do
+  while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
+  run_group "${HARN[$i]}" "${MREF[$i]}" &
+  gpids+=($!)
+done
+wait || true
+trap - INT TERM
 
 echo "Done -> $MANIFEST"
 RESULTS_DIR="$RESULTS_DIR" python3 "$SCRIPT_DIR/aggregate.py"
