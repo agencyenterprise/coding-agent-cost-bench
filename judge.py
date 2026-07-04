@@ -139,48 +139,40 @@ Reply ONLY with compact JSON:
 
 
 def cost_model(summary):
-    """How many parallel tasks on Modal to beat Claude — throughput break-even from measured data.
-
-    GLM's per-task cost = flat endpoint rate / throughput. Throughput scales with concurrency, so
-    running tasks in parallel is the ONLY lever. We anchor tasks/hour on the measured single-stream
-    duration and assume ~linear scaling for small N (an 8xB200 is barely touched by one stream)."""
+    """Closing the gap: how concurrency turns the sole-tenant uptime cost into the call-time floor,
+    and how that floor compares to Claude. All from measured summary numbers."""
     rate = float(os.environ.get("GLM_GPU_HOURLY_USD", "50.7"))
     gpu = next((r for r in summary if str(r.get("cost_basis", "")).startswith("gpu")), None)
     api = next((r for r in summary if r.get("cost_basis") == "api_ccusage"), None)
     try:
         claude = float(api["cost_per_successful_task"])
-        d = float(gpu["avg_duration_s"])
+        call, up, passes = float(gpu["call_s"]), float(gpu["active_s"]), int(gpu["passes"])
     except (TypeError, ValueError, KeyError):
         return []
-    tph1 = 3600.0 / d                 # tasks/hour at concurrency 1
-    be_tph = rate / claude            # throughput needed to match Claude
-    be_n = be_tph / tph1              # parallel tasks needed (linear-scaling assumption)
-    L = ["## How many parallel tasks to beat Claude\n",
-         f"The endpoint costs a flat **${rate:.0f}/hr** whenever it's up, so GLM's per-task cost is just "
-         "`rate ÷ throughput`. The only lever is pushing more tasks through the same GPU-hour — i.e. "
-         "concurrency.",
+    floor = call / 3600 * rate / passes           # fully-packed: only generation billed
+    sole = up / 3600 * rate / passes              # sole tenant: full uptime billed
+    conc = up / call if call else 0               # concurrent bursty sessions to keep GPU saturated
+    verdict = ("competitive with" if floor <= claude * 1.25
+               else "closer, but still above" if floor <= claude * 2 else "still well above")
+    L = ["## How many parallel sessions to beat Claude\n",
+         f"GLM only touches the GPU **~{100 * call / up:.0f}%** of each session (the rest is local "
+         f"pip/pytest/git). So one sole-tenant session wastes most of the rented GPU:",
          "",
-         f"- Claude: **${claude:.2f}/task** — per-token, zero idle cost.",
-         f"- GLM, 1 task at a time (~{d:.0f}s each ⇒ ~{tph1:.0f} tasks/hr): **${rate / tph1:.2f}/task**.",
-         f"- Match Claude ⇒ need **~{be_tph:.0f} successful tasks/hour** through the endpoint.",
-         f"- At ~{tph1:.0f} tasks/hr per concurrent slot ⇒ **~{be_n:.1f} tasks in parallel to break even.**",
+         f"- Claude: **${claude:.2f}/task**.",
+         f"- GLM, 1 session (sole tenant, full uptime billed): **~${sole:.2f}/task**.",
+         f"- GLM, fully packed (call-time floor): **~${floor:.2f}/task**.",
          "",
-         "Assuming throughput scales ~linearly with concurrency (safe for small N on an 8xB200 a single "
-         "stream barely uses):",
+         f"The lever is **concurrency**: run enough bursty sessions that they fill each other's script "
+         f"gaps and keep the endpoint generating. Roughly **uptime ÷ call-time ≈ {conc:.1f} concurrent "
+         f"sessions** keep the GPU saturated — past that you pay near the floor, below it you pay for idle.",
          "",
-         "| parallel tasks | tasks/hour | $/task | vs Claude |",
-         "|---|---|---|---|"]
-    for N in (1, 2, 3, 4, 6, 8, 12):
-        tph = N * tph1
-        cpt = rate / tph
-        L.append(f"| {N} | {tph:.0f} | ${cpt:.2f} | {cpt / claude:.1f}x |")
-    L += ["",
-          f"**Bottom line: ~{round(be_n)} parallel tasks to break even, ~{round(be_n * 2)}+ to actually "
-          "save money vs Claude.** Caveats, all pushing the real break-even *higher*: LLM throughput "
-          f"plateaus once the batch is full; cold starts and idle gaps still bill at ${rate:.0f}/hr with "
-          "zero output; and agentic tasks only hit the GPU in bursts (lots of local git/pytest/tool time), "
-          "so you need many concurrent sessions to keep it saturated. Bursty or low-volume use loses to "
-          "the API — only sustained, packed concurrency wins.", ""]
+         f"**Bottom line:** even fully packed, GLM's floor (${floor:.2f}/task) is **{verdict}** Claude's "
+         f"${claude:.2f}. Getting there needs ~{max(1, round(conc))}+ concurrent sessions *and* sustained "
+         "volume to keep them coming; bursty or low-volume use pays the sole-tenant ${:.2f} and loses to "
+         "the API.".format(sole),
+         "",
+         "*(call-time is measured at low batch; at higher concurrency the 8×B200 batches requests, so the "
+         "true packed floor is lower still — a load test would pin it down.)*", ""]
     return L
 
 
@@ -210,42 +202,38 @@ def cost_analysis(summary):
     rate = float(os.environ.get("GLM_GPU_HOURLY_USD", "50.7"))
     gpu = next((r for r in summary if str(r.get("cost_basis", "")).startswith("gpu")), None)
     api = next((r for r in summary if r.get("cost_basis") == "api_ccusage"), None)
-    active = f" ({gpu['active_s']}s here)" if gpu and gpu.get("active_s") else ""
     L = ["## Cost — what's really going on\n",
-         "Two different meters — always read the `cost_basis` column:",
+         "Two different meters — read the `cost_basis` column:",
          "",
          "- **api_ccusage** (Claude): real billed dollars from ccusage — tokens × price, with "
-         "prompt-caching already applied (cached input is ~10× cheaper). You pay only for tokens, "
-         "and $0 while idle.",
-         f"- **gpu_active** (GLM): you rent the whole 8×B200 endpoint (~${rate:.0f}/hr). We charge "
-         f"ONLY the union of the minutes the model was actively running{active} — overlapping/"
-         "parallel runs count once — *excluding* the idle warm-up / scale-down time the machine "
-         "sat up doing nothing. That's the generous read for self-host.",
+         "prompt-caching applied (cached input ~10× cheaper). Pay per token, $0 while idle.",
+         f"- **gpu_calls** (GLM): charged on **endpoint call time only** — the seconds the agent "
+         f"actually spent generating on the endpoint (`call_s`), × the ~${rate:.0f}/hr rate. Local "
+         "script time (pip, pytest, git, file I/O) is **excluded**, since the GPU sits idle then.",
          ""]
-    if gpu and api and api.get("cost_per_successful_task"):
-        L += [f"Reconciled against the real Modal bill, the implied rate is ~${rate:.0f}/hr "
-              f"(~${rate / 8:.2f} per B200-hour — Modal's real B200 price). Even counting only the "
-              f"active slice, GLM lands at ${gpu.get('cost_per_successful_task')}/task vs "
-              f"${api.get('cost_per_successful_task')}/task for Claude.", ""]
-    L += ["**Why GLM looks expensive and Claude looks cheap — it's structural, not a modelling error:**",
+    try:
+        call, up, passes = float(gpu["call_s"]), float(gpu["active_s"]), int(gpu["passes"])
+        up_task, call_task = up / 3600 * rate / passes, call / 3600 * rate / passes
+        pct = 100 * call / up if up else 0
+        L += [f"> **⚠️ Attribution caveat — this is a choice, not a real saving.** Modal bills the "
+              f"container's **uptime**, not compute-seconds. So a *sole tenant* actually pays for "
+              f"wall-clock ({up:.0f}s here ⇒ **~${up_task:.2f}/task**), idle during pip/pytest "
+              f"included — the money is spent whether the GPU computes or not. The **${call_task:.2f}"
+              f"/task** we headline counts only the {call:.0f}s ({pct:.0f}%) of real generation: it's "
+              "the **fair shared-endpoint / fully-packed floor**, not a single-user bill. That gap "
+              f"(${up_task:.2f} → ${call_task:.2f}/task) is idle you eat until the endpoint is packed "
+              "with concurrent work.", ""]
+    except (TypeError, ValueError, KeyError, ZeroDivisionError):
+        pass
+    L += ["**Why the two meters look so different — structural, not a modelling error:**",
           "",
           "| | GLM self-host | Claude API |",
           "|---|---|---|",
           "| hardware | you rent 8×B200 (~$50/hr) whole | GPU shared across thousands of users |",
-          "| batch=1 (as run here) | ~7/8 of the GPU wasted | irrelevant — you pay per token |",
+          "| you pay for | **uptime** — idle included | only tokens generated |",
+          "| a bursty agent session | GPU idle most of it (pip/pytest/git) | irrelevant |",
           "| caching | barely used | 80k+ tokens cached at ~10× discount |",
-          "| idle | you pay the full hour | you pay $0 |",
           ""]
-    if gpu and api and api.get("cost_per_successful_task"):
-        try:
-            be = round(rate / float(api["cost_per_successful_task"]))
-            L += [f"The one lever is **utilization**. Break-even vs Claude's "
-                  f"${api['cost_per_successful_task']}/task is ~{be} successful tasks/hour "
-                  "saturating the 8×B200 with concurrent requests. Below that the API wins; above "
-                  "it self-host wins. GLM didn't lose on quality or speed (same pass rate, ~2× "
-                  "faster) — it loses on economics until the endpoint is saturated.", ""]
-        except (ValueError, ZeroDivisionError):
-            pass
     return L
 
 
@@ -277,7 +265,7 @@ def main():
     if os.path.exists(summ):
         s = list(csv.DictReader(open(summ)))
         cols = ["model", "passes", "runs", "success_rate", "avg_tokens_in",
-                "avg_tokens_out", "avg_duration_s", "active_s", "overlap_s",
+                "avg_tokens_out", "avg_duration_s", "call_s", "active_s", "overlap_s",
                 "cost_per_successful_task", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
         lines.append("## Numbers\n")

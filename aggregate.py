@@ -5,10 +5,12 @@ Aggregate benchmark results -> results/{results_detailed,summary}.csv.
 ONE cost per row, always labeled with its basis. Two currencies:
   * API models (Claude/GPT/Gemini) -> cost = tokens x per-token price (how the provider
     bills). From ccusage. basis "api_ccusage".
-  * GLM on Modal (self-host)        -> you pay GPU TIME. We charge ONLY the minutes the model
-    actually ran: the UNION of the run intervals (so N parallel runs in the same minute count
-    once — you rent the GPU, not the request) x the endpoint's hourly rate. basis "gpu_active".
-    This deliberately excludes idle warm-up / scale-down time the machine sat up doing nothing.
+  * GLM on Modal (self-host)        -> charged on ENDPOINT CALL TIME only: sum of the seconds
+    the agent actually spent generating on the endpoint (parsed from output.log), x the hourly
+    rate. basis "gpu_calls". This deliberately EXCLUDES local script time (pip/pytest/git/tool
+    exec) where the GPU is idle. Attribution caveat: Modal bills container UPTIME, not compute-
+    seconds, so a sole tenant really pays for wall-clock (see active_s) incl. that idle — the
+    call-only number is the fair shared-endpoint / packed floor. The report spells this out.
 
 Inputs: results/manifest.csv + results/<outdir>/usage.json (ccusage session --json shape).
 Self-host detection: any model served via the `modal/` provider (e.g. modal/zai-org/GLM-5.2-FP8).
@@ -52,6 +54,36 @@ def load_usage(outdir):
     tout = sum(int(s.get("outputTokens", 0) or 0) for s in sessions)
     cost = sum(float(s.get("totalCost", 0) or 0) for s in sessions)
     return tin, tout, cost
+
+
+def call_seconds(outdir):
+    """Endpoint generation time for a run = sum over steps of (first response part - step_start),
+    parsed from output.log (opencode JSON-lines). Each step is one call to the model; the time
+    from step_start to its first tool_use/text part is the generation latency. Excludes the gaps
+    between steps (local tool/script exec: pip, pytest, git, file I/O) where the GPU is idle."""
+    log = os.path.join(outdir, "output.log")
+    if not os.path.exists(log):
+        return 0.0
+    total_ms = 0
+    start = None
+    counted = False
+    for line in open(log):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        t, ts = ev.get("type"), ev.get("timestamp")
+        if t == "step_start":
+            start, counted = ts, False
+        elif t in ("tool_use", "text") and start is not None and not counted and ts is not None:
+            total_ms += ts - start
+            counted = True
+        elif t == "step_finish":
+            start = None
+    return total_ms / 1000.0
 
 
 def union_seconds(intervals):
@@ -99,13 +131,15 @@ def main():
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
                 intervals[m].append((s, e))
+            cs = call_seconds(row.get("outdir", "")) if is_self_hosted(m) else None
             detailed.append({
                 "task": row["task"], "model": m, "run": row["run"],
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
+                "call_s": round(cs, 1) if cs is not None else "",
                 "tokens_in": tin, "tokens_out": tout,
                 "cost_usd": "" if is_self_hosted(m) else round(ccost, 6),
-                "cost_basis": "gpu_active" if is_self_hosted(m) else "api_ccusage",
+                "cost_basis": "gpu_calls" if is_self_hosted(m) else "api_ccusage",
             })
     if not detailed:
         sys.exit("manifest has no rows")
@@ -124,26 +158,28 @@ def main():
         n = len(runs)
         passes = sum(1 for r in runs if r["status"] == "pass")
         durs = [_f(r["duration_s"]) for r in runs if _f(r["duration_s"]) is not None]
-        active = union_seconds(intervals[model])                        # wall-clock the model was busy
+        active = union_seconds(intervals[model])                        # wall-clock union = sole-tenant uptime
         overlap = sum(e - s for s, e in intervals[model]) - active      # time compressed by parallelism
+        call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)
         row = {
             "model": model, "runs": n, "passes": passes,
             "success_rate": round(passes / n, 3),
             "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)),
             "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)),
             "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
+            "call_s": round(call_total, 1) if call_total else "",
             "active_s": round(active, 1) if active else "",
             "overlap_s": round(overlap, 1) if intervals[model] else "",
             "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
         }
         if is_self_hosted(model):
-            if not active:
-                row["cost_basis"] = "gpu_active (no timestamps)"
-            else:
-                cost = active / 3600 * GPU_HOURLY_USD
+            if call_total:
+                cost = call_total / 3600 * GPU_HOURLY_USD   # billed on generation time only
                 row["total_cost_usd"] = round(cost, 4)
                 row["cost_per_successful_task"] = round(cost / passes, 4) if passes else ""
-                row["cost_basis"] = "gpu_active"
+                row["cost_basis"] = "gpu_calls"
+            else:
+                row["cost_basis"] = "gpu_calls (no log timing)"
         else:
             total = sum(r["cost_usd"] for r in runs if r["cost_usd"] != "")
             row["total_cost_usd"] = round(total, 4)
@@ -160,10 +196,10 @@ def main():
         return "—" if v == "" else str(v)
 
     print("wrote results/results_detailed.csv + results/summary.csv")
-    print(f"(GLM GPU rate: ${GPU_HOURLY_USD:.2f}/hr, charged on active-time union only)\n")
+    print(f"(GLM GPU rate: ${GPU_HOURLY_USD:.2f}/hr, charged on endpoint call time only)\n")
     for r in rows:
         print(f"  {r['model']:<32} {r['passes']}/{r['runs']} pass  "
-              f"{_show(r['avg_duration_s']):<6}s  active={_show(r['active_s']):<7} overlap={_show(r['overlap_s']):<7} "
+              f"{_show(r['avg_duration_s']):<6}s  calls={_show(r['call_s']):<7} uptime={_show(r['active_s']):<7} "
               f"in={r['avg_tokens_in']:<7} out={r['avg_tokens_out']:<6} "
               f"$/task=${_show(r['cost_per_successful_task']):<8} [{r['cost_basis']}]")
 
