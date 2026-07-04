@@ -16,7 +16,7 @@ set -euo pipefail
 # appear under both harnesses on purpose (model-isolation vs real-world Claude Code comp).
 MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
-RUNS=1
+RUNS=3
 TIMEOUT_SECS=500
 RETRIES=2
 RUN_DELAY=2

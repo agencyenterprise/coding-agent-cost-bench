@@ -52,27 +52,29 @@ def main() -> None:
     (d / "test.patch").write_text(row["test_patch"])
     (d / "f2p.txt").write_text("\n".join(f2p) + "\n")
 
-    # setup: apply the dataset's test patch so the failing tests exist. The patch
-    # lives in the task dir (absolute path baked in — setup.sh runs in the work dir).
-    patch = (d / "test.patch").resolve()
+    # setup/verify run in the WORK dir but their aux files (test.patch, f2p.txt) live next to the
+    # script in the task dir. Resolve that dir at RUNTIME from $BASH_SOURCE — never bake an absolute
+    # path (these are committed demo tasks and must be portable across machines).
+    here = 'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
     (d / "setup.sh").write_text(
         "#!/usr/bin/env bash\n"
         "# apply the SWE-bench test patch (adds/updates the failing tests)\n"
         "set -euo pipefail\n"
-        f'git apply "{patch}"\n'
+        + here
+        + 'git apply "$here/test.patch"\n'
         'echo "applied SWE-bench test patch"\n'
     )
     # verify: the FAIL_TO_PASS tests must pass. Read node ids from f2p.txt one-per-line into an
     # array (space-safe: some ids contain spaces, e.g. pytest params like `[a: int]`), so a naive
     # space-join doesn't split them into broken args.
-    f2p_path = (d / "f2p.txt").resolve()
     (d / "verify.sh").write_text(
         "#!/usr/bin/env bash\n"
         "# run the SWE-bench FAIL_TO_PASS tests (node ids from f2p.txt, space-safe)\n"
         "set -e\n"
-        'root="$(pwd)"; py="$root/.venv/bin/python"; [ -x "$py" ] || py=python3\n'
+        + here
+        + 'root="$(pwd)"; py="$root/.venv/bin/python"; [ -x "$py" ] || py=python3\n'
         "tests=()\n"
-        f'while IFS= read -r t; do [ -n "$t" ] && tests+=("$t"); done < "{f2p_path}"\n'
+        'while IFS= read -r t; do [ -n "$t" ] && tests+=("$t"); done < "$here/f2p.txt"\n'
         '"$py" -m pytest "${tests[@]}" -q\n'
     )
     bad = [x for x in f2p if "::" not in x or " " in x or x.count("[") != x.count("]")]
