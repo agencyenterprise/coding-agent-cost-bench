@@ -99,6 +99,44 @@ def log_stats(outdir):
     return m
 
 
+def claude_stats(outdir):
+    """Parse a Claude Code run's stream-json output.log: native cost/usage/turns (from the final
+    `result` event) plus tool-call and prose counts (from `assistant` events). Claude Code reports
+    everything itself, so no ccusage needed. tin includes cache tokens (fair vs the others)."""
+    log = os.path.join(outdir, "output.log")
+    m = {"cost": 0.0, "tin": 0, "tout": 0, "call_s": 0.0,
+         "steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0}
+    if not os.path.exists(log):
+        return m
+    for line in open(log):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        t = ev.get("type")
+        if t == "assistant":
+            m["steps"] += 1
+            for b in ev.get("message", {}).get("content", []) or []:
+                bt = b.get("type")
+                if bt == "tool_use":
+                    m["tools"] += 1
+                elif bt == "text":
+                    m["prose"] += len(b.get("text", "") or "")
+        elif t == "result":
+            u = ev.get("usage", {}) or {}
+            m["tin"] = sum(int(u.get(k, 0) or 0) for k in
+                           ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            m["tout"] = m["out"] = int(u.get("output_tokens", 0) or 0)
+            m["cost"] = float(ev.get("total_cost_usd", 0) or 0)
+            m["call_s"] = (ev.get("duration_api_ms", 0) or 0) / 1000.0
+            if ev.get("num_turns"):
+                m["steps"] = ev["num_turns"]
+    return m
+
+
 def union_seconds(intervals):
     """Wall-clock seconds the endpoint was actively serving = union of (start, end) run
     intervals. Overlapping/parallel runs are merged, so 3 runs sharing a 3-min window count
@@ -141,14 +179,21 @@ def main():
     with open(manifest) as f:
         for row in csv.DictReader(f):
             m = row["model"]
-            tin, tout, ccost = load_usage(row.get("outdir", ""))
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
                 intervals[m].append((s, e))
-            ls = log_stats(row.get("outdir", ""))      # work/efficiency metrics — for every model
-            cs = ls["call_s"]                          # generation time (info for APIs, cost for GLM)
-            for k in eff[m]:
-                eff[m][k] += ls[k]
+            if m.startswith("claude-code/"):          # Claude Code reports its own cost/usage/turns
+                st = claude_stats(row.get("outdir", ""))
+                tin, tout, ccost, cs, basis = st["tin"], st["tout"], st["cost"], st["call_s"], "claude_code"
+                for k in eff[m]:
+                    eff[m][k] += st[k]
+            else:
+                tin, tout, ccost = load_usage(row.get("outdir", ""))
+                ls = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log
+                cs = ls["call_s"]
+                for k in eff[m]:
+                    eff[m][k] += ls[k]
+                basis = "gpu_calls" if is_self_hosted(m) else "api_ccusage"
             detailed.append({
                 "task": row["task"], "model": m, "run": row["run"],
                 "status": row["status"],
@@ -156,7 +201,7 @@ def main():
                 "call_s": round(cs, 1),
                 "tokens_in": tin, "tokens_out": tout,
                 "cost_usd": "" if is_self_hosted(m) else round(ccost, 6),
-                "cost_basis": "gpu_calls" if is_self_hosted(m) else "api_ccusage",
+                "cost_basis": basis,
             })
     if not detailed:
         sys.exit("manifest has no rows")
@@ -205,11 +250,11 @@ def main():
                 row["cost_basis"] = "gpu_calls"
             else:
                 row["cost_basis"] = "gpu_calls (no log timing)"
-        else:
+        else:   # token-billed (opencode APIs) or Claude Code (reports its own $)
             total = sum(r["cost_usd"] for r in runs if r["cost_usd"] != "")
             row["total_cost_usd"] = round(total, 4)
             row["cost_per_successful_task"] = round(total / passes, 4) if passes else ""
-            row["cost_basis"] = "api_ccusage"
+            row["cost_basis"] = runs[0]["cost_basis"]
         rows.append(row)
 
     with open(os.path.join(RESULTS_DIR, "summary.csv"), "w", newline="") as f:
@@ -255,7 +300,7 @@ def main():
     # efficiency comparison (transposed: metric rows x model columns) + ratio vs GLM
     order = [r["model"] for r in rows]
     glm = next((m for m in order if is_self_hosted(m)), None)
-    short = lambda m: m.split("/")[-1]
+    short = lambda m: ("cc:" if m.startswith("claude-code/") else "") + m.split("/")[-1]
     others = [m for m in order if m != glm]
     metrics = [("steps (turns)", "steps"), ("tool calls", "tools"), ("output tokens", "out"),
                ("prose chars", "prose"), ("reasoning tokens", "reason")]

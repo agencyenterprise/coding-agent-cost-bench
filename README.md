@@ -49,6 +49,12 @@ Defaults: `--runs 1`, both models, `--jobs 30`. Common flags:
 Writes `results/manifest.csv` + per-run logs, then runs `aggregate.py` →
 `results/summary.csv` + `results_detailed.csv`.
 
+**Two harnesses.** Every model runs in **opencode** (isolates the *model* — the clean comparison).
+Anthropic models *additionally* run in **Claude Code's own CLI** (`claude -p`), the real-world
+product comp — since that's how people actually use Opus. GLM/GPT/Gemini can't run in Claude Code
+(Anthropic-only), so they're opencode-only. Claude Code reports its own cost/usage/turns, so those
+rows carry `cost_basis = claude_code`. Requires the `claude` CLI on PATH.
+
 ## 3. Judge
 Turn the raw runs into the final report — numbers + a blinded LLM review of each transcript+diff:
 ```bash

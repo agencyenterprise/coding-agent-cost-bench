@@ -60,7 +60,7 @@ if [ -f .env ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULTS_DIR="$SCRIPT_DIR/results"
+RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/results}"   # override for smoke tests without clobbering ./results
 CACHE_DIR="$SCRIPT_DIR/.cache/repos"   # remote repos cloned once, reused per run
 export OPENCODE_CONFIG="$SCRIPT_DIR/opencode.jsonc"   # honored from /tmp clones too
 export NO_COLOR=1                                     # no ANSI in logs
@@ -71,7 +71,8 @@ _miss=""
 for m in "${MODELS[@]}"; do
   case "$m" in
     modal/*)     for v in MODAL_ENDPOINT MODAL_KEY MODAL_SECRET; do [ -z "${!v:-}" ] && _miss="$_miss $v"; done;;
-    anthropic/*) [ -z "${ANTHROPIC_API_KEY:-}" ] && _miss="$_miss ANTHROPIC_API_KEY";;
+    anthropic/*) [ -z "${ANTHROPIC_API_KEY:-}" ] && _miss="$_miss ANTHROPIC_API_KEY"
+                 command -v claude >/dev/null 2>&1 || _miss="$_miss claude-CLI(needed-for-claude-code-variant)";;
     openai/*)    [ -z "${OPENAI_API_KEY:-}" ]    && _miss="$_miss OPENAI_API_KEY";;
     google/*)    [ -z "${GEMINI_API_KEY:-}" ]    && _miss="$_miss GEMINI_API_KEY";;
   esac
@@ -169,8 +170,15 @@ run_one_job() {   # task_name task_abs prompt model run
   attempt=1
   while :; do
     start="$(now)"
-    ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
-        opencode run "$prompt" -m "$model" --format json --auto > "$outdir/output.log" 2>&1 ) || true
+    case "$model" in
+      claude-code/*)   # real-world harness: Claude Code's own CLI (Anthropic models only)
+        ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
+            claude -p "$prompt" --model "${model#claude-code/}" --output-format stream-json \
+            --verbose --dangerously-skip-permissions > "$outdir/output.log" 2>&1 ) || true ;;
+      *)
+        ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
+            opencode run "$prompt" -m "$model" --format json --auto > "$outdir/output.log" 2>&1 ) || true ;;
+    esac
     end="$(now)"
     perl -i -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$outdir/output.log" 2>/dev/null || true
     if grep -qi "UnknownError\|Unexpected server error" "$outdir/output.log" && [ "$attempt" -lt $((RETRIES + 1)) ]; then
@@ -186,7 +194,10 @@ run_one_job() {   # task_name task_abs prompt model run
       && status="pass" || status="fail"
   fi
 
-  _snapshot_usage "$state_dir" "$outdir/usage.json"
+  case "$model" in
+    claude-code/*) : ;;   # cost/usage/efficiency come from output.log (stream-json), parsed by aggregate.py
+    *) _snapshot_usage "$state_dir" "$outdir/usage.json" ;;
+  esac
   _manifest_append "$task_name,$model,$run,$outdir,$start,$end,$dur,$status"
   _log "    done ($status, ${dur}s)"
   [ "$KEEP_REPO" = "1" ] && { mkdir -p "$outdir/final_repo"; cp -R "$work/." "$outdir/final_repo/"; }
@@ -201,6 +212,10 @@ for task in "$TASKS_DIR"/*/; do
   for model in "${MODELS[@]}"; do
     for run in $(seq 1 "$RUNS"); do
       TN+=("$tn"); TA+=("$ta"); PR+=("$pr"); MD+=("$model"); RN+=("$run")
+      # Anthropic models also run through Claude Code's own harness (real-world comp)
+      case "$model" in
+        anthropic/*) TN+=("$tn"); TA+=("$ta"); PR+=("$pr"); MD+=("claude-code/${model#anthropic/}"); RN+=("$run") ;;
+      esac
     done
   done
 done
