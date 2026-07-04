@@ -12,29 +12,28 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
-MODELS_STR=""
+# expand later: "openai/gpt-5-codex"  "google/gemini-3-flash-preview"
+MODELS_STR="modal/zai-org/GLM-5.2-FP8,anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
-RUNS=3
-TIMEOUT_SECS=900
+RUNS=1
+TIMEOUT_SECS=500
 RETRIES=2
 RUN_DELAY=2
-JOBS=1
+JOBS=30
 KEEP_REPO=1
-AGGREGATE=1
 CCUSAGE="npx -y ccusage"   # -y: auto-install without the interactive prompt (would hang the run)
 
 usage() {
-  cat >&2 <<'EOF'
+  cat >&2 <<EOF
 Usage: ./run_bench.sh [options]
-  -r, --runs N        repeats per (task,model)       [3]
-  -m, --models "a b"  space/comma-separated models   [built-in set]
-  -t, --tasks DIR     tasks directory                [./tasks]
-  -j, --jobs N        parallel jobs                  [1]
-      --timeout SECS  kill a stuck agent             [900]
-      --retries N     retries on opencode server err [2]
-      --delay SECS    pause between sequential runs  [2]
-      --delete-repo   discard the mutated repo (default: keep in results/<run>/final_repo)
-      --no-aggregate  skip aggregate.py at the end
+  -r, --runs N        repeats per (task,model)       [$RUNS]
+  -m, --models "a b"  space/comma-separated models   [$MODELS_STR]
+  -t, --tasks DIR     tasks directory                [$TASKS_DIR]
+  -j, --jobs N        parallel jobs                  [$JOBS]
+      --timeout SECS  kill a stuck agent             [$TIMEOUT_SECS]
+      --retries N     retries on opencode server err [$RETRIES]
+      --delay SECS    pause between sequential runs  [$RUN_DELAY]
+      --delete-repo   discard the mutated repo       [$KEEP_REPO]
   -h, --help
 EOF
 }
@@ -49,20 +48,15 @@ while [ $# -gt 0 ]; do
     --retries) RETRIES="$2"; shift 2;;
     --delay) RUN_DELAY="$2"; shift 2;;
     --delete-repo) KEEP_REPO=0; shift;;
-    --no-aggregate) AGGREGATE=0; shift;;
     -h|--help) usage; exit 0;;
     *) echo "unknown arg: $1" >&2; usage; exit 1;;
   esac
 done
 
-if [ -n "$MODELS_STR" ]; then
-  read -r -a MODELS <<< "${MODELS_STR//,/ }"
-else
-  MODELS=(
-    "modal/zai-org/GLM-5.2-FP8"      # the challenger (self-host)
-    "anthropic/claude-opus-4-8"      # frontier baseline (latest Opus)
-    # expand later: "openai/gpt-5-codex"  "google/gemini-3-flash-preview"
-  )
+read -r -a MODELS <<< "${MODELS_STR//,/ }"
+
+if [ -f .env ]; then
+  source .env
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,10 +116,10 @@ prepare_work() {   # populate $2 (work dir) from the task's source; echo externa
         [ "$n" -ge 3 ] && { rmdir "$lock"; return 1; }          # give up after 3 tries
         n=$((n + 1)); sleep 3
       done
-      [ -n "${ref:-}" ] && git -C "$cache" -c advice.detachedHead=false checkout --quiet "$ref"
-    fi
+    fi                                                          # cache stays on its default branch
     rmdir "$lock"
-    git clone --local --quiet "$cache" "$work"                 # fast local clone from cache
+    git -c advice.detachedHead=false clone --local --quiet "$cache" "$work"   # fast local clone
+    [ -n "${ref:-}" ] && git -C "$work" -c advice.detachedHead=false checkout --quiet "$ref"
     echo ""
   else echo ""; fi
 }
@@ -161,6 +155,12 @@ run_one_job() {   # task_name task_abs prompt model run
   if [ -f "$task_abs/setup.sh" ]; then
     ( cd "$work" && TASK_REPO_SRC="$src" bash "$task_abs/setup.sh" ) > "$outdir/setup.log" 2>&1 \
       || _log "    setup.sh failed (see $outdir/setup.log)"
+  fi
+
+  # snapshot the post-setup state so the agent's diff is isolable later (judge.py uses `git diff HEAD`)
+  if git -C "$work" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$work" -c user.email=bench@local -c user.name=bench add -A >/dev/null 2>&1
+    git -C "$work" -c user.email=bench@local -c user.name=bench commit -qm "post-setup baseline" >/dev/null 2>&1 || true
   fi
 
   agent_path="$PATH"
@@ -224,4 +224,4 @@ else
 fi
 
 echo "Done -> $MANIFEST"
-[ "$AGGREGATE" = "1" ] && RESULTS_DIR="$RESULTS_DIR" python3 "$SCRIPT_DIR/aggregate.py"
+RESULTS_DIR="$RESULTS_DIR" python3 "$SCRIPT_DIR/aggregate.py"
