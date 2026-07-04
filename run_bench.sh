@@ -32,7 +32,7 @@ Usage: ./run_bench.sh [options]
   -m, --models "a,b"    comma/space list of harness:model [$MODELS_STR]
       --model H:REF     add one harness:model (repeatable), e.g. --model claude:anthropic/claude-opus-4-8
   -t, --tasks DIR       tasks directory                   [$TASKS_DIR]
-  -j, --jobs N          max (harness,model) GROUPS in parallel; each group runs its tasks in sequence [$JOBS]
+  -j, --jobs N          max task×run jobs in parallel WITHIN a group; groups (harness,model) run one at a time [$JOBS]
       --timeout SECS    kill a stuck agent                [$TIMEOUT_SECS]
       --retries N       retries on opencode server err    [$RETRIES]
       --delay SECS      pause between a group's runs       [$RUN_DELAY]
@@ -226,31 +226,29 @@ run_one_job() {   # task_name task_abs prompt harness model run
   rm -rf "$work" "$state_dir"
 }
 
-# A GROUP is one (harness, model): it runs every task × run in SEQUENCE (clean per-model timing,
-# no self-contention). Different groups run in PARALLEL (they hit independent backends), bounded
-# by JOBS. So GLM's endpoint isn't hammered by its own concurrent runs, but the wall-clock still
-# collapses because GLM / opencode-Claude / Claude-Code proceed side by side.
+# Groups run ONE AT A TIME (sequential across (harness,model)). WITHIN a group, every task × run
+# runs in PARALLEL (up to JOBS). So a model's runs all go together — e.g. all GLM runs hit the
+# endpoint concurrently (the packed scenario we want to measure) — and one model's contention is
+# never mixed with another model's runs, keeping each model's numbers clean.
 run_group() {
-  local harness="$1" model="$2" task tn ta pr run
+  local harness="$1" model="$2" pids=() task tn ta pr run
   for task in "$TASKS_DIR"/*/; do
     [ -f "$task/prompt.txt" ] || continue
     tn="$(basename "$task")"; ta="$(cd "$task" && pwd)"; pr="$(cat "$task/prompt.txt")"
     for run in $(seq 1 "$RUNS"); do
-      run_one_job "$tn" "$ta" "$pr" "$harness" "$model" "$run"
-      sleep "$RUN_DELAY"
+      while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
+      run_one_job "$tn" "$ta" "$pr" "$harness" "$model" "$run" &
+      pids+=($!)
     done
   done
+  [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}" 2>/dev/null || true   # finish this group before the next
 }
 
-echo "running ${#MREF[@]} (harness,model) groups, up to $JOBS in parallel; tasks sequential within a group" >&2
-gpids=()
-trap 'kill "${gpids[@]}" 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
+trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
 for i in "${!MREF[@]}"; do
-  while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
-  run_group "${HARN[$i]}" "${MREF[$i]}" &
-  gpids+=($!)
+  echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running its tasks in parallel (up to $JOBS)" >&2
+  run_group "${HARN[$i]}" "${MREF[$i]}"
 done
-wait || true
 trap - INT TERM
 
 echo "Done -> $MANIFEST"

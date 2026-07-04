@@ -51,13 +51,14 @@ Common flags:
 | `-r, --runs N` | repeats per (harness, model, task) | 1 |
 | `-m, --models "a,b"` | comma/space list of `harness:model` | the matrix above |
 | `--model H:REF` | add one entry (**repeatable**) | — |
-| `-j, --jobs N` | max (harness,model) **groups** in parallel | 30 |
+| `-j, --jobs N` | max task×run jobs **in parallel within a group** | 30 |
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
 | `--delete-repo` | discard the mutated repo | keep |
 
-**Parallelism is grouped.** Each `(harness, model)` runs its tasks **in sequence** (clean per-model
-timing, no self-contention on the GLM endpoint); the different groups run **in parallel** (they hit
-independent backends). So wall-clock still collapses without skewing any one model's numbers.
+**Parallelism is grouped.** Groups `(harness, model)` run **one at a time**; within a group every
+task×run fires **in parallel** (up to `--jobs`). So a model's runs all go together — all GLM runs hit
+the endpoint concurrently (the packed scenario we want to measure) — and one model's contention is
+never mixed with another model's runs, keeping each model's numbers clean.
 
 Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/summary.csv` +
 `results_detailed.csv`. Claude Code reports its own cost/usage/turns → those rows carry
