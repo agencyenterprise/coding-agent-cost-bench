@@ -38,11 +38,42 @@ and suggest an alternative repo or a self-contained task — don't ship an unval
 Ask if they want a smoke run now:
 ```bash
 source .env
-./run_bench.sh --runs 1 --tasks tasks --models "modal/zai-org/GLM-5.2-FP8" \
+./run_bench.sh --runs 1 --model opencode:modal/zai-org/GLM-5.2-FP8 \
   # (or scope to the new task by temporarily pointing --tasks at a dir with just it)
 ```
 To run only the new task, its dir can be isolated, or run the full set and read its rows
 in `results/results_detailed.csv`.
+
+## Prompt format (v2 — uniform template)
+Every task's `prompt.txt` uses the SAME structure, so phrasing is never a confound between models.
+`task-smith` must emit exactly these sections:
+```
+## Task
+<one short paragraph: what's broken, observed vs expected. For SWE-bench-style tasks, embed the raw
+report verbatim under "Reported issue (verbatim):" as a > blockquote.>
+
+## Success criteria
+- `<suite command>` exits 0 with all tests passing.   # a FILE/dir-level pytest command, NOT the exact
+- Do not modify any test files.                        # failing node ids — verify.sh stays the hidden grader
+
+## Scope
+- Make the smallest change that fully fixes the issue.
+- If the same defect appears in more than one place, fix every occurrence.
+- Do not refactor, reformat, modernize, upgrade dependencies, or fix unrelated issues.
+
+## Environment
+- Fresh clone, no virtualenv. Create `.venv` at the repo root.
+- Install only what is required to run the tests (e.g. `.venv/bin/pip install -e . pytest`). Do not install anything else.
+
+## Before finishing
+- Run the Success criteria command. If anything fails, keep working.
+- Confirm your diff contains only changes required by the fix.
+```
+Anti-overwork (minimal change, install only what's needed) and anti-underwork (fix every occurrence,
+run the suite) are deliberate. `verify.sh` runs the exact grader tests; the prompt's suite command is
+broader so it doesn't hand the agent the failing node ids. Keep any prior `prompt.v1.txt` as the
+baseline arm (run it with `./run_bench.sh --prompt prompt.v1.txt`). `make_swebench_task.py` already
+emits this template.
 
 ## Guardrails
 - Never commit secrets; public tasks use `repo.git` with `{env:...}`-free content only.

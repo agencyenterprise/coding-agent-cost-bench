@@ -126,7 +126,7 @@ setup.sh          # bring up the Modal GLM-5.2 auto-endpoint (idempotent)
 run_bench.sh      # run task × model × run, then aggregate
 aggregate.py      # manifest + usage.json -> summary.csv / results_detailed.csv
 judge.py          # blinded LLM review + report.md (numbers, cost, break-even)
-clean.sh          # wipe results/
+clear_results.sh  # wipe results/
 opencode.jsonc    # provider config (secrets via {env:...})
 tasks/demo-*/     # committed tasks; tasks/<other>/ are gitignored
 results/          # logs + CSVs + report.md (gitignored)

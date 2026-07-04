@@ -16,6 +16,7 @@ set -euo pipefail
 # appear under both harnesses on purpose (model-isolation vs real-world Claude Code comp).
 MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
+PROMPT_FILE="prompt.txt"   # per-task prompt to use; e.g. --prompt prompt.v1.txt for the baseline arm
 RUNS=3
 TIMEOUT_SECS=500
 RETRIES=2
@@ -32,6 +33,7 @@ Usage: ./run_bench.sh [options]
   -m, --models "a,b"    comma/space list of harness:model [$MODELS_STR]
       --model H:REF     add one harness:model (repeatable), e.g. --model claude:anthropic/claude-opus-4-8
   -t, --tasks DIR       tasks directory                   [$TASKS_DIR]
+      --prompt FILE     per-task prompt filename          [$PROMPT_FILE]  (e.g. prompt.v1.txt = baseline arm)
   -j, --jobs N          max task×run jobs in parallel WITHIN a group; groups (harness,model) run one at a time [$JOBS]
       --timeout SECS    kill a stuck agent                [$TIMEOUT_SECS]
       --retries N       retries on opencode server err    [$RETRIES]
@@ -47,6 +49,7 @@ while [ $# -gt 0 ]; do
     -m|--models) MODELS_STR="$2"; shift 2;;
     --model) MODEL_ENTRIES+=("$2"); shift 2;;
     -t|--tasks) TASKS_DIR="$2"; shift 2;;
+    --prompt) PROMPT_FILE="$2"; shift 2;;
     -j|--jobs) JOBS="$2"; shift 2;;
     --timeout) TIMEOUT_SECS="$2"; shift 2;;
     --retries) RETRIES="$2"; shift 2;;
@@ -246,7 +249,8 @@ run_group() {
   local harness="$1" model="$2" pids=() task tn ta pr run
   for task in "$TASKS_DIR"/*/; do
     [ -f "$task/prompt.txt" ] || continue
-    tn="$(basename "$task")"; ta="$(cd "$task" && pwd)"; pr="$(cat "$task/prompt.txt")"
+    local pf="$task/$PROMPT_FILE"; [ -f "$pf" ] || pf="$task/prompt.txt"   # fall back if arm file missing
+    tn="$(basename "$task")"; ta="$(cd "$task" && pwd)"; pr="$(cat "$pf")"
     for run in $(seq 1 "$RUNS"); do
       while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
       run_one_job "$tn" "$ta" "$pr" "$harness" "$model" "$run" &

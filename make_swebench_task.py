@@ -83,12 +83,30 @@ def main() -> None:
               f"(not a pytest node id, or a space / unbalanced brackets from dataset mangling) — "
               f"e.g. {bad[0]!r}. verify.sh likely can't resolve them, so the task may never pass. "
               "Pick a different instance.")
+    # v2 uniform template: verbatim issue block + a FILE-level suite command (the hidden grader,
+    # verify.sh, still runs the exact FAIL_TO_PASS node ids from f2p.txt). Same structure as every
+    # other task so phrasing isn't a confound; explicit anti-overwork/anti-underwork scope.
+    issue = "\n".join(("> " + ln) if ln.strip() else ">" for ln in row["problem_statement"].strip().splitlines())
+    suite = " ".join(sorted({x.split("::")[0] for x in f2p}))   # the file(s) holding the tests, not the node ids
     (d / "prompt.txt").write_text(
-        row["problem_statement"].strip()
-        + "\n\nThis is a fresh clone with no virtualenv. Create `.venv` at the repo "
-        "root and install what you need (e.g. `python3 -m venv .venv && "
-        ".venv/bin/pip install -e . pytest`). Do not modify the tests. Make the "
-        "failing tests pass.\n"
+        "## Task\n"
+        "Reported issue (verbatim):\n\n"
+        f"{issue}\n\n"
+        "## Success criteria\n"
+        f"- `.venv/bin/python -m pytest {suite}` exits 0 with all tests passing.\n"
+        "- Do not modify any test files.\n\n"
+        "## Scope\n"
+        "- Make the smallest change that fully fixes the issue.\n"
+        "- If the same defect appears in more than one place (e.g. serialization AND deserialization "
+        "paths, or multiple call sites), fix every occurrence.\n"
+        "- Do not refactor, reformat, modernize, upgrade dependencies, or fix unrelated issues.\n\n"
+        "## Environment\n"
+        "- Fresh clone, no virtualenv. Create `.venv` at the repo root.\n"
+        "- Install only what is required to run the tests: `.venv/bin/pip install -e . pytest`.\n"
+        "  Do not install anything else.\n\n"
+        "## Before finishing\n"
+        "- Run the Success criteria command. If anything fails, keep working.\n"
+        "- Confirm your diff contains only changes required by the fix.\n"
     )
     for f in ("setup.sh", "verify.sh"):
         (d / f).chmod(0o755)

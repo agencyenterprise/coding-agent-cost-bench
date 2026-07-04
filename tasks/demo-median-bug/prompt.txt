@@ -1,9 +1,9 @@
 ## Task
-The test suite `test.py` is failing: `slugify()` produces wrong-case output.
-The bug is in `slugify/slugify.py`.
+The tests in `test_mathutils.py` are failing: `median()` returns wrong results.
+The bug is in `mathutils.py`.
 
 ## Success criteria
-- `.venv/bin/python -m pytest test.py` exits 0 with all tests passing.
+- `.venv/bin/python -m pytest test_mathutils.py` exits 0 with all tests passing.
 - Do not modify any test files.
 
 ## Scope
@@ -13,7 +13,7 @@ The bug is in `slugify/slugify.py`.
 
 ## Environment
 - Fresh clone, no virtualenv. Create `.venv` at the repo root.
-- Install only what is required to run the tests: `.venv/bin/pip install -e . pytest`.
+- Install only what is required to run the tests: `.venv/bin/pip install pytest`.
   Do not install anything else.
 
 ## Before finishing
