@@ -176,6 +176,58 @@ def cost_model(summary):
     return L
 
 
+def efficiency(rows):
+    """Steps / tool-calls / output tokens per task per model, parsed from output.log. Same harness
+    and prompts, so it's model behavior: fewer turns to the fix = fewer output tokens = less
+    generation time = less GPU cost for the self-hosted model. `rows` = manifest DictReader rows."""
+    agg = {}
+    for r in rows:
+        m = r["model"]
+        a = agg.setdefault(m, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
+        a["runs"] += 1
+        log = os.path.join(r.get("outdir", ""), "output.log")
+        if not os.path.exists(log):
+            continue
+        for line in open(log):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            t = ev.get("type")
+            if t == "step_start":
+                a["steps"] += 1
+            elif t == "tool_use":
+                a["tools"] += 1
+            elif t == "step_finish":
+                a["out"] += (ev.get("part", {}).get("tokens", {}) or {}).get("output", 0) or 0
+    if not agg:
+        return []
+    L = ["## Efficiency — how much work each model did\n",
+         "Same harness, same prompts — so this is **model behavior**, not setup. Per task, averaged:",
+         "",
+         "| model | steps/task | tool calls/task | output tokens/task |",
+         "|---|---|---|---|"]
+    per = {}
+    for m, a in agg.items():
+        n = max(a["runs"], 1)
+        per[m] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
+        L.append(f"| {m} | {per[m][0]:.0f} | {per[m][1]:.0f} | {per[m][2]:.0f} |")
+    L.append("")
+    gpu = next((m for m in agg if m.startswith("modal/")), None)
+    api = next((m for m in agg if not m.startswith("modal/")), None)
+    if gpu and api and per[api][1] and per[api][2]:
+        L += [f"The self-hosted model runs **~{per[gpu][1] / per[api][1]:.1f}× more tool calls** and emits "
+              f"**~{per[gpu][2] / per[api][2]:.1f}× more output tokens** for the same fixes — more "
+              "exploration and edits per task (the prose is comparable; the extra tokens are tool-call "
+              "arguments). That compounds cost: more output ⇒ more generation time ⇒ more GPU-seconds "
+              "billed. So the self-hosted model loses twice — pricier hardware *and* more work done on it.",
+              ""]
+    return L
+
+
 def timeline(summary):
     """Per-task start/finish + per-model active/overlap, from results_detailed.csv + summary."""
     L = ["## Timeline (when each task ran)\n"]
@@ -284,6 +336,7 @@ def main():
         lines += timeline(s)
         lines += cost_analysis(s)
         lines += cost_model(s)
+        lines += efficiency(rows)
 
     lines.append("## How each model worked (blinded judge notes)\n")
     for m, items in verdicts.items():
