@@ -161,6 +161,7 @@ def main():
         active = union_seconds(intervals[model])                        # wall-clock union = sole-tenant uptime
         overlap = sum(e - s for s, e in intervals[model]) - active      # time compressed by parallelism
         call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)
+        idle = max(0.0, active - call_total)                            # up but NOT generating
         row = {
             "model": model, "runs": n, "passes": passes,
             "success_rate": round(passes / n, 3),
@@ -169,16 +170,21 @@ def main():
             "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
             "call_s": round(call_total, 1) if call_total else "",
             "active_s": round(active, 1) if active else "",
-            "idle_s": "", "overlap_s": round(overlap, 1) if intervals[model] else "",
+            "idle_s": round(idle, 1) if (intervals[model] and call_total) else "",
+            "overlap_s": round(overlap, 1) if intervals[model] else "",
+            "gen_usd_task": "", "idle_usd_task": "", "sole_usd_task": "",
             "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
         }
         if is_self_hosted(model):
-            # idle = uptime the endpoint was up but NOT generating (sole tenant pays it anyway)
-            row["idle_s"] = round(max(0.0, active - call_total), 1)
             if call_total:
                 cost = call_total / 3600 * GPU_HOURLY_USD   # billed on generation time only
                 row["total_cost_usd"] = round(cost, 4)
-                row["cost_per_successful_task"] = round(cost / passes, 4) if passes else ""
+                if passes:
+                    # sole-tenant $/task = generation (floor) + idle tax
+                    row["cost_per_successful_task"] = round(cost / passes, 4)
+                    row["gen_usd_task"] = round(cost / passes, 4)
+                    row["idle_usd_task"] = round(idle / 3600 * GPU_HOURLY_USD / passes, 4)
+                    row["sole_usd_task"] = round(active / 3600 * GPU_HOURLY_USD / passes, 4)
                 row["cost_basis"] = "gpu_calls"
             else:
                 row["cost_basis"] = "gpu_calls (no log timing)"
@@ -222,6 +228,12 @@ def main():
         print("  " + "  ".join(str(c).ljust(w[j]) for j, c in enumerate(row)))
         if i == 0:
             print("  " + "  ".join("-" * w[j] for j in range(len(headers))))
+
+    # sole-tenant $/task decomposition for the GPU-billed model(s)
+    for r in rows:
+        if r["sole_usd_task"] != "":
+            print(f"\n  {r['model']} — sole-tenant ${r['sole_usd_task']}/task  =  "
+                  f"generation ${r['gen_usd_task']} (floor)  +  idle tax ${r['idle_usd_task']}")
 
 
 if __name__ == "__main__":
