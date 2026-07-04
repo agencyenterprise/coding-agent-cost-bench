@@ -296,6 +296,53 @@ def cost_analysis(summary):
     return L
 
 
+def rate_difficulty(judge_model, task, prompt):
+    """Independent, blind LLM rating of how hard the TASK is (1-5), from its instruction alone —
+    not contaminated by which model ran it or how it went."""
+    q = f"""Rate how hard this coding task is for an AI agent, on a 1-5 scale (1 = trivial, 5 = very hard).
+Consider scope, ambiguity, debugging/reasoning required, and codebase breadth. Judge the TASK itself,
+not any particular solution.
+
+Task: {task}
+Instruction given to the agent:
+{prompt[:3000] or "(prompt unavailable)"}
+
+Reply ONLY with compact JSON: {{"difficulty": <integer 1-5>, "why": "one short reason"}}"""
+    try:
+        r = subprocess.run(["opencode", "run", q, "-m", judge_model, "--format", "json"],
+                           capture_output=True, text=True, timeout=180)
+    except Exception:
+        return {}
+    m = re.search(r"\{.*\}", opencode_text(r.stdout), re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return {}
+
+
+def complexity_section(difficulty):
+    """Merge the empirical complexity (aggregate's complexity.csv) with the blind LLM difficulty."""
+    path = os.path.join(RESULTS_DIR, "complexity.csv")
+    if not os.path.exists(path):
+        return []
+    rows = list(csv.DictReader(open(path)))
+    L = ["## Task complexity\n",
+         "**Empirical (0-10, relative)** = observed effort pooled across all models (steps, tool calls, "
+         "output tokens, duration), normalized within this task set. **LLM difficulty (1-5)** is an "
+         "independent blind rating of the task instruction itself. `pass_rate` is the outcome across all runs.",
+         "",
+         "| task | empirical 0-10 | LLM 1-5 | pass_rate | avg_steps | avg_out_tok |",
+         "|---|---|---|---|---|---|"]
+    for r in rows:
+        d = difficulty.get(r["task"], {})
+        L.append(f"| {r['task']} | {r['complexity']} | {d.get('difficulty', '—')} | "
+                 f"{r['pass_rate']} | {r['avg_steps']} | {r['avg_out_tok']} |")
+    L.append("")
+    return L
+
+
 def main():
     args = sys.argv[1:]
     model = None
@@ -319,6 +366,18 @@ def main():
         v = judge_run(model, task, status, blind(transcript(outdir)), blind(diff(outdir)))
         verdicts.setdefault(f"{h} · {m}", []).append((task, status, v))
 
+    # blind LLM difficulty rating, once per unique task (from its prompt)
+    difficulty = {}
+    tasks_seen = []
+    for row in rows:
+        if row["task"] not in tasks_seen:
+            tasks_seen.append(row["task"])
+    for i, t in enumerate(tasks_seen, 1):
+        pf = os.path.join("tasks", t, "prompt.txt")
+        prompt = open(pf).read() if os.path.exists(pf) else ""
+        sys.stderr.write(f"[difficulty {i}/{len(tasks_seen)}] {t}\n")
+        difficulty[t] = rate_difficulty(model, t, blind(prompt))
+
     # build report: numbers (summary.csv) + qualitative notes
     lines = ["# Benchmark report\n", f"_Judge: {model} (blinded review)_\n"]
     summ = os.path.join(RESULTS_DIR, "summary.csv")
@@ -338,6 +397,7 @@ def main():
         lines += cost_analysis(s)
         lines += cost_model(s)
         lines += efficiency(rows)
+        lines += complexity_section(difficulty)
 
     lines.append("## How each model worked (blinded judge notes)\n")
     for m, items in verdicts.items():

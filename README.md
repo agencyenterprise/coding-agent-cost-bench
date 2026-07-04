@@ -92,8 +92,11 @@ break-even table shows the concurrency needed to beat Claude.
 - `results/report.md` — the deliverable (numbers + cost analysis + break-even + blinded notes).
 - `results/summary.csv` — per model: `success_rate`, tokens, `avg_duration_s`, `active_s`,
   `overlap_s`, `cost_per_successful_task`, `cost_basis`.
-- `results/results_detailed.csv` — per (task,model,run): `start`, `end`, `duration_s`, tokens, cost.
-- `results/<task>__<model>__runN/` — `output.log` (JSON transcript), `verify.log`, `usage.json`,
+- `results/results_detailed.csv` — per (harness,model,task,run): `start`, `end`, `duration_s`, tokens, cost.
+- `results/complexity.csv` — per task: **empirical complexity 0–10** (relative, from observed effort
+  pooled across all models: steps, tool calls, output tokens, duration), `pass_rate`, and the raw
+  averages. `report.md` merges this with an independent blind **LLM difficulty 1–5** per task.
+- `results/<task>__<harness>_<model>__runN/` — `output.log` (transcript), `verify.log`, `usage.json`,
   `final_repo/` (the agent's edited code). `./clean.sh` wipes `results/`.
 
 ---

@@ -166,6 +166,26 @@ def union_seconds(intervals):
     return total
 
 
+def task_complexity(task_stat):
+    """Empirical, RELATIVE task complexity from observed effort pooled across ALL runs/models:
+    mean steps, tool calls, output tokens, and duration — each min-max normalized across the task
+    set, averaged, scaled to 0-10. Higher = the task demanded more work. It's relative to this set,
+    not absolute. pass_rate is reported alongside (outcome, kept separate from effort)."""
+    tasks = {}
+    for t, a in task_stat.items():
+        n = max(a["runs"], 1)
+        tasks[t] = {"runs": a["runs"], "pass_rate": round(a["pass"] / n, 3),
+                    "avg_steps": a["steps"] / n, "avg_tools": a["tools"] / n,
+                    "avg_out": a["out"] / n, "avg_dur": a["dur"] / n}
+    sig = ["avg_steps", "avg_tools", "avg_out", "avg_dur"]
+    lo = {s: min(tasks[t][s] for t in tasks) for s in sig} if tasks else {}
+    hi = {s: max(tasks[t][s] for t in tasks) for s in sig} if tasks else {}
+    for t in tasks:
+        norm = [(tasks[t][s] - lo[s]) / (hi[s] - lo[s]) if hi[s] > lo[s] else 0.0 for s in sig]
+        tasks[t]["complexity"] = round(10 * sum(norm) / len(norm), 1)
+    return tasks
+
+
 def _f(x):
     try:
         return float(x)
@@ -184,8 +204,9 @@ def main():
         sys.exit(f"no manifest at {manifest} — run run_bench.sh first")
 
     detailed = []
-    intervals = defaultdict(list)   # model -> [(start, end), ...] for self-hosted GPU costing
+    intervals = defaultdict(list)   # (harness,model) -> [(start, end), ...] for GPU costing
     eff = defaultdict(lambda: {"steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0})
+    task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0, "pass": 0})
     with open(manifest) as f:
         for row in csv.DictReader(f):
             m = row["model"]
@@ -195,17 +216,20 @@ def main():
             if s is not None and e is not None:
                 intervals[key].append((s, e))
             if h == "claude":                          # Claude Code reports its own cost/usage/turns
-                st = claude_stats(row.get("outdir", ""))
-                tin, tout, ccost, cs, basis = st["tin"], st["tout"], st["cost"], st["call_s"], "claude_code"
-                for k in eff[key]:
-                    eff[key][k] += st[k]
+                pm = claude_stats(row.get("outdir", ""))
+                tin, tout, ccost, cs, basis = pm["tin"], pm["tout"], pm["cost"], pm["call_s"], "claude_code"
             else:
                 tin, tout, ccost = load_usage(row.get("outdir", ""))
-                ls = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log
-                cs = ls["call_s"]
-                for k in eff[key]:
-                    eff[key][k] += ls[k]
+                pm = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log
+                cs = pm["call_s"]
                 basis = "gpu_calls" if is_self_hosted(m) else "api_ccusage"
+            for k in eff[key]:
+                eff[key][k] += pm[k]
+            ts = task_stat[row["task"]]                 # pool all runs for empirical task complexity
+            ts["runs"] += 1
+            ts["steps"] += pm["steps"]; ts["tools"] += pm["tools"]; ts["out"] += pm["out"]
+            ts["dur"] += _f(row.get("duration_s")) or 0.0
+            ts["pass"] += 1 if row["status"] == "pass" else 0
             detailed.append({
                 "task": row["task"], "harness": h, "model": m, "run": row["run"],
                 "status": row["status"],
@@ -331,6 +355,28 @@ def main():
         print("  " + "  ".join(str(c).ljust(ew[j]) for j, c in enumerate(row)))
         if i == 0:
             print("  " + "  ".join("-" * ew[j] for j in range(len(et[0]))))
+
+    # empirical task complexity (relative 0-10 from observed effort pooled across all models)
+    comp = task_complexity(task_stat)
+    ccols = ["task", "complexity", "pass_rate", "runs", "avg_steps", "avg_tools", "avg_out_tok", "avg_dur_s"]
+    crows = []
+    for t, a in sorted(comp.items(), key=lambda kv: kv[1]["complexity"], reverse=True):
+        crows.append({"task": t, "complexity": a["complexity"], "pass_rate": a["pass_rate"],
+                      "runs": a["runs"], "avg_steps": round(a["avg_steps"], 1),
+                      "avg_tools": round(a["avg_tools"], 1), "avg_out_tok": round(a["avg_out"]),
+                      "avg_dur_s": round(a["avg_dur"], 1)})
+    if crows:
+        with open(os.path.join(RESULTS_DIR, "complexity.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=ccols)
+            w.writeheader()
+            w.writerows(crows)
+        ctab = [ccols] + [[str(r[c]) for c in ccols] for r in crows]
+        cw = [max(len(row[i]) for row in ctab) for i in range(len(ccols))]
+        print("\n  task complexity (relative 0-10 from observed effort, all models pooled):")
+        for i, row in enumerate(ctab):
+            print("  " + "  ".join(row[j].ljust(cw[j]) for j in range(len(ccols))))
+            if i == 0:
+                print("  " + "  ".join("-" * cw[j] for j in range(len(ccols))))
 
 
 if __name__ == "__main__":
