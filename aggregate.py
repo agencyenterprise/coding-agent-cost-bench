@@ -56,15 +56,17 @@ def load_usage(outdir):
     return tin, tout, cost
 
 
-def call_seconds(outdir):
-    """Endpoint generation time for a run = sum over steps of (first response part - step_start),
-    parsed from output.log (opencode JSON-lines). Each step is one call to the model; the time
-    from step_start to its first tool_use/text part is the generation latency. Excludes the gaps
-    between steps (local tool/script exec: pip, pytest, git, file I/O) where the GPU is idle."""
+def log_stats(outdir):
+    """Parse output.log (opencode JSON-lines) once into work/efficiency metrics for a run:
+      call_s  - endpoint generation time: sum over steps of (first response part - step_start),
+                i.e. only the model calls, excluding local tool/script gaps (pip/pytest/git).
+      steps   - assistant turns; tools - tool calls; prose - chars of natural-language text;
+      reason  - reasoning tokens; out - output tokens (tool args + prose the model emitted)."""
     log = os.path.join(outdir, "output.log")
+    m = {"call_s": 0.0, "steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0}
     if not os.path.exists(log):
-        return 0.0
-    total_ms = 0
+        return m
+    call_ms = 0
     start = None
     counted = False
     for line in open(log):
@@ -75,15 +77,26 @@ def call_seconds(outdir):
             ev = json.loads(line)
         except Exception:
             continue
-        t, ts = ev.get("type"), ev.get("timestamp")
+        t, ts, p = ev.get("type"), ev.get("timestamp"), ev.get("part", {})
         if t == "step_start":
-            start, counted = ts, False
-        elif t in ("tool_use", "text") and start is not None and not counted and ts is not None:
-            total_ms += ts - start
-            counted = True
+            start, counted, m["steps"] = ts, False, m["steps"] + 1
+        elif t == "tool_use":
+            m["tools"] += 1
+            if start is not None and not counted and ts is not None:
+                call_ms += ts - start
+                counted = True
+        elif t == "text":
+            m["prose"] += len(p.get("text", "") or "")
+            if start is not None and not counted and ts is not None:
+                call_ms += ts - start
+                counted = True
         elif t == "step_finish":
+            tk = p.get("tokens", {}) or {}
+            m["out"] += tk.get("output", 0) or 0
+            m["reason"] += tk.get("reasoning", 0) or 0
             start = None
-    return total_ms / 1000.0
+    m["call_s"] = call_ms / 1000.0
+    return m
 
 
 def union_seconds(intervals):
@@ -124,6 +137,7 @@ def main():
 
     detailed = []
     intervals = defaultdict(list)   # model -> [(start, end), ...] for self-hosted GPU costing
+    eff = defaultdict(lambda: {"steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0})
     with open(manifest) as f:
         for row in csv.DictReader(f):
             m = row["model"]
@@ -131,7 +145,10 @@ def main():
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
                 intervals[m].append((s, e))
-            cs = call_seconds(row.get("outdir", ""))   # generation time — for every model (info for APIs)
+            ls = log_stats(row.get("outdir", ""))      # work/efficiency metrics — for every model
+            cs = ls["call_s"]                          # generation time (info for APIs, cost for GLM)
+            for k in eff[m]:
+                eff[m][k] += ls[k]
             detailed.append({
                 "task": row["task"], "model": m, "run": row["run"],
                 "status": row["status"],
@@ -234,6 +251,26 @@ def main():
         if r["sole_usd_task"] != "":
             print(f"\n  {r['model']} — sole-tenant ${r['sole_usd_task']}/task  =  "
                   f"generation ${r['gen_usd_task']} (floor)  +  idle tax ${r['idle_usd_task']}")
+
+    # efficiency comparison (transposed: metric rows x model columns) + ratio vs GLM
+    order = [r["model"] for r in rows]
+    glm = next((m for m in order if is_self_hosted(m)), None)
+    short = lambda m: m.split("/")[-1]
+    others = [m for m in order if m != glm]
+    metrics = [("steps (turns)", "steps"), ("tool calls", "tools"), ("output tokens", "out"),
+               ("prose chars", "prose"), ("reasoning tokens", "reason")]
+    et = [["metric"] + [short(m) for m in order] + ([f"GLM÷{short(m)}" for m in others] if glm else [])]
+    for label, key in metrics:
+        line = [label] + [f"{eff[m][key]:,}" for m in order]
+        if glm:
+            line += [f"{eff[glm][key] / eff[m][key]:.1f}×" if eff[m][key] else "—" for m in others]
+        et.append(line)
+    ew = [max(len(str(row[i])) for row in et) for i in range(len(et[0]))]
+    print("\n  efficiency (totals; same harness & prompts):")
+    for i, row in enumerate(et):
+        print("  " + "  ".join(str(c).ljust(ew[j]) for j, c in enumerate(row)))
+        if i == 0:
+            print("  " + "  ".join("-" * ew[j] for j in range(len(et[0]))))
 
 
 if __name__ == "__main__":
