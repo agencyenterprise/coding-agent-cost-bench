@@ -131,12 +131,12 @@ def main():
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
                 intervals[m].append((s, e))
-            cs = call_seconds(row.get("outdir", "")) if is_self_hosted(m) else None
+            cs = call_seconds(row.get("outdir", ""))   # generation time — for every model (info for APIs)
             detailed.append({
                 "task": row["task"], "model": m, "run": row["run"],
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
-                "call_s": round(cs, 1) if cs is not None else "",
+                "call_s": round(cs, 1),
                 "tokens_in": tin, "tokens_out": tout,
                 "cost_usd": "" if is_self_hosted(m) else round(ccost, 6),
                 "cost_basis": "gpu_calls" if is_self_hosted(m) else "api_ccusage",
@@ -193,15 +193,32 @@ def main():
         w.writerows(rows)
 
     def _show(v):
-        return "—" if v == "" else str(v)
+        return "—" if v in ("", None) else str(v)
 
     print("wrote results/results_detailed.csv + results/summary.csv")
     print(f"(GLM GPU rate: ${GPU_HOURLY_USD:.2f}/hr, charged on endpoint call time only)\n")
+    headers = ["model", "pass", "succ", "avg_s", "call_s", "uptime_s", "overlap_s",
+               "tok_in", "tok_out", "$/task", "basis"]
+    table = [headers]
     for r in rows:
-        print(f"  {r['model']:<32} {r['passes']}/{r['runs']} pass  "
-              f"{_show(r['avg_duration_s']):<6}s  calls={_show(r['call_s']):<7} uptime={_show(r['active_s']):<7} "
-              f"in={r['avg_tokens_in']:<7} out={r['avg_tokens_out']:<6} "
-              f"$/task=${_show(r['cost_per_successful_task']):<8} [{r['cost_basis']}]")
+        table.append([
+            r["model"],
+            f"{r['passes']}/{r['runs']}",
+            f"{r['success_rate']:.0%}",
+            _show(r["avg_duration_s"]),
+            _show(r["call_s"]),
+            _show(r["active_s"]),
+            _show(r["overlap_s"]),
+            _show(r["avg_tokens_in"]),
+            _show(r["avg_tokens_out"]),
+            _show(r["cost_per_successful_task"]),
+            _show(r["cost_basis"]),
+        ])
+    w = [max(len(str(row[i])) for row in table) for i in range(len(headers))]
+    for i, row in enumerate(table):
+        print("  " + "  ".join(str(c).ljust(w[j]) for j, c in enumerate(row)))
+        if i == 0:
+            print("  " + "  ".join("-" * w[j] for j in range(len(headers))))
 
 
 if __name__ == "__main__":
