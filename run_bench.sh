@@ -106,6 +106,18 @@ if [ -n "$_miss" ]; then
 fi
 
 mkdir -p "$RESULTS_DIR" "$CACHE_DIR"
+
+# single-run guard: refuse to start if another run_bench is already using this RESULTS_DIR
+# (two concurrent runs share manifest.csv + run dirs and clobber each other).
+LOCK="$RESULTS_DIR/.run.lock"
+if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "another run_bench is already using $RESULTS_DIR (pid $(cat "$LOCK"))." >&2
+  echo "  -> wait for it, kill it, or run with RESULTS_DIR=/some/other/dir ./run_bench.sh" >&2
+  exit 1
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
 $CCUSAGE --help >/dev/null 2>&1 || true   # pre-install ccusage once so per-run usage.json is clean JSON
 TO="$(command -v timeout || command -v gtimeout || true)"   # macOS: brew install coreutils
 now() { python3 -c 'import time; print(time.time())'; }
