@@ -36,6 +36,16 @@ def is_self_hosted(model):
     return model.lower().startswith("modal/")
 
 
+def harness_of(ref):
+    """Which agent harness ran this model ref: Claude Code's CLI vs opencode."""
+    return "claude-code" if ref.startswith("claude-code/") else "opencode"
+
+
+def model_id(ref):
+    """The model itself, without the harness/provider prefix (e.g. claude-opus-4-8)."""
+    return ref.split("/", 1)[1] if "/" in ref else ref
+
+
 def load_usage(outdir):
     """(tokens_in, tokens_out, ccusage_cost) for a run from its usage.json.
 
@@ -195,7 +205,7 @@ def main():
                     eff[m][k] += ls[k]
                 basis = "gpu_calls" if is_self_hosted(m) else "api_ccusage"
             detailed.append({
-                "task": row["task"], "model": m, "run": row["run"],
+                "task": row["task"], "harness": harness_of(m), "model": m, "run": row["run"],
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
                 "call_s": round(cs, 1),
@@ -225,7 +235,7 @@ def main():
         call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)
         idle = max(0.0, active - call_total)                            # up but NOT generating
         row = {
-            "model": model, "runs": n, "passes": passes,
+            "harness": harness_of(model), "model": model, "runs": n, "passes": passes,
             "success_rate": round(passes / n, 3),
             "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)),
             "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)),
@@ -267,12 +277,13 @@ def main():
 
     print("wrote results/results_detailed.csv + results/summary.csv")
     print(f"(GLM GPU rate: ${GPU_HOURLY_USD:.2f}/hr, charged on endpoint call time only)\n")
-    headers = ["model", "pass", "succ", "avg_s", "call_s", "uptime_s", "idle_s", "overlap_s",
-               "tok_in", "tok_out", "$/task", "basis"]
+    headers = ["harness", "model", "pass", "succ", "avg_s", "call_s", "uptime_s", "idle_s",
+               "overlap_s", "tok_in", "tok_out", "$/task", "basis"]
     table = [headers]
     for r in rows:
         table.append([
-            r["model"],
+            r["harness"],
+            model_id(r["model"]),
             f"{r['passes']}/{r['runs']}",
             f"{r['success_rate']:.0%}",
             _show(r["avg_duration_s"]),

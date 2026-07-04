@@ -323,7 +323,7 @@ def main():
     summ = os.path.join(RESULTS_DIR, "summary.csv")
     if os.path.exists(summ):
         s = list(csv.DictReader(open(summ)))
-        cols = ["model", "passes", "runs", "success_rate", "avg_tokens_in",
+        cols = ["harness", "model", "passes", "runs", "success_rate", "avg_tokens_in",
                 "avg_tokens_out", "avg_duration_s", "call_s", "active_s", "idle_s",
                 "overlap_s", "cost_per_successful_task", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
