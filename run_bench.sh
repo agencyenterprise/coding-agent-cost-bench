@@ -256,6 +256,35 @@ run_group() {
   [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}" 2>/dev/null || true   # finish this group before the next
 }
 
+# Warm the GLM endpoint up front: a cold / scaled-to-zero 8xB200 returns 503 for a while, and
+# without this every GLM task would hang on 503 until its own timeout (500s x N tasks wasted).
+# POST a 1-token request and poll until 200; if it never comes up, fail fast (bring it up with
+# ./setup.sh) instead of running the whole GLM group against a dead endpoint.
+warm_modal() {
+  local model="$1" i code tries="${WARM_TRIES:-16}"
+  [ -n "${MODAL_ENDPOINT:-}" ] || { echo "MODAL_ENDPOINT unset" >&2; return 1; }
+  echo "warming GLM endpoint (cold 8xB200 can take a few minutes)..." >&2
+  for i in $(seq 1 "$tries"); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 180 \
+      -H "Modal-Key: ${MODAL_KEY:-}" -H "Modal-Secret: ${MODAL_SECRET:-}" \
+      -H 'Content-Type: application/json' -X POST "$MODAL_ENDPOINT/chat/completions" \
+      -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"ok\"}],\"max_tokens\":1}" 2>/dev/null)"
+    [ "$code" = "200" ] && { echo "  endpoint ready (HTTP 200)" >&2; return 0; }
+    echo "  [$i/$tries] HTTP ${code:-000} — waiting ${WARM_SLEEP:-15}s..." >&2
+    sleep "${WARM_SLEEP:-15}"
+  done
+  return 1
+}
+for i in "${!MREF[@]}"; do
+  if [ "${HARN[$i]}" = "opencode" ]; then case "${MREF[$i]}" in
+    modal/*)
+      warm_modal "$(model_id "${MREF[$i]}")" || {
+        echo "GLM endpoint $MODAL_ENDPOINT not ready — bring it up (./setup.sh), then re-run." >&2
+        exit 1; }
+      break ;;
+  esac; fi
+done
+
 trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
 for i in "${!MREF[@]}"; do
   echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running its tasks in parallel (up to $JOBS)" >&2
