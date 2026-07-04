@@ -169,10 +169,12 @@ def main():
             "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
             "call_s": round(call_total, 1) if call_total else "",
             "active_s": round(active, 1) if active else "",
-            "overlap_s": round(overlap, 1) if intervals[model] else "",
+            "idle_s": "", "overlap_s": round(overlap, 1) if intervals[model] else "",
             "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
         }
         if is_self_hosted(model):
+            # idle = uptime the endpoint was up but NOT generating (sole tenant pays it anyway)
+            row["idle_s"] = round(max(0.0, active - call_total), 1)
             if call_total:
                 cost = call_total / 3600 * GPU_HOURLY_USD   # billed on generation time only
                 row["total_cost_usd"] = round(cost, 4)
@@ -197,7 +199,7 @@ def main():
 
     print("wrote results/results_detailed.csv + results/summary.csv")
     print(f"(GLM GPU rate: ${GPU_HOURLY_USD:.2f}/hr, charged on endpoint call time only)\n")
-    headers = ["model", "pass", "succ", "avg_s", "call_s", "uptime_s", "overlap_s",
+    headers = ["model", "pass", "succ", "avg_s", "call_s", "uptime_s", "idle_s", "overlap_s",
                "tok_in", "tok_out", "$/task", "basis"]
     table = [headers]
     for r in rows:
@@ -208,6 +210,7 @@ def main():
             _show(r["avg_duration_s"]),
             _show(r["call_s"]),
             _show(r["active_s"]),
+            _show(r["idle_s"]),
             _show(r["overlap_s"]),
             _show(r["avg_tokens_in"]),
             _show(r["avg_tokens_out"]),

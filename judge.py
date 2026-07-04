@@ -213,16 +213,23 @@ def cost_analysis(summary):
          ""]
     try:
         call, up, passes = float(gpu["call_s"]), float(gpu["active_s"]), int(gpu["passes"])
-        up_task, call_task = up / 3600 * rate / passes, call / 3600 * rate / passes
+        idle = max(0.0, up - call)
+        up_task = up / 3600 * rate / passes
+        call_task = call / 3600 * rate / passes
+        idle_task = idle / 3600 * rate / passes
         pct = 100 * call / up if up else 0
         L += [f"> **⚠️ Attribution caveat — this is a choice, not a real saving.** Modal bills the "
-              f"container's **uptime**, not compute-seconds. So a *sole tenant* actually pays for "
-              f"wall-clock ({up:.0f}s here ⇒ **~${up_task:.2f}/task**), idle during pip/pytest "
-              f"included — the money is spent whether the GPU computes or not. The **${call_task:.2f}"
-              f"/task** we headline counts only the {call:.0f}s ({pct:.0f}%) of real generation: it's "
-              "the **fair shared-endpoint / fully-packed floor**, not a single-user bill. That gap "
-              f"(${up_task:.2f} → ${call_task:.2f}/task) is idle you eat until the endpoint is packed "
-              "with concurrent work.", ""]
+              f"container's **uptime**, not compute-seconds, so you can't *deduct* idle from the bill — "
+              f"a sole tenant pays all {up:.0f}s of wall-clock (**~${up_task:.2f}/task**). What we can do "
+              "is **decompose** it:",
+              ">",
+              f"> &nbsp;&nbsp;&nbsp;&nbsp;`sole-tenant ${up_task:.2f}/task  =  generation ${call_task:.2f} "
+              f"({pct:.0f}%)  +  idle tax ${idle_task:.2f} ({100 - pct:.0f}%)`",
+              ">",
+              f"> We headline the **${call_task:.2f} generation floor** (the fair shared-endpoint number). "
+              f"The **${idle_task:.2f}/task idle tax** isn't the model's fault and isn't a saving you can "
+              "book alone — it's under-utilization, recovered only by packing the endpoint with concurrent "
+              "work.", ""]
     except (TypeError, ValueError, KeyError, ZeroDivisionError):
         pass
     L += ["**Why the two meters look so different — structural, not a modelling error:**",
@@ -265,8 +272,8 @@ def main():
     if os.path.exists(summ):
         s = list(csv.DictReader(open(summ)))
         cols = ["model", "passes", "runs", "success_rate", "avg_tokens_in",
-                "avg_tokens_out", "avg_duration_s", "call_s", "active_s", "overlap_s",
-                "cost_per_successful_task", "cost_basis"]
+                "avg_tokens_out", "avg_duration_s", "call_s", "active_s", "idle_s",
+                "overlap_s", "cost_per_successful_task", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
         lines.append("## Numbers\n")
         lines.append("| " + " | ".join(cols) + " |")
