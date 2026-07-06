@@ -231,12 +231,16 @@ def efficiency(rows):
 
 
 def timeline(summary):
-    """Per-task start/finish + per-model active/overlap, from results_detailed.csv + summary."""
+    """Per-model wall-clock + parallelism factor, then per-task start/finish from results_detailed."""
     L = ["## Timeline (when each task ran)\n"]
     for r in summary:
-        a, o = r.get("active_s", ""), r.get("overlap_s", "")
-        if a != "" or o != "":
-            L.append(f"- **{r['model']}** — {a}s active wall-clock, {o}s saved by parallel overlap")
+        a = aggregate._f(r.get("active_s"))
+        if not a:
+            continue
+        o = aggregate._f(r.get("overlap_s")) or 0.0    # overlap = sum(durations) - union(active)
+        par = (a + o) / a                        # avg parallelism: total work / wall-clock
+        L.append(f"- **{aggregate.harness_disp(r['harness'])}:{aggregate.model_disp(r['model'])}** — "
+                 f"{a:.0f}s wall-clock for {r.get('runs', '?')} runs (~{par:.1f}× parallel)")
     L.append("")
     det = os.path.join(RESULTS_DIR, "results_detailed.csv")
     if os.path.exists(det):
