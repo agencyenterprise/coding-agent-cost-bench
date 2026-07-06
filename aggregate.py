@@ -46,6 +46,18 @@ def model_id(ref):
     return ref.split("/", 1)[1] if "/" in ref else ref
 
 
+def harness_disp(h):
+    """Human label for the harness column."""
+    return "claude-code" if h == "claude" else h
+
+
+def model_disp(ref):
+    """Display id that KEEPS the provider so variants stay distinct, e.g. modal/GLM-5.2-FP8 vs
+    modal-nothink/GLM-5.2-FP8 (thinking on vs off) — dropping only the org path."""
+    p = ref.split("/")
+    return f"{p[0]}/{p[-1]}" if len(p) > 1 else ref
+
+
 def load_usage(outdir):
     """(tokens_in, tokens_out, ccusage_cost) for a run from its usage.json.
 
@@ -309,8 +321,8 @@ def main():
     table = [headers]
     for r in rows:
         table.append([
-            r["harness"],
-            model_id(r["model"]),
+            harness_disp(r["harness"]),
+            model_disp(r["model"]),
             f"{r['passes']}/{r['runs']}",
             f"{r['success_rate']:.0%}",
             _show(r["avg_duration_s"]),
@@ -338,8 +350,7 @@ def main():
     # efficiency comparison (transposed: metric rows x (harness,model) columns) + ratio vs GLM
     order = [(r["harness"], r["model"]) for r in rows]
     glm = next((k for k in order if is_self_hosted(k[1])), None)
-    abbr = {"opencode": "oc", "claude": "cc"}
-    lab = lambda k: abbr.get(k[0], k[0]) + ":" + model_id(k[1])
+    lab = lambda k: f"{harness_disp(k[0])}:{model_disp(k[1])}"   # e.g. opencode:modal-nothink/GLM-5.2-FP8
     others = [k for k in order if k != glm]
     metrics = [("steps (turns)", "steps"), ("tool calls", "tools"), ("output tokens", "out"),
                ("prose chars", "prose"), ("reasoning tokens", "reason")]

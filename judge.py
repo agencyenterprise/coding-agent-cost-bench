@@ -18,6 +18,8 @@ import re
 import subprocess
 import sys
 
+import aggregate   # reuse harness_disp / model_disp / parsers so labels can't drift
+
 
 def load_env(path=".env"):
     """Load .env into os.environ (so `opencode run` sees the API keys), and drop the
@@ -214,14 +216,14 @@ def efficiency(rows):
     for (h, m), a in agg.items():
         n = max(a["runs"], 1)
         per[(h, m)] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
-        L.append(f"| {h} | {aggregate.model_id(m)} | {per[(h, m)][0]:.0f} | "
+        L.append(f"| {aggregate.harness_disp(h)} | {aggregate.model_disp(m)} | {per[(h, m)][0]:.0f} | "
                  f"{per[(h, m)][1]:.0f} | {per[(h, m)][2]:.0f} |")
     L.append("")
     gpu = next((k for k in agg if aggregate.is_self_hosted(k[1])), None)
     if gpu:
         for k in agg:
             if k != gpu and per[k][1] and per[k][2]:
-                L.append(f"- vs **{k[0]}:{aggregate.model_id(k[1])}**, the self-hosted run does "
+                L.append(f"- vs **{aggregate.harness_disp(k[0])}:{aggregate.model_disp(k[1])}**, the self-hosted run does "
                          f"~{per[gpu][1] / per[k][1]:.1f}× the tool calls and ~{per[gpu][2] / per[k][2]:.1f}× "
                          "the output tokens for the same fixes — more work per task, which compounds its GPU cost.")
         L.append("")
@@ -387,11 +389,17 @@ def main():
                 "avg_tokens_out", "avg_duration_s", "call_s", "active_s", "idle_s",
                 "overlap_s", "cost_per_successful_task", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
+        def _cell(c, r):
+            if c == "harness":
+                return aggregate.harness_disp(r.get(c, ""))
+            if c == "model":
+                return aggregate.model_disp(r.get(c, ""))   # keep provider: modal vs modal-nothink
+            return str(r.get(c, ""))
         lines.append("## Numbers\n")
         lines.append("| " + " | ".join(cols) + " |")
         lines.append("|" + "|".join(["---"] * len(cols)) + "|")
         for r in s:
-            lines.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
+            lines.append("| " + " | ".join(_cell(c, r) for c in cols) + " |")
         lines.append("")
         lines += timeline(s)
         lines += cost_analysis(s)
