@@ -347,25 +347,25 @@ def main():
             print(f"\n  {r['model']} — sole-tenant ${r['sole_usd_task']}/task  =  "
                   f"generation ${r['gen_usd_task']} (floor)  +  idle tax ${r['idle_usd_task']}")
 
-    # efficiency comparison (transposed: metric rows x (harness,model) columns) + ratio vs GLM
+    # efficiency: one row per arm, metrics as columns (out÷GLM = output tokens vs the thinking-on GLM arm)
     order = [(r["harness"], r["model"]) for r in rows]
     glm = next((k for k in order if is_self_hosted(k[1])), None)
     lab = lambda k: f"{harness_disp(k[0])}:{model_disp(k[1])}"   # e.g. opencode:modal-nothink/GLM-5.2-FP8
-    others = [k for k in order if k != glm]
-    metrics = [("steps (turns)", "steps"), ("tool calls", "tools"), ("output tokens", "out"),
-               ("prose chars", "prose"), ("reasoning tokens", "reason")]
-    et = [["metric"] + [lab(k) for k in order] + ([f"GLM÷{lab(k)}" for k in others] if glm else [])]
-    for name, mk in metrics:
-        line = [name] + [f"{eff[k][mk]:,}" for k in order]
+    glm_out = eff[glm]["out"] if glm else 0
+    hdr = ["harness:model", "steps", "tools", "out_tok", "prose_ch"] + (["out÷GLM"] if glm else [])
+    et = [hdr]
+    for k in order:
+        row = [lab(k), f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}",
+               f"{eff[k]['out']:,}", f"{eff[k]['prose']:,}"]
         if glm:
-            line += [f"{eff[glm][mk] / eff[k][mk]:.1f}×" if eff[k][mk] else "—" for k in others]
-        et.append(line)
-    ew = [max(len(str(row[i])) for row in et) for i in range(len(et[0]))]
-    print("\n  efficiency (totals; same harness & prompts):")
-    for i, row in enumerate(et):
-        print("  " + "  ".join(str(c).ljust(ew[j]) for j, c in enumerate(row)))
+            row.append(f"{eff[k]['out'] / glm_out:.2f}×" if glm_out else "—")
+        et.append(row)
+    ew = [max(len(str(r[i])) for r in et) for i in range(len(hdr))]
+    print("\n  efficiency (totals; out÷GLM = output tokens relative to the thinking-on GLM arm):")
+    for i, r in enumerate(et):
+        print("  " + "  ".join(str(c).ljust(ew[j]) for j, c in enumerate(r)))
         if i == 0:
-            print("  " + "  ".join("-" * ew[j] for j in range(len(et[0]))))
+            print("  " + "  ".join("-" * ew[j] for j in range(len(hdr))))
 
     # empirical task complexity (relative 0-10 from observed effort pooled across all models)
     comp = task_complexity(task_stat)
