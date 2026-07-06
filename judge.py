@@ -356,11 +356,20 @@ def main():
         sys.exit("no results/manifest.csv — run run_bench.sh first")
 
     rows = list(csv.DictReader(open(manifest)))
+    # Judge ONE representative run per (harness, model, task): the qualitative note is the same across
+    # repeat runs (repeats are for success-rate stability). Prefer a passing run (most informative).
+    # This is 5 arms × 5 tasks = 25 calls instead of 75 for --runs 3.
+    rep = {}
+    for r in rows:
+        k = (r.get("harness", "opencode"), r["model"], r["task"])
+        if k not in rep or (r["status"] == "pass" and rep[k]["status"] != "pass"):
+            rep[k] = r
+    judge_rows = list(rep.values())
     verdicts = {}  # (harness, model) -> list of (task, status, verdict)
-    for i, row in enumerate(rows, 1):
+    for i, row in enumerate(judge_rows, 1):
         m, task, outdir, status = row["model"], row["task"], row.get("outdir", ""), row["status"]
         h = row.get("harness", "opencode")
-        sys.stderr.write(f"[{i}/{len(rows)}] judging {task} | {h} | {m}\n")
+        sys.stderr.write(f"[{i}/{len(judge_rows)}] judging {task} | {h} | {m}\n")
         v = judge_run(model, task, status, blind(transcript(outdir)), blind(diff(outdir)))
         verdicts.setdefault(f"{h} · {m}", []).append((task, status, v))
 
