@@ -308,89 +308,108 @@ def main():
         w.writeheader()
         w.writerows(rows)
 
-    def _show(v):
-        return "—" if v in ("", None) else str(v)
-
-    print(f"wrote {RESULTS_DIR}/results_detailed.csv + {RESULTS_DIR}/summary.csv")
-    print(f"(GLM GPU rate: ${GPU_HOURLY_USD:.2f}/hr, charged on endpoint call time only)\n")
-    headers = ["harness", "model", "pass", "succ", "avg_s", "call_s", "uptime_s", "idle_s",
-               "overlap_s", "tok_in", "tok_out", "$/task", "basis"]
-    table = [headers]
-    for r in rows:
-        table.append([
-            harness_disp(r["harness"]),
-            model_disp(r["model"]),
-            f"{r['passes']}/{r['runs']}",
-            f"{r['success_rate']:.0%}",
-            _show(r["avg_duration_s"]),
-            _show(r["call_s"]),
-            _show(r["active_s"]),
-            _show(r["idle_s"]),
-            _show(r["overlap_s"]),
-            _show(r["avg_tokens_in"]),
-            _show(r["avg_tokens_out"]),
-            _show(r["cost_per_successful_task"]),
-            _show(r["cost_basis"]),
-        ])
-    w = [max(len(str(row[i])) for row in table) for i in range(len(headers))]
-    for i, row in enumerate(table):
-        print("  " + "  ".join(str(c).ljust(w[j]) for j, c in enumerate(row)))
-        if i == 0:
-            print("  " + "  ".join("-" * w[j] for j in range(len(headers))))
-
-    # endpoint idle: charged ONCE for the shared GLM endpoint (uptime not spent generating), across
-    # ALL modal arms — not per-arm. It's under-utilization, recoverable by packing, not any one arm's cost.
-    gpu_ivs = [iv for (h, m), ivs in intervals.items() if is_self_hosted(m) for iv in ivs]
-    if gpu_ivs:
-        up = union_seconds(gpu_ivs)
-        gen = sum(_f(r["call_s"]) or 0 for r in rows if is_self_hosted(r["model"]))
-        idle = max(0.0, up - gen)
-        print(f"\n  GLM endpoint (shared by all modal arms): up {up:.0f}s, generating {gen:.0f}s "
-              f"→ idle {idle:.0f}s = ${idle / 3600 * GPU_HOURLY_USD:.2f} under-utilization")
-        print("  (idle is an endpoint property — recoverable by packing — NOT charged to any single arm;"
-              " per-arm $/task above is generation only)")
-
-    # efficiency: one row per arm, metrics as columns (out÷GLM = output tokens vs the thinking-on GLM arm)
-    order = [(r["harness"], r["model"]) for r in rows]
-    glm = next((k for k in order if is_self_hosted(k[1])), None)
-    lab = lambda k: f"{harness_disp(k[0])}:{model_disp(k[1])}"   # e.g. opencode:modal-nothink/GLM-5.2-FP8
-    glm_out = eff[glm]["out"] if glm else 0
-    hdr = ["harness:model", "steps", "tools", "out_tok", "prose_ch"] + (["out÷GLM"] if glm else [])
-    et = [hdr]
-    for k in order:
-        row = [lab(k), f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}",
-               f"{eff[k]['out']:,}", f"{eff[k]['prose']:,}"]
-        if glm:
-            row.append(f"{eff[k]['out'] / glm_out:.2f}×" if glm_out else "—")
-        et.append(row)
-    ew = [max(len(str(r[i])) for r in et) for i in range(len(hdr))]
-    print("\n  efficiency (totals; out÷GLM = output tokens relative to the thinking-on GLM arm):")
-    for i, r in enumerate(et):
-        print("  " + "  ".join(str(c).ljust(ew[j]) for j, c in enumerate(r)))
-        if i == 0:
-            print("  " + "  ".join("-" * ew[j] for j in range(len(hdr))))
-
-    # empirical task complexity (relative 0-10 from observed effort pooled across all models)
+    # write complexity.csv (data), then render the console report
     comp = task_complexity(task_stat)
-    ccols = ["task", "complexity", "pass_rate", "runs", "avg_steps", "avg_tools", "avg_out_tok", "avg_dur_s"]
-    crows = []
-    for t, a in sorted(comp.items(), key=lambda kv: kv[1]["complexity"], reverse=True):
-        crows.append({"task": t, "complexity": a["complexity"], "pass_rate": a["pass_rate"],
-                      "runs": a["runs"], "avg_steps": round(a["avg_steps"], 1),
-                      "avg_tools": round(a["avg_tools"], 1), "avg_out_tok": round(a["avg_out"]),
-                      "avg_dur_s": round(a["avg_dur"], 1)})
+    crows = [{"task": t, "complexity": a["complexity"], "pass_rate": a["pass_rate"], "runs": a["runs"],
+              "avg_steps": round(a["avg_steps"], 1), "avg_tools": round(a["avg_tools"], 1),
+              "avg_out_tok": round(a["avg_out"]), "avg_dur_s": round(a["avg_dur"], 1)}
+             for t, a in sorted(comp.items(), key=lambda kv: kv[1]["complexity"], reverse=True)]
     if crows:
         with open(os.path.join(RESULTS_DIR, "complexity.csv"), "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=ccols)
+            w = csv.DictWriter(f, fieldnames=list(crows[0].keys()))
             w.writeheader()
             w.writerows(crows)
-        ctab = [ccols] + [[str(r[c]) for c in ccols] for r in crows]
-        cw = [max(len(row[i]) for row in ctab) for i in range(len(ccols))]
-        print("\n  task complexity (relative 0-10 from observed effort, all models pooled):")
-        for i, row in enumerate(ctab):
-            print("  " + "  ".join(row[j].ljust(cw[j]) for j in range(len(ccols))))
-            if i == 0:
-                print("  " + "  ".join("-" * cw[j] for j in range(len(ccols))))
+    _print_report(RESULTS_DIR, rows, eff, crows, intervals)
+
+
+def _pretty(harness, model):
+    """Friendly display name, e.g. GLM-5.2 FP8 (no thinking) / Claude Opus 4.8 (Claude Code)."""
+    prov, last = model.split("/")[0], model.split("/")[-1]
+    name = {"claude-opus-4-8": "Claude Opus 4.8"}.get(last, last.replace("-FP8", " FP8"))
+    tag = {"modal-nothink": " (no thinking)", "modal-high": " (high reasoning)"}.get(prov, "")
+    if harness == "claude":
+        tag += " (Claude Code)"
+    return name + tag
+
+
+def _tshort(t):
+    t = t.replace("demo-swebench-", "").replace("demo-", "")
+    return t.split("__")[-1] if "__" in t else t
+
+
+def _print_report(results_dir, rows, eff, crows, intervals):
+    W = 79
+    def rule(ch):
+        print(ch * W)
+    def section(title):
+        print("\n" + "═" * W + f"\n {title}\n" + "═" * W)
+    def table(headers, body):
+        cols = list(zip(*([headers] + body)))
+        w = [max(len(str(c)) for c in col) for col in cols]
+        pad = lambda vals: "  " + "  ".join(str(v).ljust(w[j]) for j, v in enumerate(vals))
+        print(pad(headers))
+        print("  " + "  ".join("─" * w[j] for j in range(len(headers))))
+        for b in body:
+            print(pad(b))
+
+    rule("─"); print(" Coding Agent Cost Bench"); rule("─")
+    print("\n✓ Results written:")
+    print(f"    {results_dir}/results_detailed.csv")
+    print(f"    {results_dir}/summary.csv")
+    print("\nGPU pricing")
+    print(f"  GLM endpoint: ${GPU_HOURLY_USD:.2f}/hr (charged only while generating)")
+
+    def usd(v):
+        return f"${v:.3f}" if v not in ("", None) else "—"
+
+    section("Cost per Completed Task")
+    print()
+    table(["Model", "Success", "Cost/task", "Avg Time"],
+          [[_pretty(r["harness"], r["model"]),
+            f"{r['passes']}/{r['runs']}  {r['success_rate']:.0%}",
+            usd(r["cost_per_successful_task"]),
+            f"{r['avg_duration_s']:.0f}s" if r["avg_duration_s"] != "" else "—"] for r in rows])
+    print("\n  Cost/task = generation only (what the model actually spent on the GPU).")
+
+    st = [r for r in rows if is_self_hosted(r["model"]) and r["cost_per_successful_task"] != "" and r["passes"]]
+    if st:
+        section("If you own the GPU (single tenant)")
+        for r in st:
+            gen = r["cost_per_successful_task"]
+            idle_c = (_f(r["idle_s"]) or 0) / 3600 * GPU_HOURLY_USD / r["passes"]
+            print(f"\n {_pretty(r['harness'], r['model'])}")
+            print(f"   generation   ${gen:.3f}")
+            print(f" + idle tax     ${idle_c:.3f}")
+            print(" " + "─" * 22)
+            print(f" = total        ${gen + idle_c:.3f} / task")
+        print("\n  Idle tax = endpoint up but not generating while this arm runs alone (pip/pytest/git).")
+        print("  It's recoverable by packing the endpoint — so cutting reasoning barely helps sole-tenant,")
+        print("  where idle dominates; the win shows up only when the GPU is shared/packed.")
+
+    if st:
+        section("GPU Utilization")
+        print()
+        table(["Model", "Call", "Idle", "Overlap"],
+              [[_pretty(r["harness"], r["model"]),
+                f"{_f(r['call_s']) or 0:.0f} s", f"{_f(r['idle_s']) or 0:.0f} s",
+                f"{_f(r['overlap_s']) or 0:.0f} s"] for r in st])
+
+    order = [(r["harness"], r["model"]) for r in rows]
+    glm = next((k for k in order if is_self_hosted(k[1])), None)
+    glm_out = eff[glm]["out"] if glm else 0
+    section("Efficiency")
+    print()
+    table(["Model", "Steps", "Tools", "Output Tok", "vs GLM"],
+          [[_pretty(*k), f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}", f"{eff[k]['out']:,}",
+            f"{eff[k]['out'] / glm_out:.2f}×" if glm and glm_out else "—"] for k in order])
+
+    if crows:
+        section("Task Difficulty")
+        print()
+        table(["Task", "Diff", "Pass", "Avg Steps"],
+              [[_tshort(r["task"]), f"{r['complexity']}", f"{r['pass_rate']:.0%}", f"{r['avg_steps']:.0f}"]
+               for r in crows])
+    print()
 
 
 if __name__ == "__main__":
