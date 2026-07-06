@@ -20,7 +20,7 @@ TASKS_DIR="./tasks"
 ONLY_TASK=""               # run just one task (its dir name under $TASKS_DIR); empty = all
 PROMPTS_STR=""             # restrict to these per-task prompt files (comma/space); empty = ALL prompt*.txt
 RUNS=3
-TIMEOUT_SECS=500
+TIMEOUT_SECS=3500
 RETRIES=2
 RUN_DELAY=2
 JOBS=30
@@ -89,10 +89,10 @@ done
 
 model_id() { echo "${1#*/}"; }   # anthropic/claude-opus-4-8 -> claude-opus-4-8 (for `claude --model`)
 
-# prompt version label from a filename: prompt.txt -> v2 (the canonical uniform template),
-# prompt.v1.txt -> v1, prompt.<x>.txt -> x. Threaded into the manifest as the `prompt` column.
+# prompt version label from a filename: prompt.txt -> v1 (the default/baseline), prompt.v2.txt -> v2
+# (the shaped uniform template), prompt.<x>.txt -> x. Threaded into the manifest as `prompt`.
 plabel() { local f="${1##*/}"; case "$f" in
-  prompt.txt) echo v2;; prompt.*.txt) f="${f#prompt.}"; echo "${f%.txt}";; *) echo "${f%.txt}";; esac; }
+  prompt.txt) echo v1;; prompt.*.txt) f="${f#prompt.}"; echo "${f%.txt}";; *) echo "${f%.txt}";; esac; }
 
 # restrict set (empty = discover all prompt*.txt per task in run_group)
 read -r -a PROMPT_FILES <<< "${PROMPTS_STR//,/ }"

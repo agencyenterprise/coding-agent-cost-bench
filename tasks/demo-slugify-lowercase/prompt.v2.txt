@@ -1,0 +1,21 @@
+## Task
+The test suite `test.py` is failing: `slugify()` produces wrong-case output.
+The bug is in `slugify/slugify.py`.
+
+## Success criteria
+- `.venv/bin/python -m pytest test.py` exits 0 with all tests passing.
+- Do not modify any test files.
+
+## Scope
+- Make the smallest change that fully fixes the issue.
+- If the same defect appears in more than one place, fix every occurrence.
+- Do not refactor, reformat, modernize, upgrade dependencies, or fix unrelated issues.
+
+## Environment
+- Fresh clone, no virtualenv. Create `.venv` at the repo root.
+- Install only what is required to run the tests: `.venv/bin/pip install -e . pytest`.
+  Do not install anything else.
+
+## Before finishing
+- Run the Success criteria command. If anything fails, keep working.
+- Confirm your diff contains only changes required by the fix.

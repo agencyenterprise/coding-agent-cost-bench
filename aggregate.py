@@ -264,7 +264,7 @@ def main():
         for row in csv.DictReader(f):
             m = row["model"]
             h = row.get("harness") or harness_of(m)   # harness recorded by run_bench (fallback for old data)
-            pv = row.get("prompt") or "v2"             # prompt version (fallback for pre-sweep manifests)
+            pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
             key = (h, m, pv)
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
@@ -415,7 +415,7 @@ def _print_report(results_dir, rows, eff, crows, intervals):
             usd(r["cost_per_successful_task"]),
             f"{r['avg_duration_s']:.0f}s" if r["avg_duration_s"] != "" else "—"] for r in rows])
     print("\n  Cost/task = generation only (what the model actually spent on the GPU).")
-    print("  Prompt = which task prompt version ran (v2 = uniform template; see PROMPTS.md).")
+    print("  Prompt = which task prompt version ran (v1 = baseline/default; v2 = shaped template; see PROMPTS.md).")
 
     st = [r for r in rows if is_self_hosted(r["model"]) and r["cost_per_successful_task"] != "" and r["passes"]]
     if st:

@@ -14,8 +14,8 @@ Then run it like any other task:
     ./run_bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8"
 
 Caveats (see SWEBENCH.md):
-- Each instance needs its repo's own deps. The prompt tells the agent to set up a
-  venv; heavy scientific repos (numpy/scipy/astropy) may be slow or flaky locally.
+- Each instance needs its repo's own deps. The v2 prompt tells the agent to set up a
+  venv (v1 is the raw issue, no setup hints); heavy scientific repos may be slow/flaky locally.
   For the rigorous leaderboard number use the official SWE-bench harness (Docker).
 - Pick lightweight repos first (requests, flask, click, pytest) for quick runs.
 """
@@ -83,12 +83,16 @@ def main() -> None:
               f"(not a pytest node id, or a space / unbalanced brackets from dataset mangling) — "
               f"e.g. {bad[0]!r}. verify.sh likely can't resolve them, so the task may never pass. "
               "Pick a different instance.")
-    # v2 uniform template: verbatim issue block + a FILE-level suite command (the hidden grader,
-    # verify.sh, still runs the exact FAIL_TO_PASS node ids from f2p.txt). Same structure as every
-    # other task so phrasing isn't a confound; explicit anti-overwork/anti-underwork scope.
-    issue = "\n".join(("> " + ln) if ln.strip() else ">" for ln in row["problem_statement"].strip().splitlines())
+    # Two prompt versions (see PROMPTS.md). v1 = prompt.txt = the ORIGINAL problem statement,
+    # verbatim, nothing added — the raw GitHub issue a developer would see. v2 = prompt.v2.txt =
+    # our shaped uniform template (verbatim issue block + FILE-level suite command + explicit
+    # scope/env/checklist). The hidden grader (verify.sh) runs the exact FAIL_TO_PASS node ids
+    # from f2p.txt either way, so the prompt is the only thing that changes between v1 and v2.
+    statement = row["problem_statement"].strip()
+    (d / "prompt.txt").write_text(statement + "\n")          # v1: original, unmodified
+    issue = "\n".join(("> " + ln) if ln.strip() else ">" for ln in statement.splitlines())
     suite = " ".join(sorted({x.split("::")[0] for x in f2p}))   # the file(s) holding the tests, not the node ids
-    (d / "prompt.txt").write_text(
+    (d / "prompt.v2.txt").write_text(
         "## Task\n"
         "Reported issue (verbatim):\n\n"
         f"{issue}\n\n"

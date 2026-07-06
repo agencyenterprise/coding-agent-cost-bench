@@ -61,11 +61,12 @@ Common flags:
 | `--prompts LIST` | restrict to these per-task prompt files (comma/space) | **all `prompt*.txt`** |
 | `--delete-repo` | discard the mutated repo | keep |
 
-**Every prompt version runs by default.** A task can hold several prompt files (`prompt.txt` = `v2`,
-`prompt.v1.txt` = `v1`, …); the sweep runs *all* of them and tags each result with its version
-(`prompt` column, threaded into `summary.csv` + `report.md`), so `v1` vs `v2` of the same model are
-separate, comparable rows. See [PROMPTS.md](PROMPTS.md) for what each version is and where it came
-from. `--prompts prompt.v1.txt` restricts to one.
+**Every prompt version runs by default.** Each task holds two prompt files — `prompt.txt` = `v1`
+(the terse baseline / raw issue) and `prompt.v2.txt` = `v2` (the shaped uniform template). The sweep
+runs *both* (v1 first) and tags each result with its version (`prompt` column, threaded into
+`summary.csv` + `report.md`), so `v1` vs `v2` of the same model are separate, comparable rows — the
+`v2 − v1` delta is the value of prompt engineering. See [PROMPTS.md](PROMPTS.md) for what each
+version is and where it came from. `--prompts prompt.txt` restricts to just the baseline.
 
 **Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is
 clean (no cross-arm contention inflating its latency); within a group every task×run fires **in

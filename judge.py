@@ -197,7 +197,7 @@ def efficiency(rows):
     for r in rows:
         m = r["model"]
         h = r.get("harness") or aggregate.harness_of(m)
-        pv = r.get("prompt", "v2")
+        pv = r.get("prompt", "v1")
         key = (h, m, pv)
         a = agg.setdefault(key, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
         a["runs"] += 1
@@ -371,14 +371,14 @@ def main():
     # different transcript+diff, so each prompt version is judged separately. Prefer a passing run.
     rep = {}
     for r in rows:
-        k = (r.get("harness", "opencode"), r["model"], r.get("prompt", "v2"), r["task"])
+        k = (r.get("harness", "opencode"), r["model"], r.get("prompt", "v1"), r["task"])
         if k not in rep or (r["status"] == "pass" and rep[k]["status"] != "pass"):
             rep[k] = r
     judge_rows = list(rep.values())
     verdicts = {}  # "harness · model · prompt" -> list of (task, status, verdict)
     for i, row in enumerate(judge_rows, 1):
         m, task, outdir, status = row["model"], row["task"], row.get("outdir", ""), row["status"]
-        h, pv = row.get("harness", "opencode"), row.get("prompt", "v2")
+        h, pv = row.get("harness", "opencode"), row.get("prompt", "v1")
         sys.stderr.write(f"[{i}/{len(judge_rows)}] judging {task} | {h} | {m} | prompt {pv}\n")
         v = judge_run(model, task, status, blind(transcript(outdir)), blind(diff(outdir)))
         verdicts.setdefault(f"{h} · {m} · prompt {pv}", []).append((task, status, v))
