@@ -57,6 +57,7 @@ Common flags:
 | `--model H:REF` | add one entry (**repeatable**) | — |
 | `-j, --jobs N` | max task×run jobs **in parallel within a group** | 30 |
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
+| `--task NAME` | run **only** this task (dir name), e.g. `--task demo-kanban-orchestration` | all |
 | `--delete-repo` | discard the mutated repo | keep |
 
 **Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is

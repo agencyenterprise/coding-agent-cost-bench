@@ -17,6 +17,7 @@ set -euo pipefail
 # All modal* GLM arms (max / high / off) run concurrently on the one endpoint; Opus/Claude-Code after.
 MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:modal-high/zai-org/GLM-5.2-FP8,opencode:modal-nothink/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
+ONLY_TASK=""               # run just one task (its dir name under $TASKS_DIR); empty = all
 PROMPT_FILE="prompt.txt"   # per-task prompt to use; e.g. --prompt prompt.v1.txt for the baseline arm
 RUNS=3
 TIMEOUT_SECS=500
@@ -34,6 +35,7 @@ Usage: ./run_bench.sh [options]
   -m, --models "a,b"    comma/space list of harness:model [$MODELS_STR]
       --model H:REF     add one harness:model (repeatable), e.g. --model claude:anthropic/claude-opus-4-8
   -t, --tasks DIR       tasks directory                   [$TASKS_DIR]
+      --task NAME       run ONLY this task (dir name under --tasks), e.g. --task demo-kanban-orchestration
       --prompt FILE     per-task prompt filename          [$PROMPT_FILE]  (e.g. prompt.v1.txt = baseline arm)
   -j, --jobs N          max task×run jobs in parallel WITHIN a group; groups (harness,model) run one at a time [$JOBS]
       --timeout SECS    kill a stuck agent                [$TIMEOUT_SECS]
@@ -50,6 +52,7 @@ while [ $# -gt 0 ]; do
     -m|--models) MODELS_STR="$2"; shift 2;;
     --model) MODEL_ENTRIES+=("$2"); shift 2;;
     -t|--tasks) TASKS_DIR="$2"; shift 2;;
+    --task) ONLY_TASK="$2"; shift 2;;   # run only this task (dir name under --tasks)
     --prompt) PROMPT_FILE="$2"; shift 2;;
     -j|--jobs) JOBS="$2"; shift 2;;
     --timeout) TIMEOUT_SECS="$2"; shift 2;;
@@ -60,6 +63,13 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1" >&2; usage; exit 1;;
   esac
 done
+
+# --task: fail fast if the named task doesn't exist (else it'd silently run nothing)
+if [ -n "$ONLY_TASK" ] && [ ! -f "$TASKS_DIR/$ONLY_TASK/prompt.txt" ]; then
+  echo "no task '$ONLY_TASK' in $TASKS_DIR (need $TASKS_DIR/$ONLY_TASK/prompt.txt)" >&2
+  echo "available: $(cd "$TASKS_DIR" 2>/dev/null && ls -d */ 2>/dev/null | tr -d / | tr '\n' ' ')" >&2
+  exit 1
+fi
 
 # explicit --model wins; otherwise split the (default or -m) MODELS_STR
 if [ "${#MODEL_ENTRIES[@]}" -eq 0 ]; then
@@ -266,8 +276,10 @@ run_group() {
   local harness="$1" model="$2" pids=() task tn ta pr run
   for task in "$TASKS_DIR"/*/; do
     [ -f "$task/prompt.txt" ] || continue
+    tn="$(basename "$task")"
+    [ -n "$ONLY_TASK" ] && [ "$tn" != "$ONLY_TASK" ] && continue   # --task: run only this one
     local pf="$task/$PROMPT_FILE"; [ -f "$pf" ] || pf="$task/prompt.txt"   # fall back if arm file missing
-    tn="$(basename "$task")"; ta="$(cd "$task" && pwd)"; pr="$(cat "$pf")"
+    ta="$(cd "$task" && pwd)"; pr="$(cat "$pf")"
     for run in $(seq 1 "$RUNS"); do
       while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
       run_one_job "$tn" "$ta" "$pr" "$harness" "$model" "$run" &
