@@ -62,9 +62,9 @@ Common flags:
 | `--delete-repo` | discard the mutated repo | keep |
 
 **Every prompt version runs by default.** Each task holds `prompt.v1.txt` = `v1` (terse baseline / raw
-issue), `prompt.v2.txt` = `v2` (shaped uniform template), and — on the bug-fix / SWE tasks — `prompt.v3.txt`
-= `v3` (terse + the operational scaffolding v2 carries, a control to split style from operational
-context). The sweep runs every version present (v1 first) and tags each result with it (`prompt` column,
+issue), `prompt.v2.txt` = `v2` (shaped uniform template), and `prompt.v3.txt` = `v3` (terse + the
+operational scaffolding v2 carries, a control to split style from operational context). The sweep
+runs every version present (v1 first) and tags each result with it (`prompt` column,
 threaded into `summary.csv` + `report.md` + the complexity view), so versions of the same model are
 separate, comparable rows. See [PROMPTS.md](PROMPTS.md) for what each is, where it came from, and how
 `v3 − v1` vs `v2 − v3` decompose the gain. `--prompts prompt.v1.txt` restricts to just the baseline.

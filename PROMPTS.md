@@ -66,18 +66,18 @@ fix every occurrence / no refactor", no checklist).
 - **`v2 − v3`** = value of *structure + scope discipline* on top — the actual "prompt engineering."
 
 If `v3 − v1` captures most of the gain, the v1→v2 story is "we supplied missing operational context,"
-not clever wording. Present on the five bug-fix / SWE tasks (not the kanban build).
+not clever wording. Present on all tasks (for the kanban build, the operational bit is the
+`create-next-app` scaffold + the explicit build/test/API checks).
 
 ## Coverage
 
-All six demo tasks carry `v1` and `v2`; the five bug-fix / SWE tasks also carry `v3` (kanban doesn't —
-it fails on every prompt and its v1 already states the build/test commands, so v3 adds no signal there).
+All six demo tasks carry `v1`, `v2`, and `v3`:
 
 | Task | v1 (`prompt.v1.txt`) | v2 (`prompt.v2.txt`) | v3 (`prompt.v3.txt`) |
 |---|---|---|---|
 | `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template | terse + env/verify cmd |
 | `demo-swebench-pytest-dev__pytest-5787`, `-6197` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
-| `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) | — |
+| `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) | terse + create-next-app + build/test/API checks |
 
 New SWE-bench tasks get both automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw
 statement) and `prompt.v2.txt` (shaped) side by side.
