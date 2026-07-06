@@ -58,7 +58,14 @@ Common flags:
 | `-j, --jobs N` | max task×run jobs **in parallel within a group** | 30 |
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
 | `--task NAME` | run **only** this task (dir name), e.g. `--task demo-kanban-orchestration` | all |
+| `--prompts LIST` | restrict to these per-task prompt files (comma/space) | **all `prompt*.txt`** |
 | `--delete-repo` | discard the mutated repo | keep |
+
+**Every prompt version runs by default.** A task can hold several prompt files (`prompt.txt` = `v2`,
+`prompt.v1.txt` = `v1`, …); the sweep runs *all* of them and tags each result with its version
+(`prompt` column, threaded into `summary.csv` + `report.md`), so `v1` vs `v2` of the same model are
+separate, comparable rows. See [PROMPTS.md](PROMPTS.md) for what each version is and where it came
+from. `--prompts prompt.v1.txt` restricts to one.
 
 **Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is
 clean (no cross-arm contention inflating its latency); within a group every task×run fires **in
@@ -117,9 +124,9 @@ break-even table shows the concurrency needed to beat Claude.
 
 ## Outputs
 - `results/report.md` — the deliverable (numbers + cost analysis + break-even + blinded notes).
-- `results/summary.csv` — per model: `success_rate`, tokens, `avg_duration_s`, `active_s`,
-  `overlap_s`, `cost_per_successful_task`, `cost_basis`.
-- `results/results_detailed.csv` — per (harness,model,task,run): `start`, `end`, `duration_s`, tokens, cost.
+- `results/summary.csv` — per (harness, model, **prompt version**): `success_rate`, tokens,
+  `avg_duration_s`, `active_s`, `overlap_s`, `cost_per_successful_task`, `cost_basis`.
+- `results/results_detailed.csv` — per (harness,model,**prompt**,task,run): `start`, `end`, `duration_s`, tokens, cost.
 - `results/complexity.csv` — per task: **empirical complexity 0–10** (relative, from observed effort
   pooled across all models: steps, tool calls, output tokens, duration), `pass_rate`, and the raw
   averages. `report.md` merges this with an independent blind **LLM difficulty 1–5** per task.
@@ -155,6 +162,7 @@ aggregate.py      # manifest + usage.json -> summary.csv / results_detailed.csv
 judge.py          # blinded LLM review + report.md (numbers, cost, break-even)
 clear_results.sh  # wipe results/
 opencode.jsonc    # provider config (secrets via {env:...})
+PROMPTS.md        # prompt-version registry: what v1/v2/... are + where they came from
 tasks/demo-*/     # committed tasks; tasks/<other>/ are gitignored
 results/          # logs + CSVs + report.md (gitignored)
 ```

@@ -254,15 +254,18 @@ def main():
         sys.exit(f"no manifest at {manifest} — run run_bench.sh first")
 
     detailed = []
-    intervals = defaultdict(list)   # (harness,model) -> [(start, end), ...] run intervals (uptime)
-    genivs = defaultdict(list)      # (harness,model) -> [(start, end), ...] generation windows (concurrency-safe)
+    # arm = (harness, model, prompt-version): the prompt version is a first-class sweep dimension,
+    # so v1 vs v2 of the SAME (harness, model) are separate rows and never pooled together.
+    intervals = defaultdict(list)   # arm -> [(start, end), ...] run intervals (uptime)
+    genivs = defaultdict(list)      # arm -> [(start, end), ...] generation windows (concurrency-safe)
     eff = defaultdict(lambda: {"steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0})
     task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0, "pass": 0})
     with open(manifest) as f:
         for row in csv.DictReader(f):
             m = row["model"]
             h = row.get("harness") or harness_of(m)   # harness recorded by run_bench (fallback for old data)
-            key = (h, m)
+            pv = row.get("prompt") or "v2"             # prompt version (fallback for pre-sweep manifests)
+            key = (h, m, pv)
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
                 intervals[key].append((s, e))
@@ -284,7 +287,7 @@ def main():
             ts["dur"] += _f(row.get("duration_s")) or 0.0
             ts["pass"] += 1 if row["status"] == "pass" else 0
             detailed.append({
-                "task": row["task"], "harness": h, "model": m, "run": row["run"],
+                "task": row["task"], "harness": h, "model": m, "prompt": pv, "run": row["run"],
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
                 "call_s": round(cs, 1),
@@ -300,13 +303,13 @@ def main():
         w.writeheader()
         w.writerows(detailed)
 
-    by_model = defaultdict(list)
+    by_arm = defaultdict(list)
     for d in detailed:
-        by_model[(d["harness"], d["model"])].append(d)
+        by_arm[(d["harness"], d["model"], d["prompt"])].append(d)
 
     rows = []
-    for (harness, model), runs in by_model.items():
-        key = (harness, model)
+    for (harness, model, prompt), runs in by_arm.items():
+        key = (harness, model, prompt)
         n = len(runs)
         passes = sum(1 for r in runs if r["status"] == "pass")
         durs = [_f(r["duration_s"]) for r in runs if _f(r["duration_s"]) is not None]
@@ -316,7 +319,7 @@ def main():
         gen_wall = union_seconds(genivs[key])                         # generation WALL-CLOCK (union; concurrency-safe)
         idle = max(0.0, active - gen_wall)                            # up but not generating anything (>= 0)
         row = {
-            "harness": harness, "model": model, "runs": n, "passes": passes,
+            "harness": harness, "model": model, "prompt": prompt, "runs": n, "passes": passes,
             "success_rate": round(passes / n, 3),
             "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)),
             "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)),
@@ -406,12 +409,13 @@ def _print_report(results_dir, rows, eff, crows, intervals):
 
     section("Cost per Completed Task")
     print()
-    table(["Harness", "Model", "Success", "Cost/task", "Avg Time"],
-          [[harness_disp(r["harness"]), _mname(r["model"]),
+    table(["Harness", "Model", "Prompt", "Success", "Cost/task", "Avg Time"],
+          [[harness_disp(r["harness"]), _mname(r["model"]), r["prompt"],
             f"{r['passes']}/{r['runs']}  {r['success_rate']:.0%}",
             usd(r["cost_per_successful_task"]),
             f"{r['avg_duration_s']:.0f}s" if r["avg_duration_s"] != "" else "—"] for r in rows])
     print("\n  Cost/task = generation only (what the model actually spent on the GPU).")
+    print("  Prompt = which task prompt version ran (v2 = uniform template; see PROMPTS.md).")
 
     st = [r for r in rows if is_self_hosted(r["model"]) and r["cost_per_successful_task"] != "" and r["passes"]]
     if st:
@@ -419,7 +423,7 @@ def _print_report(results_dir, rows, eff, crows, intervals):
         for r in st:
             gen = r["cost_per_successful_task"]
             idle_c = (_f(r["idle_s"]) or 0) / 3600 * GPU_HOURLY_USD / r["passes"]
-            print(f"\n {_mname(r['model'])}  [{harness_disp(r['harness'])}]")
+            print(f"\n {_mname(r['model'])}  [{harness_disp(r['harness'])} · prompt {r['prompt']}]")
             print(f"   generation   ${gen:.3f}")
             print(f" + idle tax     ${idle_c:.3f}")
             print(" " + "─" * 22)
@@ -430,18 +434,18 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     if st:
         section("GPU Utilization")
         print()
-        table(["Harness", "Model", "Uptime", "Generating", "Idle"],
-              [[harness_disp(r["harness"]), _mname(r["model"]),
+        table(["Harness", "Model", "Prompt", "Uptime", "Generating", "Idle"],
+              [[harness_disp(r["harness"]), _mname(r["model"]), r["prompt"],
                 f"{_f(r['active_s']) or 0:.0f} s", f"{_f(r['gen_s']) or 0:.0f} s",
                 f"{_f(r['idle_s']) or 0:.0f} s"] for r in st])
 
-    order = [(r["harness"], r["model"]) for r in rows]
+    order = [(r["harness"], r["model"], r["prompt"]) for r in rows]
     glm = next((k for k in order if is_self_hosted(k[1])), None)
     glm_out = eff[glm]["out"] if glm else 0
     section("Efficiency")
     print()
-    table(["Harness", "Model", "Steps", "Tools", "Output Tok", "vs GLM"],
-          [[harness_disp(k[0]), _mname(k[1]), f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}", f"{eff[k]['out']:,}",
+    table(["Harness", "Model", "Prompt", "Steps", "Tools", "Output Tok", "vs GLM"],
+          [[harness_disp(k[0]), _mname(k[1]), k[2], f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}", f"{eff[k]['out']:,}",
             f"{eff[k]['out'] / glm_out:.2f}×" if glm and glm_out else "—"] for k in order])
 
     if crows:

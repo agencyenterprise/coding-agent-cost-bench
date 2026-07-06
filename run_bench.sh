@@ -18,7 +18,7 @@ set -euo pipefail
 MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:modal-high/zai-org/GLM-5.2-FP8,opencode:modal-nothink/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
 ONLY_TASK=""               # run just one task (its dir name under $TASKS_DIR); empty = all
-PROMPT_FILE="prompt.txt"   # per-task prompt to use; e.g. --prompt prompt.v1.txt for the baseline arm
+PROMPTS_STR=""             # restrict to these per-task prompt files (comma/space); empty = ALL prompt*.txt
 RUNS=3
 TIMEOUT_SECS=500
 RETRIES=2
@@ -36,7 +36,8 @@ Usage: ./run_bench.sh [options]
       --model H:REF     add one harness:model (repeatable), e.g. --model claude:anthropic/claude-opus-4-8
   -t, --tasks DIR       tasks directory                   [$TASKS_DIR]
       --task NAME       run ONLY this task (dir name under --tasks), e.g. --task demo-kanban-orchestration
-      --prompt FILE     per-task prompt filename          [$PROMPT_FILE]  (e.g. prompt.v1.txt = baseline arm)
+      --prompts LIST    restrict to these per-task prompt files (comma/space); default = ALL prompt*.txt
+      --prompt FILE     alias for --prompts with one file (e.g. prompt.v1.txt = baseline arm only)
   -j, --jobs N          max task×run jobs in parallel WITHIN a group; groups (harness,model) run one at a time [$JOBS]
       --timeout SECS    kill a stuck agent                [$TIMEOUT_SECS]
       --retries N       retries on opencode server err    [$RETRIES]
@@ -53,7 +54,7 @@ while [ $# -gt 0 ]; do
     --model) MODEL_ENTRIES+=("$2"); shift 2;;
     -t|--tasks) TASKS_DIR="$2"; shift 2;;
     --task) ONLY_TASK="$2"; shift 2;;   # run only this task (dir name under --tasks)
-    --prompt) PROMPT_FILE="$2"; shift 2;;
+    --prompt|--prompts) PROMPTS_STR="$2"; shift 2;;   # restrict to these files; else all prompt*.txt
     -j|--jobs) JOBS="$2"; shift 2;;
     --timeout) TIMEOUT_SECS="$2"; shift 2;;
     --retries) RETRIES="$2"; shift 2;;
@@ -87,6 +88,14 @@ for e in "${MODEL_ENTRIES[@]}"; do
 done
 
 model_id() { echo "${1#*/}"; }   # anthropic/claude-opus-4-8 -> claude-opus-4-8 (for `claude --model`)
+
+# prompt version label from a filename: prompt.txt -> v2 (the canonical uniform template),
+# prompt.v1.txt -> v1, prompt.<x>.txt -> x. Threaded into the manifest as the `prompt` column.
+plabel() { local f="${1##*/}"; case "$f" in
+  prompt.txt) echo v2;; prompt.*.txt) f="${f#prompt.}"; echo "${f%.txt}";; *) echo "${f%.txt}";; esac; }
+
+# restrict set (empty = discover all prompt*.txt per task in run_group)
+read -r -a PROMPT_FILES <<< "${PROMPTS_STR//,/ }"
 
 if [ -f .env ]; then
   source .env
@@ -152,7 +161,7 @@ $CCUSAGE --help >/dev/null 2>&1 || true   # pre-install ccusage once so per-run 
 TO="$(command -v timeout || command -v gtimeout || true)"   # macOS: brew install coreutils
 now() { python3 -c 'import time; print(time.time())'; }
 MANIFEST="$RESULTS_DIR/manifest.csv"
-echo "task,harness,model,run,outdir,start,end,duration_s,status" > "$MANIFEST"
+echo "task,harness,model,prompt,run,outdir,start,end,duration_s,status" > "$MANIFEST"
 
 _log() { echo "$*" >&2; }
 
@@ -205,13 +214,15 @@ _snapshot_usage() {
   rm -rf "$home"
 }
 
-run_one_job() {   # task_name task_abs prompt harness model run
+run_one_job() {   # task_name task_abs prompt_file harness model run
   set +e   # one bad task must not abort the whole batch
-  local task_name="$1" task_abs="$2" prompt="$3" harness="$4" model="$5" run="$6"
-  local safe outdir work state_dir src agent_path start end dur status attempt
+  local task_name="$1" task_abs="$2" prompt_file="$3" harness="$4" model="$5" run="$6"
+  local pv prompt safe outdir work state_dir src agent_path start end dur status attempt
+  pv="$(plabel "$prompt_file")"                 # prompt version label (e.g. v2, v1)
+  prompt="$(cat "$task_abs/$prompt_file")"
   safe="$(echo "${harness}_${model}" | tr '/ :' '___')"
-  outdir="$RESULTS_DIR/${task_name}__${safe}__run${run}"; mkdir -p "$outdir"
-  _log ">>> $task_name | $harness | $model | run $run"
+  outdir="$RESULTS_DIR/${task_name}__${pv}__${safe}__run${run}"; mkdir -p "$outdir"
+  _log ">>> $task_name | $pv | $harness | $model | run $run"
 
   work="$(mktemp -d)"; state_dir="$(mktemp -d)"
   export XDG_DATA_HOME="$state_dir" XDG_STATE_HOME="$state_dir" XDG_CONFIG_HOME="$state_dir"
@@ -262,7 +273,7 @@ run_one_job() {   # task_name task_abs prompt harness model run
     claude) : ;;   # cost/usage/efficiency come from output.log (stream-json), parsed by aggregate.py
     *) _snapshot_usage "$state_dir" "$outdir/usage.json" ;;
   esac
-  _manifest_append "$task_name,$harness,$model,$run,$outdir,$start,$end,$dur,$status"
+  _manifest_append "$task_name,$harness,$model,$pv,$run,$outdir,$start,$end,$dur,$status"
   _log "    done ($status, ${dur}s)"
   [ "$KEEP_REPO" = "1" ] && { mkdir -p "$outdir/final_repo"; cp -R "$work/." "$outdir/final_repo/"; }
   rm -rf "$work" "$state_dir"
@@ -273,17 +284,25 @@ run_one_job() {   # task_name task_abs prompt harness model run
 # endpoint concurrently (the packed scenario we want to measure) — and one model's contention is
 # never mixed with another model's runs, keeping each model's numbers clean.
 run_group() {
-  local harness="$1" model="$2" pids=() task tn ta pr run
+  local harness="$1" model="$2" pids=() task tn ta run pf pfiles p
   for task in "$TASKS_DIR"/*/; do
     [ -f "$task/prompt.txt" ] || continue
     tn="$(basename "$task")"
     [ -n "$ONLY_TASK" ] && [ "$tn" != "$ONLY_TASK" ] && continue   # --task: run only this one
-    local pf="$task/$PROMPT_FILE"; [ -f "$pf" ] || pf="$task/prompt.txt"   # fall back if arm file missing
-    ta="$(cd "$task" && pwd)"; pr="$(cat "$pf")"
-    for run in $(seq 1 "$RUNS"); do
-      while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
-      run_one_job "$tn" "$ta" "$pr" "$harness" "$model" "$run" &
-      pids+=($!)
+    ta="$(cd "$task" && pwd)"
+    # which prompt versions to run for this task: --prompts restricts; else every prompt*.txt present
+    pfiles=()
+    if [ "${#PROMPT_FILES[@]}" -gt 0 ]; then
+      for pf in "${PROMPT_FILES[@]}"; do [ -f "$ta/$pf" ] && pfiles+=("$pf"); done
+    else
+      for p in "$ta"/prompt.txt "$ta"/prompt.*.txt; do [ -f "$p" ] && pfiles+=("$(basename "$p")"); done
+    fi
+    for pf in "${pfiles[@]}"; do
+      for run in $(seq 1 "$RUNS"); do
+        while [ "$(jobs -pr | wc -l)" -ge "$JOBS" ]; do sleep 0.3; done
+        run_one_job "$tn" "$ta" "$pf" "$harness" "$model" "$run" &
+        pids+=($!)
+      done
     done
   done
   [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}" 2>/dev/null || true   # finish this group before the next

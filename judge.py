@@ -197,7 +197,8 @@ def efficiency(rows):
     for r in rows:
         m = r["model"]
         h = r.get("harness") or aggregate.harness_of(m)
-        key = (h, m)
+        pv = r.get("prompt", "v2")
+        key = (h, m, pv)
         a = agg.setdefault(key, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
         a["runs"] += 1
         st = aggregate.claude_stats(r.get("outdir", "")) if h == "claude" \
@@ -208,24 +209,25 @@ def efficiency(rows):
     if not agg:
         return []
     L = ["## Efficiency — how much work each run did\n",
-         "Same tasks and prompts, so this reflects **agent behavior** (model + harness). Per task, averaged:",
+         "Same tasks, so this reflects **agent behavior** (model + harness + prompt version). Per task, averaged:",
          "",
-         "| harness | model | steps/task | tool calls/task | output tokens/task |",
-         "|---|---|---|---|---|"]
+         "| harness | model | prompt | steps/task | tool calls/task | output tokens/task |",
+         "|---|---|---|---|---|---|"]
     per = {}
-    for (h, m), a in agg.items():
+    for (h, m, pv), a in agg.items():
         n = max(a["runs"], 1)
-        per[(h, m)] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
-        L.append(f"| {aggregate.harness_disp(h)} | {aggregate.model_disp(m)} | {per[(h, m)][0]:.0f} | "
-                 f"{per[(h, m)][1]:.0f} | {per[(h, m)][2]:.0f} |")
+        per[(h, m, pv)] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
+        L.append(f"| {aggregate.harness_disp(h)} | {aggregate.model_disp(m)} | {pv} | {per[(h, m, pv)][0]:.0f} | "
+                 f"{per[(h, m, pv)][1]:.0f} | {per[(h, m, pv)][2]:.0f} |")
     L.append("")
     gpu = next((k for k in agg if aggregate.is_self_hosted(k[1])), None)
     if gpu:
         for k in agg:
             if k != gpu and per[k][1] and per[k][2]:
-                L.append(f"- vs **{aggregate.harness_disp(k[0])}:{aggregate.model_disp(k[1])}**, the self-hosted run does "
-                         f"~{per[gpu][1] / per[k][1]:.1f}× the tool calls and ~{per[gpu][2] / per[k][2]:.1f}× "
-                         "the output tokens for the same fixes — more work per task, which compounds its GPU cost.")
+                L.append(f"- vs **{aggregate.harness_disp(k[0])}:{aggregate.model_disp(k[1])} (prompt {k[2]})**, the "
+                         f"self-hosted run does ~{per[gpu][1] / per[k][1]:.1f}× the tool calls and "
+                         f"~{per[gpu][2] / per[k][2]:.1f}× the output tokens for the same fixes — more work per "
+                         "task, which compounds its GPU cost.")
         L.append("")
     return L
 
@@ -239,13 +241,15 @@ def timeline(summary):
             continue
         o = aggregate._f(r.get("overlap_s")) or 0.0    # overlap = sum(durations) - union(active)
         par = (a + o) / a                        # avg parallelism: total work / wall-clock
-        L.append(f"- **{aggregate.harness_disp(r['harness'])}:{aggregate.model_disp(r['model'])}** — "
+        pv = r.get("prompt", "")
+        L.append(f"- **{aggregate.harness_disp(r['harness'])}:{aggregate.model_disp(r['model'])}"
+                 f"{' · prompt ' + pv if pv else ''}** — "
                  f"{a:.0f}s wall-clock for {r.get('runs', '?')} runs (~{par:.1f}× parallel)")
     L.append("")
     det = os.path.join(RESULTS_DIR, "results_detailed.csv")
     if os.path.exists(det):
         rows = list(csv.DictReader(open(det)))
-        cols = [c for c in ("task", "model", "run", "start", "end", "duration_s", "status")
+        cols = [c for c in ("task", "model", "prompt", "run", "start", "end", "duration_s", "status")
                 if rows and c in rows[0]]
         L.append("| " + " | ".join(cols) + " |")
         L.append("|" + "|".join(["---"] * len(cols)) + "|")
@@ -362,22 +366,22 @@ def main():
         sys.exit("no results/manifest.csv — run run_bench.sh first")
 
     rows = list(csv.DictReader(open(manifest)))
-    # Judge ONE representative run per (harness, model, task): the qualitative note is the same across
-    # repeat runs (repeats are for success-rate stability). Prefer a passing run (most informative).
-    # This is 5 arms × 5 tasks = 25 calls instead of 75 for --runs 3.
+    # Judge ONE representative run per (harness, model, PROMPT, task): the note is the same across
+    # repeat runs (repeats are for success-rate stability), but a different prompt version produces a
+    # different transcript+diff, so each prompt version is judged separately. Prefer a passing run.
     rep = {}
     for r in rows:
-        k = (r.get("harness", "opencode"), r["model"], r["task"])
+        k = (r.get("harness", "opencode"), r["model"], r.get("prompt", "v2"), r["task"])
         if k not in rep or (r["status"] == "pass" and rep[k]["status"] != "pass"):
             rep[k] = r
     judge_rows = list(rep.values())
-    verdicts = {}  # (harness, model) -> list of (task, status, verdict)
+    verdicts = {}  # "harness · model · prompt" -> list of (task, status, verdict)
     for i, row in enumerate(judge_rows, 1):
         m, task, outdir, status = row["model"], row["task"], row.get("outdir", ""), row["status"]
-        h = row.get("harness", "opencode")
-        sys.stderr.write(f"[{i}/{len(judge_rows)}] judging {task} | {h} | {m}\n")
+        h, pv = row.get("harness", "opencode"), row.get("prompt", "v2")
+        sys.stderr.write(f"[{i}/{len(judge_rows)}] judging {task} | {h} | {m} | prompt {pv}\n")
         v = judge_run(model, task, status, blind(transcript(outdir)), blind(diff(outdir)))
-        verdicts.setdefault(f"{h} · {m}", []).append((task, status, v))
+        verdicts.setdefault(f"{h} · {m} · prompt {pv}", []).append((task, status, v))
 
     # blind LLM difficulty rating, once per unique task (from its prompt)
     difficulty = {}
@@ -396,7 +400,7 @@ def main():
     summ = os.path.join(RESULTS_DIR, "summary.csv")
     if os.path.exists(summ):
         s = list(csv.DictReader(open(summ)))
-        cols = ["harness", "model", "passes", "runs", "success_rate", "avg_tokens_in",
+        cols = ["harness", "model", "prompt", "passes", "runs", "success_rate", "avg_tokens_in",
                 "avg_tokens_out", "avg_duration_s", "call_s", "gen_s", "active_s", "idle_s",
                 "overlap_s", "cost_per_successful_task", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
