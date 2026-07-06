@@ -217,10 +217,10 @@ def union_seconds(intervals):
 
 
 def task_complexity(task_stat):
-    """Empirical, RELATIVE task complexity from observed effort pooled across ALL runs/models:
-    mean steps, tool calls, output tokens, and duration — each min-max normalized across the task
-    set, averaged, scaled to 0-10. Higher = the task demanded more work. It's relative to this set,
-    not absolute. pass_rate is reported alongside (outcome, kept separate from effort)."""
+    """Empirical, RELATIVE complexity per (task, prompt version) from observed effort pooled across
+    all runs/models of that pair: mean steps, tool calls, output tokens, and duration — each min-max
+    normalized across the (task, version) set, averaged, scaled to 0-10. Higher = demanded more work.
+    Relative to this set, not absolute. pass_rate is reported alongside (outcome, kept separate)."""
     tasks = {}
     for t, a in task_stat.items():
         n = max(a["runs"], 1)
@@ -281,7 +281,7 @@ def main():
                 basis = "gpu_calls" if is_self_hosted(m) else "api_ccusage"
             for k in eff[key]:
                 eff[key][k] += pm[k]
-            ts = task_stat[row["task"]]                 # pool all runs for empirical task complexity
+            ts = task_stat[(row["task"], pv)]           # empirical complexity per (task, prompt version)
             ts["runs"] += 1
             ts["steps"] += pm["steps"]; ts["tools"] += pm["tools"]; ts["out"] += pm["out"]
             ts["dur"] += _f(row.get("duration_s")) or 0.0
@@ -354,8 +354,8 @@ def main():
         w.writerows(rows)
 
     # write complexity.csv (data), then render the console report
-    comp = task_complexity(task_stat)
-    crows = [{"task": t, "source": task_source(t), "complexity": a["complexity"],
+    comp = task_complexity(task_stat)   # keyed by (task, prompt version)
+    crows = [{"task": t[0], "prompt": t[1], "source": task_source(t[0]), "complexity": a["complexity"],
               "pass_rate": a["pass_rate"], "runs": a["runs"],
               "avg_steps": round(a["avg_steps"], 1), "avg_tools": round(a["avg_tools"], 1),
               "avg_out_tok": round(a["avg_out"]), "avg_dur_s": round(a["avg_dur"], 1)}
@@ -451,10 +451,11 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     if crows:
         section("Task Difficulty")
         print()
-        table(["Task", "Source", "Diff", "Pass", "Avg Steps"],
-              [[_tshort(r["task"]), r["source"], f"{r['complexity']}", f"{r['pass_rate']:.0%}",
+        table(["Task", "Prompt", "Source", "Diff", "Pass", "Avg Steps"],
+              [[_tshort(r["task"]), r["prompt"], r["source"], f"{r['complexity']}", f"{r['pass_rate']:.0%}",
                 f"{r['avg_steps']:.0f}"] for r in crows])
-        print("\n  Source: swe-bench = real dataset issue (embedded verbatim) in our template; "
+        print("\n  Diff is per (task, prompt version): v1 (terse/raw) usually demands more than v2 (shaped).")
+        print("  Source: swe-bench = real dataset issue (embedded verbatim) in our template; "
               "invented = task + prompt we wrote.")
     print()
 

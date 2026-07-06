@@ -27,9 +27,9 @@ straight to step 2.
 ## 2. Delegate the build + validation
 Spawn the **`task-smith`** agent with: the source (URL/path/ref or "self-contained"), the
 task name, the kind, and any verification hint. It will find the injection point, write
-`tasks/<name>/{prompt.txt,verify.sh,setup.sh,repo.git|repo.path|repo/}`, and **validate the
-fail→pass loop** in a temp dir before returning. Relay its report (bug location, verify
-command, `N failed → M passed`).
+`tasks/<name>/{prompt.v1.txt,prompt.v2.txt,verify.sh,setup.sh,repo.git|repo.path|repo/}`, and
+**validate the fail→pass loop** in a temp dir before returning. Relay its report (bug location,
+verify command, `N failed → M passed`).
 
 If `task-smith` reports it couldn't find a reliable offline injection point, tell the user
 and suggest an alternative repo or a self-contained task — don't ship an unvalidated task.
@@ -44,9 +44,15 @@ source .env
 To run only the new task, its dir can be isolated, or run the full set and read its rows
 in `results/results_detailed.csv`.
 
-## Prompt format (v2 — uniform template)
-Every task's `prompt.txt` uses the SAME structure, so phrasing is never a confound between models.
-`task-smith` must emit exactly these sections:
+## Prompt versions (emit BOTH — see PROMPTS.md)
+Every task ships two prompt files; the bench runs both and reports the `v1 → v2` delta.
+
+**`prompt.v1.txt` (v1 — baseline).** The terse, unstructured ask a developer would actually type.
+For invented tasks: a couple of sentences (symptom + "make the tests pass"). For SWE-bench-style
+tasks: the **raw report verbatim, nothing added** (no venv hint, no scope rules).
+
+**`prompt.v2.txt` (v2 — shaped uniform template).** The SAME structure for every task, so phrasing
+isn't a confound. `task-smith` must emit exactly these sections:
 ```
 ## Task
 <one short paragraph: what's broken, observed vs expected. For SWE-bench-style tasks, embed the raw
@@ -70,10 +76,9 @@ report verbatim under "Reported issue (verbatim):" as a > blockquote.>
 - Confirm your diff contains only changes required by the fix.
 ```
 Anti-overwork (minimal change, install only what's needed) and anti-underwork (fix every occurrence,
-run the suite) are deliberate. `verify.sh` runs the exact grader tests; the prompt's suite command is
-broader so it doesn't hand the agent the failing node ids. Keep any prior `prompt.v1.txt` as the
-baseline arm (run it with `./run_bench.sh --prompt prompt.v1.txt`). `make_swebench_task.py` already
-emits this template.
+run the suite) are deliberate. `verify.sh` runs the exact grader tests; the v2 suite command is
+broader so it doesn't hand the agent the failing node ids. Both versions run by default (restrict
+with `--prompts prompt.v1.txt`). `make_swebench_task.py` already emits both files.
 
 ## Guardrails
 - Never commit secrets; public tasks use `repo.git` with `{env:...}`-free content only.

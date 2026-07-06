@@ -83,13 +83,13 @@ def main() -> None:
               f"(not a pytest node id, or a space / unbalanced brackets from dataset mangling) — "
               f"e.g. {bad[0]!r}. verify.sh likely can't resolve them, so the task may never pass. "
               "Pick a different instance.")
-    # Two prompt versions (see PROMPTS.md). v1 = prompt.txt = the ORIGINAL problem statement,
+    # Two prompt versions (see PROMPTS.md). v1 = prompt.v1.txt = the ORIGINAL problem statement,
     # verbatim, nothing added — the raw GitHub issue a developer would see. v2 = prompt.v2.txt =
     # our shaped uniform template (verbatim issue block + FILE-level suite command + explicit
     # scope/env/checklist). The hidden grader (verify.sh) runs the exact FAIL_TO_PASS node ids
     # from f2p.txt either way, so the prompt is the only thing that changes between v1 and v2.
     statement = row["problem_statement"].strip()
-    (d / "prompt.txt").write_text(statement + "\n")          # v1: original, unmodified
+    (d / "prompt.v1.txt").write_text(statement + "\n")       # v1: original, unmodified
     issue = "\n".join(("> " + ln) if ln.strip() else ">" for ln in statement.splitlines())
     suite = " ".join(sorted({x.split("::")[0] for x in f2p}))   # the file(s) holding the tests, not the node ids
     (d / "prompt.v2.txt").write_text(

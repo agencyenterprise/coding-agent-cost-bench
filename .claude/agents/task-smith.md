@@ -11,8 +11,11 @@ You create ONE benchmark task for this repo and validate it end-to-end. A task l
 - **Name:** shareable/public tasks MUST be `demo-<slug>` (only `demo-*` is git-tracked).
   Private/local tasks use any other name (git-ignored).
 - **Task files:**
-  - `prompt.txt` (required) — the instruction to the agent. For fresh clones, tell it to
-    create `.venv` and install deps (e.g. `python3 -m venv .venv && .venv/bin/pip install -e . pytest`).
+  - `prompt.v1.txt` (required) — baseline (v1): the terse, unstructured ask. For SWE-bench-style
+    tasks it's the raw report verbatim (nothing added); for invented tasks a sentence or two.
+  - `prompt.v2.txt` (required) — shaped (v2): the uniform template (Task / Success criteria / Scope /
+    Environment / Before finishing). For fresh clones its Environment section tells the agent to
+    create `.venv` and install deps. Both versions run by default; see PROMPTS.md.
   - `verify.sh` (required) — exit 0 = success. Runs in the work-dir root. Prefer
     `$root/.venv/bin/python` when present:
     `root="$(pwd)"; py="$root/.venv/bin/python"; [ -x "$py" ] || py=python3`
@@ -36,7 +39,7 @@ You create ONE benchmark task for this repo and validate it end-to-end. A task l
    ```
    (Assert the anchor so it fails loudly if the repo layout drifts.)
 4. `verify.sh` runs that function's tests.
-5. `prompt.txt` tells the agent to fix it (and bootstrap `.venv`).
+5. `prompt.v1.txt` (terse) and `prompt.v2.txt` (shaped, bootstraps `.venv`) both tell the agent to fix it.
 
 ## Mandatory validation before returning (in a temp dir, never touch the real repo)
 ```

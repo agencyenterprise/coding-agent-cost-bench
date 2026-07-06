@@ -61,12 +61,12 @@ Common flags:
 | `--prompts LIST` | restrict to these per-task prompt files (comma/space) | **all `prompt*.txt`** |
 | `--delete-repo` | discard the mutated repo | keep |
 
-**Every prompt version runs by default.** Each task holds two prompt files — `prompt.txt` = `v1`
+**Every prompt version runs by default.** Each task holds two prompt files — `prompt.v1.txt` = `v1`
 (the terse baseline / raw issue) and `prompt.v2.txt` = `v2` (the shaped uniform template). The sweep
 runs *both* (v1 first) and tags each result with its version (`prompt` column, threaded into
-`summary.csv` + `report.md`), so `v1` vs `v2` of the same model are separate, comparable rows — the
-`v2 − v1` delta is the value of prompt engineering. See [PROMPTS.md](PROMPTS.md) for what each
-version is and where it came from. `--prompts prompt.txt` restricts to just the baseline.
+`summary.csv` + `report.md` + the complexity view), so `v1` vs `v2` of the same model are separate,
+comparable rows — the `v2 − v1` delta is the value of prompt engineering. See [PROMPTS.md](PROMPTS.md)
+for what each version is and where it came from. `--prompts prompt.v1.txt` restricts to just the baseline.
 
 **Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is
 clean (no cross-arm contention inflating its latency); within a group every task×run fires **in
@@ -131,7 +131,7 @@ break-even table shows the concurrency needed to beat Claude.
 - `results/complexity.csv` — per task: **empirical complexity 0–10** (relative, from observed effort
   pooled across all models: steps, tool calls, output tokens, duration), `pass_rate`, and the raw
   averages. `report.md` merges this with an independent blind **LLM difficulty 1–5** per task.
-- `results/<task>__<harness>_<model>__runN/` — `output.log` (transcript), `verify.log`, `usage.json`,
+- `results/<task>__<prompt>__<harness>_<model>__runN/` — `output.log` (transcript), `verify.log`, `usage.json`,
   `final_repo/` (the agent's edited code). `./clean.sh` wipes `results/`.
 
 ---
@@ -145,7 +145,8 @@ code per run, optionally runs `setup.sh`, runs the agent, then `verify.sh` (exit
 
 | File | Required | Purpose |
 |---|---|---|
-| `prompt.txt` | ✅ | instruction handed to the agent |
+| `prompt.v1.txt` | ✅ | baseline instruction handed to the agent (version `v1`) |
+| `prompt.v2.txt` | optional | shaped variant (version `v2`); add more as `prompt.<x>.txt` — see [PROMPTS.md](PROMPTS.md) |
 | `verify.sh` | ✅ | exit `0` = success; runs in the work-dir root |
 | `setup.sh` | optional | runs before the agent (e.g. inject a bug); gets `$TASK_REPO_SRC` |
 | `repo/` **or** `repo.path` **or** `repo.git` | one | self-contained code / local git repo / `<url> [ref]` remote |

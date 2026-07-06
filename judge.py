@@ -118,35 +118,55 @@ def opencode_text(stdout):
     return "".join(parts).strip()
 
 
-def judge_run(model, task, status, tscript, dff):
-    prompt = f"""You're reviewing how a coding agent handled a task. Be short, casual and honest —
-no hype, no marketing words, no exaggeration. Call out real strengths AND weaknesses plainly.
-
-Task: {task}
-Outcome: {"passed the tests" if status == "pass" else "did NOT pass the tests"}
-
-Transcript (what it did):
-{tscript[:5000] or "(none)"}
-
-Its code change (diff):
-{dff or "(not available)"}
-
-Reply ONLY with compact JSON:
-{{"approach":"how it went about it, 1 sentence","efficiency":"steps/backtracks/verbosity, 1 sentence","code_quality":"1 sentence","tldr":"one casual honest sentence"}}"""
+def judge_all(model, items):
+    """ONE judge call for ALL runs (instead of one call per run). Sends a blinded, trimmed batch and
+    asks for a JSON object mapping each run's number -> {approach, efficiency, code_quality, tldr}.
+    Trades some per-run context depth for a single round-trip. Returns {index(int): verdict dict},
+    with every index filled (a placeholder for any the judge omitted). `items` carry task/status and
+    the already-blinded transcript+diff."""
+    if not items:
+        return {}
+    # adaptive per-run char budget: a small batch gets rich context, a big one still fits one call
+    budget = max(500, 90000 // len(items))
+    blocks = []
+    for i, it in enumerate(items):
+        blocks.append(
+            f"=== RUN {i} ===\n"
+            f"Task: {it['task']}\n"
+            f"Outcome: {'passed the tests' if it['status'] == 'pass' else 'did NOT pass the tests'}\n"
+            f"Transcript:\n{it['tscript'][:budget] or '(none)'}\n"
+            f"Diff:\n{it['diff'][:budget] or '(not available)'}\n"
+        )
+    prompt = (
+        "You're reviewing how coding agents handled several tasks. Be short, casual and honest — "
+        "no hype, no marketing words, no exaggeration. Judge EACH run independently; call out real "
+        "strengths AND weaknesses plainly.\n\n"
+        f"There are {len(items)} runs below, numbered RUN 0 .. RUN {len(items) - 1}.\n\n"
+        + "\n".join(blocks)
+        + "\n\nReply ONLY with a compact JSON object mapping each run number (as a string key) to its "
+        'review, e.g. {"0": {"approach":"how it went about it","efficiency":"steps/backtracks/verbosity"'
+        ',"code_quality":"...","tldr":"one casual honest sentence"}, "1": {...}}. '
+        "Include every run number 0.." + str(len(items) - 1) + ". One short sentence per field."
+    )
     try:
         r = subprocess.run(["opencode", "run", prompt, "-m", model, "--format", "json"],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, timeout=900)
     except Exception as e:
-        return {"tldr": f"(judge error: {type(e).__name__})"}
-    text = opencode_text(r.stdout)
-    m = re.search(r"\{.*\}", text, re.DOTALL)
+        return {i: {"tldr": f"(judge error: {type(e).__name__})"} for i in range(len(items))}
+    m = re.search(r"\{.*\}", opencode_text(r.stdout), re.DOTALL)
+    out = {}
     if m:
         try:
-            return json.loads(m.group(0))
+            for k, v in json.loads(m.group(0)).items():
+                try:
+                    out[int(k)] = v
+                except (ValueError, TypeError):
+                    pass
         except Exception:
             pass
-    err = (text or r.stderr or r.stdout or "").strip().replace("\n", " ")
-    return {"tldr": f"(no verdict — {err[:200] or 'empty judge output'})"}
+    for i in range(len(items)):        # never drop a run from the report
+        out.setdefault(i, {"tldr": "(no verdict returned for this run)"})
+    return out
 
 
 def cost_model(summary):
@@ -335,18 +355,19 @@ def complexity_section(difficulty):
         return []
     rows = list(csv.DictReader(open(path)))
     L = ["## Task complexity\n",
-         "**Source**: `swe-bench` = a real SWE-bench Verified issue (problem statement embedded verbatim, "
-         "then wrapped in our uniform template); `invented` = a task + prompt we wrote (injected-bug demos "
-         "and the from-scratch build). **Empirical (0-10, relative)** = observed effort pooled across all "
-         "models (steps, tool calls, output tokens, duration). **LLM difficulty (1-5)** is an independent "
-         "blind rating of the instruction. `pass_rate` is the outcome across all runs.",
+         "Per **(task, prompt version)** — `v1` (terse/raw issue) usually demands more than `v2` (shaped). "
+         "**Source**: `swe-bench` = a real SWE-bench Verified issue (`v1` = the problem statement verbatim, "
+         "`v2` = it wrapped in our uniform template); `invented` = a task + prompt we wrote. **Empirical "
+         "(0-10, relative)** = observed effort pooled across all models for that pair (steps, tool calls, "
+         "output tokens, duration). **LLM difficulty (1-5)** is an independent blind rating of that exact "
+         "prompt. `pass_rate` is the outcome across all runs of the pair.",
          "",
-         "| task | source | empirical 0-10 | LLM 1-5 | pass_rate | avg_steps | avg_out_tok |",
-         "|---|---|---|---|---|---|---|"]
+         "| task | prompt | source | empirical 0-10 | LLM 1-5 | pass_rate | avg_steps | avg_out_tok |",
+         "|---|---|---|---|---|---|---|---|"]
     for r in rows:
-        d = difficulty.get(r["task"], {})
-        L.append(f"| {r['task']} | {r.get('source', '')} | {r['complexity']} | {d.get('difficulty', '—')} | "
-                 f"{r['pass_rate']} | {r['avg_steps']} | {r['avg_out_tok']} |")
+        d = difficulty.get((r["task"], r.get("prompt", "v1")), {})
+        L.append(f"| {r['task']} | {r.get('prompt', '')} | {r.get('source', '')} | {r['complexity']} | "
+                 f"{d.get('difficulty', '—')} | {r['pass_rate']} | {r['avg_steps']} | {r['avg_out_tok']} |")
     L.append("")
     return L
 
@@ -375,25 +396,36 @@ def main():
         if k not in rep or (r["status"] == "pass" and rep[k]["status"] != "pass"):
             rep[k] = r
     judge_rows = list(rep.values())
+    # ONE call: build the blinded batch, judge all runs at once, then map verdicts back by index.
+    items = [{"h": r.get("harness", "opencode"), "m": r["model"], "pv": r.get("prompt", "v1"),
+              "task": r["task"], "status": r["status"],
+              "tscript": blind(transcript(r.get("outdir", ""))), "diff": blind(diff(r.get("outdir", "")))}
+             for r in judge_rows]
+    sys.stderr.write(f"judging {len(items)} runs in a single call to {model}\n")
+    notes = judge_all(model, items)
     verdicts = {}  # "harness · model · prompt" -> list of (task, status, verdict)
-    for i, row in enumerate(judge_rows, 1):
-        m, task, outdir, status = row["model"], row["task"], row.get("outdir", ""), row["status"]
-        h, pv = row.get("harness", "opencode"), row.get("prompt", "v1")
-        sys.stderr.write(f"[{i}/{len(judge_rows)}] judging {task} | {h} | {m} | prompt {pv}\n")
-        v = judge_run(model, task, status, blind(transcript(outdir)), blind(diff(outdir)))
-        verdicts.setdefault(f"{h} · {m} · prompt {pv}", []).append((task, status, v))
+    for idx, it in enumerate(items):
+        verdicts.setdefault(f"{it['h']} · {it['m']} · prompt {it['pv']}", []).append(
+            (it["task"], it["status"], notes.get(idx, {"tldr": "(no verdict)"})))
 
-    # blind LLM difficulty rating, once per unique task (from its prompt)
+    # blind LLM difficulty rating, per unique (task, prompt version) — v1 (raw/terse) and v2 (shaped)
+    # are genuinely different difficulties, so each is rated from its own prompt file.
+    def _prompt_path(task, pv):
+        for c in (f"prompt.{pv}.txt", "prompt.txt" if pv == "v1" else ""):
+            if c and os.path.exists(os.path.join("tasks", task, c)):
+                return os.path.join("tasks", task, c)
+        return ""
     difficulty = {}
-    tasks_seen = []
+    pairs = []
     for row in rows:
-        if row["task"] not in tasks_seen:
-            tasks_seen.append(row["task"])
-    for i, t in enumerate(tasks_seen, 1):
-        pf = os.path.join("tasks", t, "prompt.txt")
-        prompt = open(pf).read() if os.path.exists(pf) else ""
-        sys.stderr.write(f"[difficulty {i}/{len(tasks_seen)}] {t}\n")
-        difficulty[t] = rate_difficulty(model, t, blind(prompt))
+        key = (row["task"], row.get("prompt", "v1"))
+        if key not in pairs:
+            pairs.append(key)
+    for i, (t, pv) in enumerate(pairs, 1):
+        pf = _prompt_path(t, pv)
+        prompt = open(pf).read() if pf else ""
+        sys.stderr.write(f"[difficulty {i}/{len(pairs)}] {t} | prompt {pv}\n")
+        difficulty[(t, pv)] = rate_difficulty(model, t, blind(prompt))
 
     # build report: numbers (summary.csv) + qualitative notes
     lines = ["# Benchmark report\n", f"_Judge: {model} (blinded review)_\n"]
