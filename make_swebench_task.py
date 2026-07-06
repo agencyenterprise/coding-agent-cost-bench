@@ -6,22 +6,52 @@ tests, the problem statement, and the FAIL_TO_PASS test IDs) all come from the
 official dataset — nothing is fabricated here.
 
 Usage (run from the repo root):
-    pip install datasets
-    python3 make_swebench_task.py <instance_id>
-    # e.g. python3 make_swebench_task.py psf__requests-2317
+    python3 make_swebench_task.py <instance_id>     # needs `datasets` OR a cached parquet + `pyarrow`
+    # e.g. python3 make_swebench_task.py psf__requests-6028
 
 Then run it like any other task:
     ./run_bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8"
 
+Emits prompt.v1/v2/v3.txt, setup.sh, verify.sh (self-sufficient grader), repo.git, test.patch, f2p.txt.
+
 Caveats (see SWEBENCH.md):
-- Each instance needs its repo's own deps. The v2 prompt tells the agent to set up a
-  venv (v1 is the raw issue, no setup hints); heavy scientific repos may be slow/flaky locally.
-  For the rigorous leaderboard number use the official SWE-bench harness (Docker).
-- Pick lightweight repos first (requests, flask, click, pytest) for quick runs.
+- Each instance needs its repo's own deps; heavy scientific repos (numpy/scipy) may be slow/flaky.
+- Python version: the grader installs a MODERN pytest, so most PURE-PYTHON instances run on a modern
+  host (incl. Python 3.14) IF the repo's test files import cleanly there. Instances whose package IS
+  pytest (pytest-dev/pytest-*) need Python <=3.11 — run those via ./run_on_docker.sh.
+- For the rigorous leaderboard number use the official SWE-bench harness (Docker).
 """
+import glob
 import json
+import os
 import pathlib
 import sys
+
+
+def _load_instance(iid):
+    """Fetch one SWE-bench Verified row. Prefer the `datasets` lib; else fall back to the cached HF
+    parquet via pyarrow — so this works on a bare host (e.g. Python 3.14) without installing datasets."""
+    try:
+        from datasets import load_dataset
+        ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
+        return next((r for r in ds if r["instance_id"] == iid), None)
+    except ImportError:
+        pass
+    pats = glob.glob(os.path.expanduser(
+        "~/.cache/huggingface/hub/datasets--princeton-nlp--SWE-bench_Verified/snapshots/*/data/*.parquet"))
+    if not pats:
+        sys.exit("no `datasets` lib and no cached dataset — `pip install datasets`, or pre-download "
+                 "princeton-nlp/SWE-bench_Verified into the HF cache first.")
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        sys.exit("dataset is cached but neither `datasets` nor `pyarrow` is installed — "
+                 "`pip install pyarrow` (light) or `pip install datasets`.")
+    for p in pats:
+        for r in pq.read_table(p).to_pylist():
+            if r["instance_id"] == iid:
+                return r
+    return None
 
 
 def main() -> None:
@@ -29,13 +59,7 @@ def main() -> None:
         sys.exit("usage: make_swebench_task.py <instance_id>   e.g. psf__requests-2317")
     iid = sys.argv[1]
 
-    try:
-        from datasets import load_dataset
-    except ImportError:
-        sys.exit("missing dependency: pip install datasets")
-
-    ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
-    row = next((r for r in ds if r["instance_id"] == iid), None)
+    row = _load_instance(iid)
     if row is None:
         sys.exit(f"instance {iid!r} not found in SWE-bench_Verified")
 
@@ -72,7 +96,15 @@ def main() -> None:
         "# run the SWE-bench FAIL_TO_PASS tests (node ids from f2p.txt, space-safe)\n"
         "set -e\n"
         + here
-        + 'root="$(pwd)"; py="$root/.venv/bin/python"; [ -x "$py" ] || py=python3\n'
+        + 'root="$(pwd)"; py="$root/.venv/bin/python"\n'
+        "# Self-sufficient grader: use the agent's .venv only if it has pytest; else provision a\n"
+        "# throwaway grader venv, editable-installing the repo so the agent's fix is under test. A\n"
+        "# MODERN pytest runs on Python 3.14; only repos whose package IS pytest need Python <=3.11\n"
+        "# (run those via ./run_on_docker.sh).\n"
+        'if ! { [ -x "$py" ] && "$py" -c \'import pytest\'; } >/dev/null 2>&1; then\n'
+        '  gv="$(mktemp -d)/venv"; python3 -m venv "$gv" >/dev/null 2>&1; py="$gv/bin/python"\n'
+        '  "$py" -m pip install -q -e . pytest >/dev/null 2>&1\n'
+        "fi\n"
         "tests=()\n"
         'while IFS= read -r t; do [ -n "$t" ] && tests+=("$t"); done < "$here/f2p.txt"\n'
         '"$py" -m pytest "${tests[@]}" -q\n'
@@ -111,6 +143,13 @@ def main() -> None:
         "## Before finishing\n"
         "- Run the Success criteria command. If anything fails, keep working.\n"
         "- Confirm your diff contains only changes required by the fix.\n"
+    )
+    # v3 = raw issue (like v1) + only the operational scaffolding (env + verify command), no structure.
+    (d / "prompt.v3.txt").write_text(
+        statement + "\n\n---\n"
+        "Fresh clone, no virtualenv: create `.venv` at the repo root and `.venv/bin/pip install -e . "
+        f"pytest`. Make the failing tests pass, then confirm with `.venv/bin/python -m pytest {suite}` "
+        "(exit 0) before finishing.\n"
     )
     for f in ("setup.sh", "verify.sh"):
         (d / f).chmod(0o755)
