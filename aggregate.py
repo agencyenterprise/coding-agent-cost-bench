@@ -32,8 +32,8 @@ GPU_HOURLY_USD = float(os.environ.get("GLM_GPU_HOURLY_USD", "50.7"))
 
 
 def is_self_hosted(model):
-    """Self-hosted (GPU-billed) = served via the modal/ provider."""
-    return model.lower().startswith("modal/")
+    """Self-hosted (GPU-billed) = served via a modal provider (modal/ or modal-nothink/)."""
+    return model.lower().split("/")[0].startswith("modal")
 
 
 def harness_of(ref):

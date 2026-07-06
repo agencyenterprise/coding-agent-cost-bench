@@ -119,7 +119,22 @@ if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
   exit 1
 fi
 echo $$ > "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
+_proxy_pid=""
+_cleanup() { [ -n "$_proxy_pid" ] && kill "$_proxy_pid" 2>/dev/null; rm -f "$LOCK"; }
+trap _cleanup EXIT
+
+# thinking-off GLM arm? start the injector proxy (opencode can't add chat_template_kwargs itself)
+NOTHINK_PORT="${NOTHINK_PORT:-8899}"
+export NOTHINK_ENDPOINT="http://127.0.0.1:${NOTHINK_PORT}/v1"
+for i in "${!MREF[@]}"; do
+  case "${MREF[$i]}" in modal-nothink/*)
+    echo "starting nothink proxy on :$NOTHINK_PORT (injects enable_thinking=false)" >&2
+    NOTHINK_PORT="$NOTHINK_PORT" python3 "$SCRIPT_DIR/nothink_proxy.py" > "$RESULTS_DIR/nothink_proxy.log" 2>&1 &
+    _proxy_pid=$!
+    sleep 1
+    break ;;
+  esac
+done
 
 $CCUSAGE --help >/dev/null 2>&1 || true   # pre-install ccusage once so per-run usage.json is clean JSON
 TO="$(command -v timeout || command -v gtimeout || true)"   # macOS: brew install coreutils
@@ -281,7 +296,7 @@ warm_modal() {
 }
 for i in "${!MREF[@]}"; do
   if [ "${HARN[$i]}" = "opencode" ]; then case "${MREF[$i]}" in
-    modal/*)
+    modal/*|modal-nothink/*)
       warm_modal "$(model_id "${MREF[$i]}")" || {
         echo "GLM endpoint $MODAL_ENDPOINT not ready — bring it up (./setup.sh), then re-run." >&2
         exit 1; }

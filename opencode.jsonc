@@ -16,6 +16,21 @@
         "zai-org/GLM-5.2-FP8": { "name": "GLM-5.2 (Modal)" }
       }
     },
+    "modal-nothink": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Modal GLM-5.2 (thinking off)",
+      "options": {
+        "baseURL": "{env:NOTHINK_ENDPOINT}",
+        "apiKey": "dummy",
+        "headers": {
+          "Modal-Key": "{env:MODAL_KEY}",
+          "Modal-Secret": "{env:MODAL_SECRET}"
+        }
+      },
+      "models": {
+        "zai-org/GLM-5.2-FP8": { "name": "GLM-5.2 (Modal, thinking off)" }
+      }
+    },
     "anthropic": { "options": { "apiKey": "{env:ANTHROPIC_API_KEY}" } },
     "openai": { "options": { "apiKey": "{env:OPENAI_API_KEY}" } },
     "google": { "options": { "apiKey": "{env:GEMINI_API_KEY}" } }

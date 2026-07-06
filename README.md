@@ -64,6 +64,19 @@ Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/s
 `results_detailed.csv`. Claude Code reports its own cost/usage/turns → those rows carry
 `cost_basis = claude_code`; opencode API rows are `api_ccusage`; GLM is `gpu_calls`.
 
+**Reasoning arm (GLM thinking-off).** GLM-5.2 defaults to *max* reasoning while Opus runs with none —
+which inflates GLM's tokens/cost. To isolate that, add the arm `modal-nothink/zai-org/GLM-5.2-FP8`:
+`run_bench` auto-starts `nothink_proxy.py`, a local proxy that injects
+`chat_template_kwargs:{enable_thinking:false}` into every request (opencode can't add body fields; the
+Modal endpoint forwards it to SGLang — verified). Three-way comparison:
+```bash
+./run_bench.sh --model opencode:modal/zai-org/GLM-5.2-FP8 \
+               --model opencode:modal-nothink/zai-org/GLM-5.2-FP8 \
+               --model opencode:anthropic/claude-opus-4-8
+```
+Thinking-off cut output ~26× on a trivial task (same answer); the open question is whether success
+holds on the hard tasks — that's what this arm measures.
+
 ## 3. Judge
 Turn the raw runs into the final report — numbers + a blinded LLM review of each transcript+diff:
 ```bash
