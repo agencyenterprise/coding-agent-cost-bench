@@ -87,6 +87,18 @@ Writes **`results/report.md`**: the numbers table, a **timeline** (start/end + o
 a **cost breakdown**, a **break-even table** (how many parallel tasks on Modal beat Claude), and
 short, blinded per-task notes. All sections are generated from `summary.csv`, so re-running is safe.
 
+## Run in Docker (no host deps)
+To avoid installing opencode / Claude Code / a specific Python locally — and to dodge host env
+drift (e.g. Python 3.14 breaking old repos) — run the whole thing in a container. It bundles node +
+opencode + Claude Code + Python 3.11 + git; the GLM endpoint stays on Modal.
+```bash
+cp .env.example .env && $EDITOR .env     # creds (used at runtime, never baked in)
+./run_on_docker.sh --runs 1              # builds the image, runs the bench AND the judge
+JUDGE=openai ./run_on_docker.sh --runs 3 # pick the judge; run_bench flags pass through
+```
+`results/` is mounted back to the host. See [Dockerfile](Dockerfile) — Claude Code runs headless via
+`ANTHROPIC_API_KEY`.
+
 ---
 
 ## Cost model (the honest bit)
