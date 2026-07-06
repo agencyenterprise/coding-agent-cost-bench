@@ -7,8 +7,11 @@
 #   ./run_on_docker.sh --judge-only    # re-judge existing results/ (no bench -> no GPU cost)
 #   ./run_on_docker.sh --bench-only    # run the bench, skip the judge
 #   ./run_on_docker.sh --no-build ...  # reuse the current image (skip docker build)
+#   DOCKER_JOBS=2 ./run_on_docker.sh   # in-container concurrency (default 3; your own --jobs wins)
 #
 # Creds come from .env (sourced + forwarded by name; never baked in). results/ is mounted to the host.
+# Defaults to --jobs 3 in-container: 5 simultaneous agents OOM the shared Docker VM. Also free VM
+# headroom (stop unused containers) or raise Docker Desktop memory if you still see "Killed".
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -28,6 +31,12 @@ for a in "$@"; do
     *)            pass+=("$a") ;;
   esac
 done
+# 5 simultaneous Node agents + pip installs OOM the shared Docker VM (the last-launched task gets
+# SIGKILLed). Default to gentler in-container concurrency; override by passing your own --jobs/-j.
+case " ${pass[*]:-} " in
+  *" --jobs "* | *" -j "*) : ;;
+  *) pass+=(--jobs "${DOCKER_JOBS:-3}") ;;
+esac
 set -- ${pass[@]+"${pass[@]}"}   # remaining args pass through to run_bench.sh
 
 # build if requested, or if the image doesn't exist yet
