@@ -361,11 +361,15 @@ def main():
 
     # write complexity.csv (data), then render the console report
     comp = task_complexity(task_stat)   # keyed by (task, prompt version)
+    # group each task's versions together (v1 -> v2 -> v3), tasks ranked by their hardest version
+    peak = {}
+    for (t, pv), a in comp.items():
+        peak[t] = max(peak.get(t, 0.0), a["complexity"])
     crows = [{"task": t[0], "prompt": t[1], "source": task_source(t[0]), "complexity": a["complexity"],
               "pass_rate": a["pass_rate"], "runs": a["runs"],
               "avg_steps": round(a["avg_steps"], 1), "avg_tools": round(a["avg_tools"], 1),
               "avg_out_tok": round(a["avg_out"]), "avg_dur_s": round(a["avg_dur"], 1)}
-             for t, a in sorted(comp.items(), key=lambda kv: kv[1]["complexity"], reverse=True)]
+             for t, a in sorted(comp.items(), key=lambda kv: (-peak[kv[0][0]], kv[0][0], kv[0][1]))]
     if crows:
         with open(os.path.join(RESULTS_DIR, "complexity.csv"), "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(crows[0].keys()))
