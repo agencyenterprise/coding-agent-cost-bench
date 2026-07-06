@@ -306,9 +306,22 @@ for i in "${!MREF[@]}"; do
 done
 
 trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
+# All modal arms (thinking on/off) share the ONE GLM endpoint -> run them concurrently as a single
+# packed batch (max use of the warm window). Other backends (Opus API, Claude Code) run one at a time.
+gpids=()
 for i in "${!MREF[@]}"; do
-  echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running its tasks in parallel (up to $JOBS)" >&2
-  run_group "${HARN[$i]}" "${MREF[$i]}"
+  case "${MREF[$i]}" in modal*/*)
+    echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running (concurrent with other GLM arms, up to $JOBS each)" >&2
+    run_group "${HARN[$i]}" "${MREF[$i]}" &
+    gpids+=($!) ;;
+  esac
+done
+[ "${#gpids[@]}" -gt 0 ] && wait "${gpids[@]}" 2>/dev/null || true
+for i in "${!MREF[@]}"; do
+  case "${MREF[$i]}" in modal*/*) : ;; *)
+    echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running its tasks in parallel (up to $JOBS)" >&2
+    run_group "${HARN[$i]}" "${MREF[$i]}" ;;
+  esac
 done
 trap - INT TERM
 
