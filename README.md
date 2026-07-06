@@ -61,12 +61,13 @@ Common flags:
 | `--prompts LIST` | restrict to these per-task prompt files (comma/space) | **all `prompt*.txt`** |
 | `--delete-repo` | discard the mutated repo | keep |
 
-**Every prompt version runs by default.** Each task holds two prompt files — `prompt.v1.txt` = `v1`
-(the terse baseline / raw issue) and `prompt.v2.txt` = `v2` (the shaped uniform template). The sweep
-runs *both* (v1 first) and tags each result with its version (`prompt` column, threaded into
-`summary.csv` + `report.md` + the complexity view), so `v1` vs `v2` of the same model are separate,
-comparable rows — the `v2 − v1` delta is the value of prompt engineering. See [PROMPTS.md](PROMPTS.md)
-for what each version is and where it came from. `--prompts prompt.v1.txt` restricts to just the baseline.
+**Every prompt version runs by default.** Each task holds `prompt.v1.txt` = `v1` (terse baseline / raw
+issue), `prompt.v2.txt` = `v2` (shaped uniform template), and — on the bug-fix / SWE tasks — `prompt.v3.txt`
+= `v3` (terse + the operational scaffolding v2 carries, a control to split style from operational
+context). The sweep runs every version present (v1 first) and tags each result with it (`prompt` column,
+threaded into `summary.csv` + `report.md` + the complexity view), so versions of the same model are
+separate, comparable rows. See [PROMPTS.md](PROMPTS.md) for what each is, where it came from, and how
+`v3 − v1` vs `v2 − v3` decompose the gain. `--prompts prompt.v1.txt` restricts to just the baseline.
 
 **Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is
 clean (no cross-arm contention inflating its latency); within a group every task×run fires **in

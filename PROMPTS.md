@@ -54,15 +54,30 @@ hidden variable. Sections: **Task** (for SWE, the issue embedded verbatim), **Su
 success rate and cuts wasted effort (fewer steps / tokens / backtracks), fairly (identical
 scaffolding for every model). The delta `v2 − v1` is the value (or cost) of prompt engineering.
 
+### `v3` — terse + operational scaffolding (`prompt.v3.txt`)
+**Source.** A **control** to decompose the `v2 − v1` gain. It's the v1 phrasing (crude, no sections)
+plus *only* the **operational context** v2 carries — how to set up the env (`.venv` + install) and
+the **exact verify command** — but **not** v2's structure or scope discipline (no "smallest change /
+fix every occurrence / no refactor", no checklist).
+
+**What it tests.** Splits the improvement into two independent pieces:
+- **`v3 − v1`** = value of *operational context* (telling the model how to set up and verify). For
+  SWE this is roughly what the real SWE-bench harness provides for free (pre-built env + test command).
+- **`v2 − v3`** = value of *structure + scope discipline* on top — the actual "prompt engineering."
+
+If `v3 − v1` captures most of the gain, the v1→v2 story is "we supplied missing operational context,"
+not clever wording. Present on the five bug-fix / SWE tasks (not the kanban build).
+
 ## Coverage
 
-All six demo tasks carry both `v1` and `v2`:
+All six demo tasks carry `v1` and `v2`; the five bug-fix / SWE tasks also carry `v3` (kanban doesn't —
+it fails on every prompt and its v1 already states the build/test commands, so v3 adds no signal there).
 
-| Task | v1 (`prompt.v1.txt`) | v2 (`prompt.v2.txt`) |
-|---|---|---|
-| `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template |
-| `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) |
-| `demo-swebench-pytest-dev__pytest-5787`, `-6197` | raw dataset issue (verbatim) | issue + template scaffolding |
+| Task | v1 (`prompt.v1.txt`) | v2 (`prompt.v2.txt`) | v3 (`prompt.v3.txt`) |
+|---|---|---|---|
+| `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template | terse + env/verify cmd |
+| `demo-swebench-pytest-dev__pytest-5787`, `-6197` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
+| `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) | — |
 
 New SWE-bench tasks get both automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw
 statement) and `prompt.v2.txt` (shaped) side by side.
