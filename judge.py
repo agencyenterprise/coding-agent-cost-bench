@@ -265,25 +265,21 @@ def cost_analysis(summary):
          f"actually spent generating on the endpoint (`call_s`), × the ~${rate:.0f}/hr rate. Local "
          "script time (pip, pytest, git, file I/O) is **excluded**, since the GPU sits idle then.",
          ""]
+    # Endpoint idle is a SHARED property of the GLM endpoint, computed ONCE across all modal arms —
+    # not charged per arm (that double-blames the low-reasoning arm for the endpoint just being up).
     try:
-        call, up, passes = float(gpu["call_s"]), float(gpu["active_s"]), int(gpu["passes"])
-        idle = max(0.0, up - call)
-        up_task = up / 3600 * rate / passes
-        call_task = call / 3600 * rate / passes
-        idle_task = idle / 3600 * rate / passes
-        pct = 100 * call / up if up else 0
-        L += [f"> **⚠️ Attribution caveat — this is a choice, not a real saving.** Modal bills the "
-              f"container's **uptime**, not compute-seconds, so you can't *deduct* idle from the bill — "
-              f"a sole tenant pays all {up:.0f}s of wall-clock (**~${up_task:.2f}/task**). What we can do "
-              "is **decompose** it:",
-              ">",
-              f"> &nbsp;&nbsp;&nbsp;&nbsp;`sole-tenant ${up_task:.2f}/task  =  generation ${call_task:.2f} "
-              f"({pct:.0f}%)  +  idle tax ${idle_task:.2f} ({100 - pct:.0f}%)`",
-              ">",
-              f"> We headline the **${call_task:.2f} generation floor** (the fair shared-endpoint number). "
-              f"The **${idle_task:.2f}/task idle tax** isn't the model's fault and isn't a saving you can "
-              "book alone — it's under-utilization, recovered only by packing the endpoint with concurrent "
-              "work.", ""]
+        gpu_rows = [r for r in summary if str(r.get("cost_basis", "")).startswith("gpu")]
+        up = sum(float(r["active_s"]) for r in gpu_rows if r.get("active_s"))
+        gen = sum(float(r["call_s"]) for r in gpu_rows if r.get("call_s"))
+        idle = max(0.0, up - gen)
+        L += [f"> **⚠️ Endpoint idle (charged once, not per-arm).** Modal bills the container's "
+              f"**uptime**, not compute-seconds. Across all GLM arms the endpoint was up {up:.0f}s but "
+              f"generated only {gen:.0f}s → **{idle:.0f}s idle = ~${idle / 3600 * rate:.2f}** of "
+              "under-utilization (agents spend most of each task in local pip/pytest/git). That idle is "
+              "a property of *keeping the endpoint up*, recoverable only by packing it with concurrent "
+              "work — so we report it once here and charge each arm's `$/task` on **generation only**. "
+              "Blaming the reasoning-off arm for idle while it barely touches the GPU would be backwards.",
+              ""]
     except (TypeError, ValueError, KeyError, ZeroDivisionError):
         pass
     L += ["**Why the two meters look so different — structural, not a modelling error:**",

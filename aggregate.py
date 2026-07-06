@@ -281,21 +281,18 @@ def main():
             "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
             "call_s": round(call_total, 1) if call_total else "",
             "active_s": round(active, 1) if active else "",
-            "idle_s": round(idle, 1) if (intervals[key] and call_total) else "",
+            "idle_s": round(idle, 1) if (intervals[key] and call_total) else "",   # this arm's own wall-clock idle (info)
             "overlap_s": round(overlap, 1) if intervals[key] else "",
-            "gen_usd_task": "", "idle_usd_task": "", "sole_usd_task": "",
             "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
         }
         if is_self_hosted(model):
             if call_total:
-                cost = call_total / 3600 * GPU_HOURLY_USD   # billed on generation time only
+                # per-arm cost = GENERATION only (call_s × rate). Endpoint idle is NOT charged per
+                # arm — it's a shared endpoint property, reported once below (charging it per arm
+                # double-blames the low-reasoning arm for the endpoint simply being up).
+                cost = call_total / 3600 * GPU_HOURLY_USD
                 row["total_cost_usd"] = round(cost, 4)
-                if passes:
-                    # sole-tenant $/task = generation (floor) + idle tax
-                    row["cost_per_successful_task"] = round(cost / passes, 4)
-                    row["gen_usd_task"] = round(cost / passes, 4)
-                    row["idle_usd_task"] = round(idle / 3600 * GPU_HOURLY_USD / passes, 4)
-                    row["sole_usd_task"] = round(active / 3600 * GPU_HOURLY_USD / passes, 4)
+                row["cost_per_successful_task"] = round(cost / passes, 4) if passes else ""
                 row["cost_basis"] = "gpu_calls"
             else:
                 row["cost_basis"] = "gpu_calls (no log timing)"
@@ -341,11 +338,17 @@ def main():
         if i == 0:
             print("  " + "  ".join("-" * w[j] for j in range(len(headers))))
 
-    # sole-tenant $/task decomposition for the GPU-billed model(s)
-    for r in rows:
-        if r["sole_usd_task"] != "":
-            print(f"\n  {r['model']} — sole-tenant ${r['sole_usd_task']}/task  =  "
-                  f"generation ${r['gen_usd_task']} (floor)  +  idle tax ${r['idle_usd_task']}")
+    # endpoint idle: charged ONCE for the shared GLM endpoint (uptime not spent generating), across
+    # ALL modal arms — not per-arm. It's under-utilization, recoverable by packing, not any one arm's cost.
+    gpu_ivs = [iv for (h, m), ivs in intervals.items() if is_self_hosted(m) for iv in ivs]
+    if gpu_ivs:
+        up = union_seconds(gpu_ivs)
+        gen = sum(_f(r["call_s"]) or 0 for r in rows if is_self_hosted(r["model"]))
+        idle = max(0.0, up - gen)
+        print(f"\n  GLM endpoint (shared by all modal arms): up {up:.0f}s, generating {gen:.0f}s "
+              f"→ idle {idle:.0f}s = ${idle / 3600 * GPU_HOURLY_USD:.2f} under-utilization")
+        print("  (idle is an endpoint property — recoverable by packing — NOT charged to any single arm;"
+              " per-arm $/task above is generation only)")
 
     # efficiency: one row per arm, metrics as columns (out÷GLM = output tokens vs the thinking-on GLM arm)
     order = [(r["harness"], r["model"]) for r in rows]
