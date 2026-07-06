@@ -31,7 +31,11 @@ PORT=$((20000 + RANDOM % 20000))
 export PORT HOSTNAME=127.0.0.1
 npm run start > /tmp/kanban-verify-$PORT.log 2>&1 &
 server_pid=$!
-trap 'kill "$server_pid" 2>/dev/null; pkill -P "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null' EXIT
+# Cleanup on any exit. Do NOT `wait` on the killed server: it returns 143, and under `set -e` an
+# EXIT trap's last command overrides the script's real exit status — a false FAIL after all checks
+# passed. So: kill-only trap, `set +e`, and decide pass/fail with explicit exit codes below.
+trap 'kill "$server_pid" 2>/dev/null; pkill -P "$server_pid" 2>/dev/null' EXIT
+set +e
 
 base="http://127.0.0.1:$PORT"
 for i in $(seq 1 60); do
@@ -60,6 +64,7 @@ let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
   if (named < 9) { console.error(`verify: expected >=9 titled objects (3 columns + 6 cards), found ${named}`); process.exit(1); }
   console.log(`verify: board OK (${named} titled objects)`);
 });
-'
+' || { echo "verify: /api/board check failed" >&2; exit 1; }   # set +e is on: check explicitly
 
 echo "verify: all checks passed"
+exit 0
