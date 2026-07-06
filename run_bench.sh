@@ -128,7 +128,7 @@ trap _cleanup EXIT
 # Separate proxy/port per tier so max/high/off can run concurrently against the same endpoint.
 _start_proxy() {  # mode port endpoint-var
   echo "starting reasoning proxy [$1] on :$2" >&2
-  REASONING="$1" NOTHINK_PORT="$2" python3 "$SCRIPT_DIR/reasoning_proxy.py" > "$RESULTS_DIR/proxy_$1.log" 2>&1 &
+  python3 "$SCRIPT_DIR/reasoning_proxy.py" --reasoning "$1" --port "$2" > "$RESULTS_DIR/proxy_$1.log" 2>&1 &
   _proxies+=($!); export "$3=http://127.0.0.1:$2/v1"; sleep 1
 }
 pkill -f "$SCRIPT_DIR/reasoning_proxy.py" 2>/dev/null || true   # clear leftovers from a hard-killed run
@@ -307,22 +307,12 @@ for i in "${!MREF[@]}"; do
 done
 
 trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
-# All modal arms (thinking on/off) share the ONE GLM endpoint -> run them concurrently as a single
-# packed batch (max use of the warm window). Other backends (Opus API, Claude Code) run one at a time.
-gpids=()
+# One (harness,model) at a time for CLEAN per-arm cost — no cross-arm contention muddying call_s.
+# Within a group, tasks still run parallel (up to JOBS), so each arm is measured at its own packing.
+# The modal* arms are adjacent in the matrix, so the endpoint stays warm across them (no re-cold-start).
 for i in "${!MREF[@]}"; do
-  case "${MREF[$i]}" in modal*/*)
-    echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running (concurrent with other GLM arms, up to $JOBS each)" >&2
-    run_group "${HARN[$i]}" "${MREF[$i]}" &
-    gpids+=($!) ;;
-  esac
-done
-[ "${#gpids[@]}" -gt 0 ] && wait "${gpids[@]}" 2>/dev/null || true
-for i in "${!MREF[@]}"; do
-  case "${MREF[$i]}" in modal*/*) : ;; *)
-    echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running its tasks in parallel (up to $JOBS)" >&2
-    run_group "${HARN[$i]}" "${MREF[$i]}" ;;
-  esac
+  echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running its tasks in parallel (up to $JOBS)" >&2
+  run_group "${HARN[$i]}" "${MREF[$i]}"
 done
 trap - INT TERM
 

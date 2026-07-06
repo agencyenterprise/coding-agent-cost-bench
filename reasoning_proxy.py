@@ -1,28 +1,38 @@
 #!/usr/bin/env python3
-"""Tiny reverse proxy that sets GLM's reasoning tier, then forwards to $MODAL_ENDPOINT.
+"""Tiny reverse proxy that sets GLM's reasoning tier, then forwards to the GLM endpoint.
 
 opencode can't add non-standard request-body fields, but GLM-5.2 on SGLang honours
 `chat_template_kwargs`. This proxy injects the tier for one config and forwards. Run ONE instance
-per tier (own port) so max/high/off can run concurrently against the same endpoint:
+per tier (own port) so max/high/off can run side by side against the same endpoint:
 
-    REASONING=off  NOTHINK_PORT=8899 python3 reasoning_proxy.py   # enable_thinking=false
-    REASONING=high NOTHINK_PORT=8898 python3 reasoning_proxy.py   # reasoning_effort=high
-    # (max = default; hit the endpoint directly, no proxy)
+    python3 reasoning_proxy.py --reasoning off  --port 8899   # enable_thinking=false
+    python3 reasoning_proxy.py --reasoning high --port 8898   # reasoning_effort=high
+    # max = default; hit the endpoint directly (no proxy)
 
-Measured on a trivial prompt: default ~446 output tokens, high ~248 (~45% fewer), off ~5 — same
-answer. Being able to dial this per request at all is a self-host advantage; run_bench starts/stops
-these automatically for modal-nothink/ and modal-high/ arms.
+Upstream defaults to $MODAL_ENDPOINT. Measured on a trivial prompt: default ~446 output tokens,
+high ~248 (~45% fewer), off ~5 — same answer. run_bench starts/stops these for modal-nothink/ and
+modal-high/ arms.
 """
+import argparse
 import http.server
 import json
 import os
 import urllib.error
 import urllib.request
 
-MODAL = os.environ["MODAL_ENDPOINT"]
-BASE = MODAL[:-3] if MODAL.endswith("/v1") else MODAL   # strip trailing /v1; the path already carries it
-PORT = int(os.environ.get("NOTHINK_PORT", "8899"))
-MODE = os.environ.get("REASONING", "off").lower()       # off | high (| anything else = passthrough)
+ap = argparse.ArgumentParser(description="Inject a GLM reasoning tier and forward to the endpoint.")
+ap.add_argument("--reasoning", default="off", choices=["off", "high", "max"],
+                help="off = enable_thinking:false; high = reasoning_effort:high; max = passthrough")
+ap.add_argument("--port", type=int, default=8899, help="localhost port to listen on")
+ap.add_argument("--upstream", default=os.environ.get("MODAL_ENDPOINT", ""),
+                help="GLM endpoint base URL (defaults to $MODAL_ENDPOINT)")
+args = ap.parse_args()
+if not args.upstream:
+    raise SystemExit("no upstream: pass --upstream or set MODAL_ENDPOINT")
+
+MODE = args.reasoning
+PORT = args.port
+BASE = args.upstream[:-3] if args.upstream.endswith("/v1") else args.upstream   # path already carries /v1
 
 
 def _inject(obj):

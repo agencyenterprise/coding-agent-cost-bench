@@ -59,11 +59,10 @@ Common flags:
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
 | `--delete-repo` | discard the mutated repo | keep |
 
-**Parallelism is grouped.** Within a `(harness, model)` group, every task×run fires **in parallel**
-(up to `--jobs`). Across groups: all **`modal*` arms** (GLM thinking-on + thinking-off) run
-**concurrently** — they share the one GLM endpoint, so they pack it together in the warm window —
-while the **other backends** (Opus API, Claude Code) run **one at a time** so their numbers aren't
-mixed. Note: with N modal arms concurrent, endpoint load can reach N×`--jobs`.
+**Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is
+clean (no cross-arm contention inflating its latency); within a group every task×run fires **in
+parallel** (up to `--jobs`), so each arm is measured at its own packing. The `modal*` arms are
+adjacent in the matrix, so the GLM endpoint stays warm across them — sequential costs no re-cold-start.
 
 Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/summary.csv` +
 `results_detailed.csv`. Claude Code reports its own cost/usage/turns → those rows carry
