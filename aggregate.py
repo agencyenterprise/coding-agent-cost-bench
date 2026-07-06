@@ -425,26 +425,26 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     def usd(v):
         return f"${v:.3f}" if v not in ("", None) else "—"
 
+    def packed_per_task(r):
+        # GLM: shared-endpoint wall-clock (gen union) ÷ passes. API/Claude: per-token = same as sole.
+        if is_self_hosted(r["model"]):
+            w, p = _f(r.get("gpu_wall_cost_usd")), r.get("passes")
+            return w / p if (w and p) else ""
+        return r.get("cost_per_successful_task")
+
     section("Cost per Completed Task")
     print()
-    table(["Harness", "Model", "Prompt", "Success", "Cost/task", "Avg API s", "Avg Time"],
+    table(["Harness", "Model", "Prompt", "Success", "$/task sole", "$/task packed", "Avg Time"],
           [[harness_disp(r["harness"]), _mname(r["model"]), r["prompt"],
             f"{r['passes']}/{r['runs']}  {r['success_rate']:.0%}",
-            usd(r["cost_per_successful_task"]),
-            f"{_f(r.get('avg_call_s_pass')) or 0:.0f}s" if r.get("avg_call_s_pass") != "" else "—",
+            usd(r["cost_per_successful_task"]), usd(packed_per_task(r)),
             f"{r['avg_duration_s']:.0f}s" if r["avg_duration_s"] != "" else "—"] for r in rows])
-    print("\n  Cost/task = mean API-call cost per successful run "
-          f"(step_start→step_finish × ${GPU_HOURLY_USD:.2f}/hr; excludes local scripts/tools).")
-    print("  Avg API s = mean API-call seconds per successful run (sanity-check: × rate ÷ 3600 ≈ Cost/task).")
-    print("  Prompt = which task prompt version ran (v1 = baseline/default; v2 = shaped template; see PROMPTS.md).")
-    st_gpu = [r for r in rows if is_self_hosted(r["model"]) and r.get("gpu_wall_cost_usd") != ""]
-    if st_gpu:
-        print("\n  Shared-endpoint note: when tasks run in parallel, Σ call_s overstates wall-clock; "
-              "gpu_wall_cost_usd (gen_s union × rate) is the actual GPU-time bill for the arm.")
-        for r in st_gpu:
-            if _f(r.get("total_cost_usd")) and _f(r.get("gpu_wall_cost_usd")):
-                print(f"    {r['prompt']} {harness_disp(r['harness'])} {_mname(r['model'])}: "
-                      f"Σ API ${r['total_cost_usd']:.2f}  vs  wall ${r['gpu_wall_cost_usd']:.2f}")
+    print("\n  $/task sole   = one task alone on the 8×B200 — its own generation time × rate (no packing).")
+    print("  $/task packed = endpoint filled with concurrent tasks — union of generation ÷ tasks.")
+    print(f"  Both count generation only (step_start→step_finish × ${GPU_HOURLY_USD:.2f}/hr, no local scripts).")
+    print("  The gap between them is the concurrency lever. API models are per-token (concurrency-")
+    print("  invariant), so both columns match for Claude/GPT/Gemini.")
+    print("  Prompt = task prompt version (v1 baseline / v2 shaped / v3 control; see PROMPTS.md).")
 
     st = [r for r in rows if is_self_hosted(r["model"]) and r["cost_per_successful_task"] != "" and r["passes"]]
     if st:

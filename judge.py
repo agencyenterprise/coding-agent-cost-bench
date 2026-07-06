@@ -279,6 +279,37 @@ def timeline(summary):
     return L
 
 
+def cost_table(summary):
+    """Per-arm cost two ways so the reader sees the range and the concurrency lever:
+    sole-tenant (one task owns the 8×B200) vs packed (endpoint filled with concurrent tasks)."""
+    def packed(r):
+        if aggregate.is_self_hosted(r["model"]):
+            w, p = aggregate._f(r.get("gpu_wall_cost_usd")), aggregate._f(r.get("passes"))
+            return w / p if (w and p) else None
+        return aggregate._f(r.get("cost_per_successful_task"))   # API is per-token: sole == packed
+
+    def usd(v):
+        return f"${v:.3f}" if v is not None else "—"
+
+    L = ["## Cost per completed task — sole-tenant vs packed\n",
+         "For GLM the two numbers bracket reality. **sole** = one task alone on the rented 8×B200 — its "
+         "own generation time × rate (you pay for all 8 GPUs to serve a single task). **packed** = the "
+         "endpoint filled with concurrent tasks — union of generation ÷ tasks. The gap between them is "
+         "the **concurrency lever**: packing the endpoint is what makes GLM cheap. Both count generation "
+         f"only (step_start→step_finish × ~${float(os.environ.get('GLM_GPU_HOURLY_USD','50.7')):.0f}/hr, "
+         "no local scripts). Claude/GPT are per-token — concurrency-invariant — so sole == packed.",
+         "",
+         "| harness | model | prompt | success | $/task sole | $/task packed |",
+         "|---|---|---|---|---|---|"]
+    for r in summary:
+        cst = aggregate._f(r.get("cost_per_successful_task"))
+        L.append(f"| {aggregate.harness_disp(r['harness'])} | {aggregate.model_disp(r['model'])} "
+                 f"| {r.get('prompt', '')} | {r.get('passes', '')}/{r.get('runs', '')} "
+                 f"| {usd(cst)} | {usd(packed(r))} |")
+    L.append("")
+    return L
+
+
 def cost_analysis(summary):
     """Narrative on WHY the two costs differ — generated from summary.csv so it can't drift."""
     rate = float(os.environ.get("GLM_GPU_HOURLY_USD", "50.7"))
@@ -432,7 +463,7 @@ def main():
         s = list(csv.DictReader(open(summ)))
         cols = ["harness", "model", "prompt", "passes", "runs", "success_rate", "avg_tokens_in",
                 "avg_tokens_out", "avg_duration_s", "call_s", "gen_s", "active_s", "idle_s",
-                "overlap_s", "cost_per_successful_task", "cost_basis"]
+                "overlap_s", "cost_per_successful_task", "gpu_wall_cost_usd", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
         def _cell(c, r):
             if c == "harness":
@@ -446,6 +477,7 @@ def main():
         for r in s:
             lines.append("| " + " | ".join(_cell(c, r) for c in cols) + " |")
         lines.append("")
+        lines += cost_table(s)
         lines += timeline(s)
         lines += cost_analysis(s)
         lines += cost_model(s)
