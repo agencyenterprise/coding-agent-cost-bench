@@ -1,10 +1,20 @@
 # Prompt versions (the manifest)
 
-Each task carries **two prompt versions**, so the same fix can be handed to the agents phrased
-differently. Prompt version is a **first-class sweep dimension**: `./run_bench.sh` runs *every*
-version present for every task, and every result row is tagged with its version (`prompt` column
-in `manifest.csv` → `summary.csv` → `report.md`). This file says **where each version came from
-and what it's testing** — so a row labelled `v1` vs `v2` is interpretable.
+Each task carries up to **three prompt versions** of the same underlying task, so the *phrasing*
+becomes a measurable variable. Prompt version is a **first-class sweep dimension**: `./run_bench.sh`
+runs every version present for every task, and every result row is tagged with it (`prompt` column,
+threaded through `manifest.csv` → `summary.csv` → `report.md` and the complexity view).
+
+**What each version does, in one line:**
+
+| Version | What the prompt is | What its delta measures |
+|---|---|---|
+| **v1** | the terse, raw ask a developer would actually type — no setup hints, no success command | the floor (a minimally-engineered prompt) |
+| **v2** | the shaped uniform template — structure + explicit success command + scope rules + env setup + checklist | `v2 − v1` = total value of prompt engineering |
+| **v3** | control: v1's terse phrasing + *only* v2's operational bits (env setup + verify command), no structure | `v3 − v1` = operational context; `v2 − v3` = structure/discipline |
+
+The rest of this file records **where each version comes from and what it's testing** — so a `v1`
+vs `v2` vs `v3` row is interpretable.
 
 ## Convention
 
@@ -16,14 +26,14 @@ and what it's testing** — so a row labelled `v1` vs `v2` is interpretable.
 
 The baseline is **`prompt.v1.txt`** — the minimal version a developer would actually type. The label
 is the filename's version (`prompt.v1.txt` → `v1`; `prompt.v2.txt` → `v2`; `prompt.<x>.txt` → `<x>`).
-The sweep runs them **in order v1 → v2**, so the report reads baseline-first.
+The sweep runs them **in order v1 → v2 → v3**, so the report reads baseline-first.
 
 ## Running
 
 ```bash
-./run_bench.sh                            # DEFAULT: runs every prompt*.txt present (v1 and v2), per task
+./run_bench.sh                            # DEFAULT: runs every prompt.v*.txt present (v1, v2, v3), per task
 ./run_bench.sh --prompts prompt.v1.txt    # only v1 (baseline)
-./run_bench.sh --prompts prompt.v2.txt    # only v2 (shaped)
+./run_bench.sh --prompts prompt.v2.txt,prompt.v3.txt   # a subset
 ```
 
 Still grouped per model: within each `(harness, model)` group, `tasks × versions × runs` fire in
@@ -79,8 +89,8 @@ All six demo tasks carry `v1`, `v2`, and `v3`:
 | `demo-swebench-psf__requests-6028` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
 | `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) | terse + create-next-app + build/test/API checks |
 
-New SWE-bench tasks get both automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw
-statement) and `prompt.v2.txt` (shaped) side by side.
+New SWE-bench tasks get all three automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw
+statement), `prompt.v2.txt` (shaped), and `prompt.v3.txt` (raw issue + operational bits) side by side.
 
 ## Add a version
 
