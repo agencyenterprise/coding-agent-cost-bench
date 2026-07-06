@@ -13,4 +13,7 @@ if ! { [ -x "$py" ] && "$py" -c 'import pytest'; } >/dev/null 2>&1; then
 fi
 tests=()
 while IFS= read -r t; do [ -n "$t" ] && tests+=("$t"); done < "$here/f2p.txt"
+# -o addopts= : drop the repo's pytest config so pytest collects ONLY the target test file
+# (many repos force whole-tree collection via addopts/testpaths, and an unrelated test file
+# that doesn't import on this Python would abort the whole run). -p no:cacheprovider: no writes.
 "$py" -m pytest "${tests[@]}" -q -o addopts= -p no:cacheprovider

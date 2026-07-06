@@ -5,12 +5,12 @@ Aggregate benchmark results -> results/{results_detailed,summary}.csv.
 ONE cost per row, always labeled with its basis. Two currencies:
   * API models (Claude/GPT/Gemini) -> cost = tokens x per-token price (how the provider
     bills). From ccusage. basis "api_ccusage".
-  * GLM on Modal (self-host)        -> charged on ENDPOINT CALL TIME only: sum of the seconds
-    the agent actually spent generating on the endpoint (parsed from output.log), x the hourly
-    rate. basis "gpu_calls". This deliberately EXCLUDES local script time (pip/pytest/git/tool
-    exec) where the GPU is idle. Attribution caveat: Modal bills container UPTIME, not compute-
-    seconds, so a sole tenant really pays for wall-clock (see active_s) incl. that idle — the
-    call-only number is the fair shared-endpoint / packed floor. The report spells this out.
+  * GLM on Modal (self-host)        -> cost = per-run sum of API-call seconds (step_start ->
+    step_finish in output.log) x hourly rate. basis "gpu_calls". Local script/tool gaps
+    (pip/pytest/git/bash between steps) are excluded. cost_per_successful_task = mean of that
+    per-run API cost over passes only (not job wall-clock, not pooled across concurrent tasks).
+    gen_s in summary is still the union of API windows (utilization); dollars use summed call_s.
+    Modal sole-tenant uptime billing (active_s) is reported separately as idle tax.
 
 Inputs: results/manifest.csv + results/<outdir>/usage.json (ccusage session --json shape).
 Self-host detection: any model served via the `modal/` provider (e.g. modal/zai-org/GLM-5.2-FP8).
@@ -243,6 +243,11 @@ def _iso(ts):
     return "" if ts is None else datetime.fromtimestamp(ts).isoformat(timespec="seconds")
 
 
+def gpu_call_cost(call_s):
+    """USD for GLM self-host: API-call seconds only (excludes local tool/script time)."""
+    return call_s / 3600 * GPU_HOURLY_USD if call_s else 0.0
+
+
 def main():
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
@@ -254,7 +259,7 @@ def main():
     intervals = defaultdict(list)   # arm -> [(start, end), ...] run intervals (uptime)
     genivs = defaultdict(list)      # arm -> [(start, end), ...] generation windows (concurrency-safe)
     eff = defaultdict(lambda: {"steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0})
-    task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0, "pass": 0})
+    task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0, "pass": 0, "api_cost": 0.0})
     with open(manifest) as f:
         for row in csv.DictReader(f):
             m = row["model"]
@@ -281,13 +286,16 @@ def main():
             ts["steps"] += pm["steps"]; ts["tools"] += pm["tools"]; ts["out"] += pm["out"]
             ts["dur"] += _f(row.get("duration_s")) or 0.0
             ts["pass"] += 1 if row["status"] == "pass" else 0
+            if is_self_hosted(m):
+                ts["api_cost"] += gpu_call_cost(cs)
+            run_cost = round(gpu_call_cost(cs), 4) if is_self_hosted(m) else round(ccost, 6)
             detailed.append({
                 "task": row["task"], "harness": h, "model": m, "prompt": pv, "run": row["run"],
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
-                "call_s": round(cs, 1),
+                "call_s": round(cs, 2),
                 "tokens_in": tin, "tokens_out": tout,
-                "cost_usd": "" if is_self_hosted(m) else round(ccost, 6),
+                "cost_usd": run_cost if (run_cost or not is_self_hosted(m)) else "",
                 "cost_basis": basis,
             })
     if not detailed:
@@ -310,32 +318,36 @@ def main():
         durs = [_f(r["duration_s"]) for r in runs if _f(r["duration_s"]) is not None]
         active = union_seconds(intervals[key])                        # wall-clock union = sole-tenant uptime
         overlap = sum(e - s for s, e in intervals[key]) - active      # time compressed by parallelism
-        call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)   # generation WORK (sum)
-        gen_wall = union_seconds(genivs[key])                         # generation WALL-CLOCK (union; concurrency-safe)
+        call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)   # Σ API-call s
+        gen_wall = union_seconds(genivs[key])                         # API wall-clock union (parallel-safe)
         idle = max(0.0, active - gen_wall)                            # up but not generating anything (>= 0)
+        pass_call_s = [_f(r["call_s"]) for r in runs if r["status"] == "pass" and _f(r["call_s"]) is not None]
         row = {
             "harness": harness, "model": model, "prompt": prompt, "runs": n, "passes": passes,
             "success_rate": round(passes / n, 3),
             "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)),
             "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)),
             "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
-            "call_s": round(call_total, 1) if call_total else "",     # total generation work (info)
-            "gen_s": round(gen_wall, 1) if gen_wall else "",          # generation wall-clock (billed basis)
+            "avg_call_s_pass": round(statistics.mean(pass_call_s), 1) if pass_call_s else "",
+            "call_s": round(call_total, 1) if call_total else "",     # Σ API-call seconds (all runs)
+            "gen_s": round(gen_wall, 1) if gen_wall else "",          # API wall-clock union (utilization)
             "active_s": round(active, 1) if active else "",
             "idle_s": round(idle, 1) if (intervals[key] and gen_wall) else "",
             "overlap_s": round(overlap, 1) if intervals[key] else "",
-            "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
+            "total_cost_usd": "", "gpu_wall_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
         }
         if is_self_hosted(model):
-            # cost = generation WALL-CLOCK × rate (union of gen windows, so concurrent tasks aren't
-            # double-counted). idle = uptime − gen wall-clock >= 0. sole-tenant = uptime × rate.
-            if gen_wall:
-                cost = gen_wall / 3600 * GPU_HOURLY_USD
-                row["total_cost_usd"] = round(cost, 4)
-                row["cost_per_successful_task"] = round(cost / passes, 4) if passes else ""
-                row["cost_basis"] = "gpu_gen"
+            # Dollars from API-call seconds only (step_start→step_finish per step; no local tools).
+            # cost_per_successful_task = mean API $ over passes. total_cost_usd = Σ all runs (incl. fails).
+            # gpu_wall_cost_usd = gen_s union × rate = shared-endpoint wall-clock bill when parallel.
+            if pass_call_s or call_total:
+                row["total_cost_usd"] = round(gpu_call_cost(call_total), 4) if call_total else ""
+                row["gpu_wall_cost_usd"] = round(gpu_call_cost(gen_wall), 4) if gen_wall else ""
+                row["cost_per_successful_task"] = (
+                    round(gpu_call_cost(statistics.mean(pass_call_s)), 4) if pass_call_s else "")
+                row["cost_basis"] = "gpu_calls"
             else:
-                row["cost_basis"] = "gpu_gen (no log timing)"
+                row["cost_basis"] = "gpu_calls (no log timing)"
         else:   # token-billed (opencode APIs) or Claude Code (reports its own $)
             total = sum(r["cost_usd"] for r in runs if r["cost_usd"] != "")
             row["total_cost_usd"] = round(total, 4)
@@ -363,7 +375,8 @@ def main():
     crows = [{"task": t[0], "prompt": t[1], "source": task_source(t[0]), "complexity": a["complexity"],
               "pass_rate": a["pass_rate"], "runs": a["runs"],
               "avg_steps": round(a["avg_steps"], 1), "avg_tools": round(a["avg_tools"], 1),
-              "avg_out_tok": round(a["avg_out"]), "avg_dur_s": round(a["avg_dur"], 1)}
+              "avg_out_tok": round(a["avg_out"]), "avg_dur_s": round(a["avg_dur"], 1),
+              "avg_api_cost_usd": round(task_stat[t]["api_cost"] / max(a["runs"], 1), 4)}
              for t, a in sorted(comp.items(), key=lambda kv: (-peak[kv[0][0]], kv[0][0], kv[0][1]))]
     if crows:
         with open(os.path.join(RESULTS_DIR, "complexity.csv"), "w", newline="") as f:
@@ -414,13 +427,24 @@ def _print_report(results_dir, rows, eff, crows, intervals):
 
     section("Cost per Completed Task")
     print()
-    table(["Harness", "Model", "Prompt", "Success", "Cost/task", "Avg Time"],
+    table(["Harness", "Model", "Prompt", "Success", "Cost/task", "Avg API s", "Avg Time"],
           [[harness_disp(r["harness"]), _mname(r["model"]), r["prompt"],
             f"{r['passes']}/{r['runs']}  {r['success_rate']:.0%}",
             usd(r["cost_per_successful_task"]),
+            f"{_f(r.get('avg_call_s_pass')) or 0:.0f}s" if r.get("avg_call_s_pass") != "" else "—",
             f"{r['avg_duration_s']:.0f}s" if r["avg_duration_s"] != "" else "—"] for r in rows])
-    print("\n  Cost/task = generation only (what the model actually spent on the GPU).")
+    print("\n  Cost/task = mean API-call cost per successful run "
+          f"(step_start→step_finish × ${GPU_HOURLY_USD:.2f}/hr; excludes local scripts/tools).")
+    print("  Avg API s = mean API-call seconds per successful run (sanity-check: × rate ÷ 3600 ≈ Cost/task).")
     print("  Prompt = which task prompt version ran (v1 = baseline/default; v2 = shaped template; see PROMPTS.md).")
+    st_gpu = [r for r in rows if is_self_hosted(r["model"]) and r.get("gpu_wall_cost_usd") != ""]
+    if st_gpu:
+        print("\n  Shared-endpoint note: when tasks run in parallel, Σ call_s overstates wall-clock; "
+              "gpu_wall_cost_usd (gen_s union × rate) is the actual GPU-time bill for the arm.")
+        for r in st_gpu:
+            if _f(r.get("total_cost_usd")) and _f(r.get("gpu_wall_cost_usd")):
+                print(f"    {r['prompt']} {harness_disp(r['harness'])} {_mname(r['model'])}: "
+                      f"Σ API ${r['total_cost_usd']:.2f}  vs  wall ${r['gpu_wall_cost_usd']:.2f}")
 
     st = [r for r in rows if is_self_hosted(r["model"]) and r["cost_per_successful_task"] != "" and r["passes"]]
     if st:
@@ -456,8 +480,9 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     if crows:
         section("Task Difficulty")
         print()
-        table(["Task", "Prompt", "Source", "Diff", "Pass", "Avg Steps"],
+        table(["Task", "Prompt", "Source", "Diff", "Pass", "API $", "Avg Steps"],
               [[_tshort(r["task"]), r["prompt"], r["source"], f"{r['complexity']}", f"{r['pass_rate']:.0%}",
+                usd(r.get("avg_api_cost_usd")),
                 f"{r['avg_steps']:.0f}"] for r in crows])
         print("\n  Diff is per (task, prompt version): v1 (terse/raw) usually demands more than v2 (shaped).")
         print("  Source: swe-bench = real dataset issue (embedded verbatim) in our template; "

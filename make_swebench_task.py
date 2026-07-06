@@ -107,7 +107,10 @@ def main() -> None:
         "fi\n"
         "tests=()\n"
         'while IFS= read -r t; do [ -n "$t" ] && tests+=("$t"); done < "$here/f2p.txt"\n'
-        '"$py" -m pytest "${tests[@]}" -q\n'
+        "# -o addopts= : drop the repo's pytest config so pytest collects ONLY the target test file\n"
+        "# (many repos force whole-tree collection via addopts/testpaths, and an unrelated test file\n"
+        "# that doesn't import on this Python would abort the whole run). -p no:cacheprovider: no writes.\n"
+        '"$py" -m pytest "${tests[@]}" -q -o addopts= -p no:cacheprovider\n'
     )
     bad = [x for x in f2p if "::" not in x or " " in x or x.count("[") != x.count("]")]
     if bad:

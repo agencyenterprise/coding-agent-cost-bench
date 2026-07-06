@@ -20,9 +20,10 @@ vs `v2` vs `v3` row is interpretable.
 
 | File | Version label | Meaning |
 |---|---|---|
-| `tasks/<t>/prompt.v1.txt` | **`v1`** | the **default/baseline** prompt — the terse, unstructured ask |
-| `tasks/<t>/prompt.v2.txt` | **`v2`** | the **shaped** uniform template (structure + explicit scope) |
-| `tasks/<t>/prompt.<x>.txt` | **`<x>`** | any further variant (`v3`, …) |
+| `tasks/<t>/prompt.v1.txt` | **`v1`** | **baseline** — the terse, unstructured ask a developer would type |
+| `tasks/<t>/prompt.v2.txt` | **`v2`** | **shaped** uniform template — structure + success command + scope + env + checklist |
+| `tasks/<t>/prompt.v3.txt` | **`v3`** | **control** — v1's terse phrasing + only v2's operational bits (env + verify cmd), no structure |
+| `tasks/<t>/prompt.<x>.txt` | **`<x>`** | any further variant you add |
 
 The baseline is **`prompt.v1.txt`** — the minimal version a developer would actually type. The label
 is the filename's version (`prompt.v1.txt` → `v1`; `prompt.v2.txt` → `v2`; `prompt.<x>.txt` → `<x>`).
@@ -86,7 +87,7 @@ All six demo tasks carry `v1`, `v2`, and `v3`:
 | Task | v1 (`prompt.v1.txt`) | v2 (`prompt.v2.txt`) | v3 (`prompt.v3.txt`) |
 |---|---|---|---|
 | `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template | terse + env/verify cmd |
-| `demo-swebench-psf__requests-6028` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
+| `demo-swebench-psf__requests-6028`, `-pylint-dev__pylint-8898` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
 | `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) | terse + create-next-app + build/test/API checks |
 
 New SWE-bench tasks get all three automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw

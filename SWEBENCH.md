@@ -18,8 +18,12 @@ No `datasets` install needed — it falls back to the cached HF parquet via `pya
 ### Runs on your host (Python 3.14) — pick instances that do
 The grader installs a **modern pytest** next to the repo, so a **pure-Python** instance runs on a
 modern host (incl. **Python 3.14**) **iff its test files import cleanly there**. Guidance:
-- ✅ **Good**: pure-Python, newest-version, small — e.g. `psf__requests-6028` (committed, validated
-  fail→pass on 3.14). Prefer the highest `version` per repo.
+- ✅ **Good**: pure-Python, newest-version — e.g. `psf__requests-6028` and `pylint-dev__pylint-8898`
+  (both committed, validated fail→pass on 3.14). Prefer the highest `version` per repo.
+- The generated `verify.sh` runs pytest with `-o addopts=` so it collects ONLY the target test file —
+  many repos (pylint/sphinx) force whole-tree collection, and one unrelated test file that doesn't
+  import on this Python would otherwise abort the run. An instance is viable on 3.14 iff its own
+  FAIL_TO_PASS **test file** imports there.
 - ❌ **Needs Docker (Python ≤3.11)**: `pytest-dev/pytest-*` — the package under test *is* pytest, so
   you can't swap in a modern one; old pytest crashes on 3.14 (`ast.Str` removed). Run via `./run_on_docker.sh`.
 - ❌ **Skip**: `sympy/*` (FAIL_TO_PASS are bare test names, not pytest node ids → 0 tests collected);
