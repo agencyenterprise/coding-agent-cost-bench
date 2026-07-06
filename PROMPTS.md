@@ -61,7 +61,7 @@ All six demo tasks carry both `v1` and `v2`:
 | Task | v1 (`prompt.txt`) | v2 (`prompt.v2.txt`) |
 |---|---|---|
 | `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template |
-| `demo-kanban-orchestration` | plain build request | shaped build spec (plan → implement → validate) |
+| `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) |
 | `demo-swebench-pytest-dev__pytest-5787`, `-6197` | raw dataset issue (verbatim) | issue + template scaffolding |
 
 New SWE-bench tasks get both automatically: `make_swebench_task.py` writes `prompt.txt` (raw

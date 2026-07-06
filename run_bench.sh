@@ -20,7 +20,7 @@ TASKS_DIR="./tasks"
 ONLY_TASK=""               # run just one task (its dir name under $TASKS_DIR); empty = all
 PROMPTS_STR=""             # restrict to these per-task prompt files (comma/space); empty = ALL prompt*.txt
 RUNS=3
-TIMEOUT_SECS=3500
+TIMEOUT_SECS=500
 RETRIES=2
 RUN_DELAY=2
 JOBS=30

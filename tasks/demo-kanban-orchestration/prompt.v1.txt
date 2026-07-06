@@ -1,5 +1,5 @@
-Build a single-board kanban app (Trello-like) with Next.js (App Router, TypeScript) in the current workspace root. Columns hold cards (title, description, optional label color); support drag-and-drop of cards between and within columns with optimistic updates, create/edit/delete cards, and add/remove/rename columns.
+Build a single-board kanban app (Trello-like) with Next.js (App Router, TypeScript) in the current workspace root. Columns hold cards (title, description); support creating, editing, deleting, and moving cards between and within columns, plus adding and removing columns. Drag-and-drop is nice but use any approach you like.
 
 Back it with Next.js API route handlers over an in-memory store seeded with 3 columns and 6 cards. Include `/api/health` (returns 200) and `/api/board` (returns the full board as JSON), plus whatever CRUD/move endpoints you need.
 
-Use Tailwind for styling, `@dnd-kit/core` + `@dnd-kit/sortable` for drag-and-drop, and TanStack Query v5 for client-side data fetching, mutations, and optimistic updates. Add Vitest tests for the store, the API handlers, and the main components. Make sure `next build` and the tests pass.
+Keep it minimal. Add at least one Vitest test for the store's move-card logic. Make sure `npm run build` and the tests pass.
