@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Tiny reverse proxy that turns GLM's reasoning OFF.
+"""Tiny reverse proxy that sets GLM's reasoning tier, then forwards to $MODAL_ENDPOINT.
 
 opencode can't add non-standard request-body fields, but GLM-5.2 on SGLang honours
-`chat_template_kwargs: {enable_thinking: false}` (verified: it drops the reasoning trace,
-~26x fewer output tokens for the same answer). This proxy injects that field into every
-`/chat/completions` body and forwards to $MODAL_ENDPOINT — so a 'GLM thinking-off' arm can run
-through the normal harness. (Being able to do this at all is a self-host advantage: a closed API
-gives you no such knob, and this is where you'd later auto-select effort per task.)
+`chat_template_kwargs`. This proxy injects the tier for one config and forwards. Run ONE instance
+per tier (own port) so max/high/off can run concurrently against the same endpoint:
 
-    MODAL_ENDPOINT=... MODAL_KEY=... MODAL_SECRET=... python3 nothink_proxy.py
-    # listens on 127.0.0.1:$NOTHINK_PORT (default 8899); point a provider baseURL at http://127.0.0.1:8899/v1
+    REASONING=off  NOTHINK_PORT=8899 python3 reasoning_proxy.py   # enable_thinking=false
+    REASONING=high NOTHINK_PORT=8898 python3 reasoning_proxy.py   # reasoning_effort=high
+    # (max = default; hit the endpoint directly, no proxy)
 
-run_bench.sh starts/stops this automatically when a `modal-nothink/...` model is selected.
+Measured on a trivial prompt: default ~446 output tokens, high ~248 (~45% fewer), off ~5 — same
+answer. Being able to dial this per request at all is a self-host advantage; run_bench starts/stops
+these automatically for modal-nothink/ and modal-high/ arms.
 """
 import http.server
 import json
@@ -22,6 +22,16 @@ import urllib.request
 MODAL = os.environ["MODAL_ENDPOINT"]
 BASE = MODAL[:-3] if MODAL.endswith("/v1") else MODAL   # strip trailing /v1; the path already carries it
 PORT = int(os.environ.get("NOTHINK_PORT", "8899"))
+MODE = os.environ.get("REASONING", "off").lower()       # off | high (| anything else = passthrough)
+
+
+def _inject(obj):
+    ck = obj.setdefault("chat_template_kwargs", {})
+    if MODE == "off":
+        ck.setdefault("enable_thinking", False)
+    elif MODE == "high":
+        ck.setdefault("reasoning_effort", "high")
+    return obj
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -37,11 +47,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _forward(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(n) if n else None
-        if body and "chat/completions" in self.path:      # inject the reasoning-off flag
+        if body and "chat/completions" in self.path and MODE in ("off", "high"):
             try:
-                obj = json.loads(body)
-                obj.setdefault("chat_template_kwargs", {}).setdefault("enable_thinking", False)
-                body = json.dumps(obj).encode()
+                body = json.dumps(_inject(json.loads(body))).encode()
             except Exception:
                 pass
         req = urllib.request.Request(BASE + self.path, data=body, method=self.command)
@@ -55,7 +63,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data, code, ct = r.read(), r.getcode(), r.headers.get("Content-Type", "application/json")
         except urllib.error.HTTPError as e:
             data, code, ct = e.read(), e.code, e.headers.get("Content-Type", "application/json")
-        except Exception as e:                              # upstream unreachable, etc.
+        except Exception as e:
             data, code, ct = str(e).encode(), 502, "text/plain"
         self.send_response(code)
         self.send_header("Content-Type", ct)
@@ -65,5 +73,5 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"nothink proxy on 127.0.0.1:{PORT} -> {BASE}  (injecting enable_thinking=false)", flush=True)
+    print(f"reasoning proxy [{MODE}] on 127.0.0.1:{PORT} -> {BASE}", flush=True)
     http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

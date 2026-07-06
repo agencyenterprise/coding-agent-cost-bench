@@ -39,10 +39,13 @@ Each entry is **`harness:model-ref`** (`harness` = `opencode` | `claude`). The s
 under both harnesses — that's the point (model isolation vs real-world). Default matrix:
 ```
 opencode:modal/zai-org/GLM-5.2-FP8           # GLM, default (max) reasoning
-opencode:modal-nothink/zai-org/GLM-5.2-FP8   # GLM, reasoning off (adjacent, so endpoint stays warm)
+opencode:modal-high/zai-org/GLM-5.2-FP8      # GLM, reasoning_effort=high  (~45% fewer tokens)
+opencode:modal-nothink/zai-org/GLM-5.2-FP8   # GLM, reasoning off
 opencode:anthropic/claude-opus-4-8           # Opus, same harness as GLM (clean comparison)
 claude:anthropic/claude-opus-4-8             # Opus in Claude Code's own CLI (real-world product comp)
 ```
+The three `modal*` arms are a **reasoning sweep** (max / high / off) — run_bench starts one
+`reasoning_proxy.py` per proxied tier (own port) so they run concurrently on the one endpoint.
 `claude:` needs the `claude` CLI on PATH; it can't serve GLM/GPT/Gemini (Anthropic-only).
 
 Common flags:
@@ -66,18 +69,15 @@ Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/s
 `results_detailed.csv`. Claude Code reports its own cost/usage/turns → those rows carry
 `cost_basis = claude_code`; opencode API rows are `api_ccusage`; GLM is `gpu_calls`.
 
-**Reasoning arm (GLM thinking-off).** GLM-5.2 defaults to *max* reasoning while Opus runs with none —
-which inflates GLM's tokens/cost. To isolate that, add the arm `modal-nothink/zai-org/GLM-5.2-FP8`:
-`run_bench` auto-starts `nothink_proxy.py`, a local proxy that injects
-`chat_template_kwargs:{enable_thinking:false}` into every request (opencode can't add body fields; the
-Modal endpoint forwards it to SGLang — verified). Three-way comparison:
-```bash
-./run_bench.sh --model opencode:modal/zai-org/GLM-5.2-FP8 \
-               --model opencode:modal-nothink/zai-org/GLM-5.2-FP8 \
-               --model opencode:anthropic/claude-opus-4-8
-```
-Thinking-off cut output ~26× on a trivial task (same answer); the open question is whether success
-holds on the hard tasks — that's what this arm measures.
+**Reasoning sweep (GLM max / high / off).** GLM-5.2 defaults to *max* reasoning while Opus runs with
+none — which inflates GLM's tokens/cost. `run_bench` auto-starts a `reasoning_proxy.py` per proxied
+tier (opencode can't add `chat_template_kwargs`; the Modal endpoint forwards it to SGLang — verified):
+- `modal/…` → default/max (no proxy)
+- `modal-high/…` → `reasoning_effort:high` (spike: ~45% fewer tokens, same answer)
+- `modal-nothink/…` → `enable_thinking:false` (~99% fewer on a trivial task)
+
+The default matrix already includes all three, so a plain `./run_bench.sh` runs the sweep. The open
+question these arms answer: how much success do you lose as you dial reasoning down, vs the cost saved?
 
 ## 3. Judge
 Turn the raw runs into the final report — numbers + a blinded LLM review of each transcript+diff:
