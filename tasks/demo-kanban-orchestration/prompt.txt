@@ -1,0 +1,40 @@
+Build a Next.js application. Use the newest Node.js available in mise (mise is accessible). Use `create-next-app` to produce the initial project layout (App Router, TypeScript).
+
+Before writing any code, use your todo tool to record a detailed plan broken into subtasks — file paths, acceptance criteria, and pinned API contracts. Then execute every subtask yourself: create files, edit files, run shell commands, run tests. Do not stop after planning.
+
+The application is a **kanban board** (Trello-like), single board, no authentication, no external services, no API keys.
+
+Functional requirements:
+- Board with columns (e.g. "To Do", "In Progress", "Done") containing cards (title, description, optional label color)
+- Drag-and-drop of cards between and within columns, with optimistic UI updates
+- Create, edit, and delete cards; rename columns; add/remove columns
+- Server-side state via Next.js API route handlers backed by an in-memory store (no database). The store module must be seeded deterministically at boot with 3 columns and 6 cards so validation is reproducible
+- API routes: `/api/health` (200 check), `/api/board` (full board GET), plus CRUD/move endpoints of your design — pin the exact route shapes and JSON contracts in your plan before implementing
+
+Stack constraints (mandatory — do not substitute):
+- Tailwind CSS for styling
+- `@dnd-kit/core` + `@dnd-kit/sortable` for drag-and-drop (latest versions; use the real documented API)
+- TanStack Query (`@tanstack/react-query`, latest v5) for all client-side data fetching, mutations, and optimistic updates (use the real documented v5 API — object-form `useQuery` / `useMutation`)
+- Minimal other dependencies — just enough for the SPA
+- Componentize via React components and normal Next.js best practices; avoid duplications and single-file CSS/JS dumps
+
+Quality requirements:
+- Vitest unit tests for the store, the API route handlers, and the main components (React Testing Library). Tests must exercise the real drag/move and mutation logic — tests that never touch the move-card path do not count
+- ESLint, TypeScript strict mode, coverage reporting (Vitest coverage), and `npm audit` wired for CI
+- Clean, well-formatted, idiomatic TypeScript/React code
+
+Deliverables:
+- Next.js app in the current workspace root (do not create a nested subdirectory; stay in place)
+- README.md explaining what the app does, how to set up the environment, and how to run locally
+- No authentication, no environment secrets required
+
+## VALIDATION
+
+Once implementation is complete, run these checks yourself:
+- Run the test suite and confirm all tests pass
+- Run `next build` and confirm it completes without errors
+- Boot the built app locally, confirm `curl /api/health` returns 200 and `curl /api/board` returns valid JSON with 3 columns and 6 cards
+
+Iterate on failures until all checks pass or you hit a hard blocker you cannot resolve (report it clearly).
+
+Do not stop at the plan. Do not ask for confirmation. Execute: plan → implement → validate.
