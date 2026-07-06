@@ -21,7 +21,8 @@ Heavy scientific repos (numpy, scipy, astropy, scikit-learn) need big deps and a
 - `repo.git` — the instance's repo pinned to its `base_commit`
 - `setup.sh` — applies the dataset's **test patch** (introduces the failing tests)
 - `verify.sh` — runs the instance's **FAIL_TO_PASS** tests (exit 0 = solved)
-- `prompt.txt` — the real GitHub issue text (`problem_statement`)
+- `prompt.v1.txt` — the real GitHub issue text (`problem_statement`), verbatim; `prompt.v2.txt` — the
+  same issue wrapped in our shaped template (both run by default — see PROMPTS.md)
 
 ## Comparing to Claude's baseline
 - Official leaderboard + per-model resolved rates: <https://www.swebench.com>

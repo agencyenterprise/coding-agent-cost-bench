@@ -411,10 +411,8 @@ def main():
     # blind LLM difficulty rating, per unique (task, prompt version) — v1 (raw/terse) and v2 (shaped)
     # are genuinely different difficulties, so each is rated from its own prompt file.
     def _prompt_path(task, pv):
-        for c in (f"prompt.{pv}.txt", "prompt.txt" if pv == "v1" else ""):
-            if c and os.path.exists(os.path.join("tasks", task, c)):
-                return os.path.join("tasks", task, c)
-        return ""
+        p = os.path.join("tasks", task, f"prompt.{pv}.txt")
+        return p if os.path.exists(p) else ""
     difficulty = {}
     pairs = []
     for row in rows:

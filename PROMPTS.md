@@ -10,19 +10,19 @@ and what it's testing** — so a row labelled `v1` vs `v2` is interpretable.
 
 | File | Version label | Meaning |
 |---|---|---|
-| `tasks/<t>/prompt.txt` | **`v1`** | the **default/baseline** prompt — the terse, unstructured ask |
+| `tasks/<t>/prompt.v1.txt` | **`v1`** | the **default/baseline** prompt — the terse, unstructured ask |
 | `tasks/<t>/prompt.v2.txt` | **`v2`** | the **shaped** uniform template (structure + explicit scope) |
 | `tasks/<t>/prompt.<x>.txt` | **`<x>`** | any further variant (`v3`, …) |
 
-The default (`prompt.txt`) is **`v1`** — the minimal version a developer would actually type. The
-label is derived from the filename (`prompt.txt` → `v1`; `prompt.<x>.txt` → `<x>`). The sweep runs
-them **in order v1 → v2**, so the report reads baseline-first.
+The baseline is **`prompt.v1.txt`** — the minimal version a developer would actually type. The label
+is the filename's version (`prompt.v1.txt` → `v1`; `prompt.v2.txt` → `v2`; `prompt.<x>.txt` → `<x>`).
+The sweep runs them **in order v1 → v2**, so the report reads baseline-first.
 
 ## Running
 
 ```bash
 ./run_bench.sh                            # DEFAULT: runs every prompt*.txt present (v1 and v2), per task
-./run_bench.sh --prompts prompt.txt       # only v1 (baseline)
+./run_bench.sh --prompts prompt.v1.txt    # only v1 (baseline)
 ./run_bench.sh --prompts prompt.v2.txt    # only v2 (shaped)
 ```
 
@@ -32,7 +32,7 @@ separate rows and never pooled — you can read "v2 lifted success from X→Y" s
 
 ## The versions
 
-### `v1` — baseline (default, `prompt.txt`)
+### `v1` — baseline (`prompt.v1.txt`)
 **Source.** The minimal, unstructured ask.
 - **Invented tasks** (injected-bug demos + the from-scratch build): a couple of sentences —
   symptom + "make the tests pass," or for the build task the functional/stack requirements stated
@@ -58,13 +58,13 @@ scaffolding for every model). The delta `v2 − v1` is the value (or cost) of pr
 
 All six demo tasks carry both `v1` and `v2`:
 
-| Task | v1 (`prompt.txt`) | v2 (`prompt.v2.txt`) |
+| Task | v1 (`prompt.v1.txt`) | v2 (`prompt.v2.txt`) |
 |---|---|---|
 | `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template |
 | `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) |
 | `demo-swebench-pytest-dev__pytest-5787`, `-6197` | raw dataset issue (verbatim) | issue + template scaffolding |
 
-New SWE-bench tasks get both automatically: `make_swebench_task.py` writes `prompt.txt` (raw
+New SWE-bench tasks get both automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw
 statement) and `prompt.v2.txt` (shaped) side by side.
 
 ## Add a version

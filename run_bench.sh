@@ -66,7 +66,7 @@ while [ $# -gt 0 ]; do
 done
 
 # --task: fail fast if the named task doesn't exist (else it'd silently run nothing)
-if [ -n "$ONLY_TASK" ] && [ ! -f "$TASKS_DIR/$ONLY_TASK/prompt.v1.txt" ] && [ ! -f "$TASKS_DIR/$ONLY_TASK/prompt.txt" ]; then
+if [ -n "$ONLY_TASK" ] && [ ! -f "$TASKS_DIR/$ONLY_TASK/prompt.v1.txt" ]; then
   echo "no task '$ONLY_TASK' in $TASKS_DIR (need $TASKS_DIR/$ONLY_TASK/prompt.v1.txt)" >&2
   echo "available: $(cd "$TASKS_DIR" 2>/dev/null && ls -d */ 2>/dev/null | tr -d / | tr '\n' ' ')" >&2
   exit 1
@@ -90,9 +90,8 @@ done
 model_id() { echo "${1#*/}"; }   # anthropic/claude-opus-4-8 -> claude-opus-4-8 (for `claude --model`)
 
 # prompt version label from a filename: prompt.v1.txt -> v1 (baseline), prompt.v2.txt -> v2 (shaped
-# template), prompt.<x>.txt -> x. A bare prompt.txt (back-compat) -> v1. Recorded as `prompt`.
-plabel() { local f="${1##*/}"; case "$f" in
-  prompt.txt) echo v1;; prompt.*.txt) f="${f#prompt.}"; echo "${f%.txt}";; *) echo "${f%.txt}";; esac; }
+# template), prompt.<x>.txt -> x. Recorded in the manifest as the `prompt` column.
+plabel() { local f="${1##*/}"; f="${f#prompt.}"; echo "${f%.txt}"; }
 
 # restrict set (empty = discover all prompt*.txt per task in run_group)
 read -r -a PROMPT_FILES <<< "${PROMPTS_STR//,/ }"
@@ -286,18 +285,17 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
 run_group() {
   local harness="$1" model="$2" pids=() task tn ta run pf pfiles p
   for task in "$TASKS_DIR"/*/; do
-    [ -f "$task/prompt.v1.txt" ] || [ -f "$task/prompt.txt" ] || continue
+    [ -f "$task/prompt.v1.txt" ] || continue
     tn="$(basename "$task")"
     [ -n "$ONLY_TASK" ] && [ "$tn" != "$ONLY_TASK" ] && continue   # --task: run only this one
     ta="$(cd "$task" && pwd)"
     # which prompt versions to run for this task: --prompts restricts; else every prompt.v*.txt
-    # present (prompt.v1.txt, prompt.v2.txt, ...). A bare prompt.txt counts as v1 (back-compat).
+    # present (prompt.v1.txt, prompt.v2.txt, ...)
     pfiles=()
     if [ "${#PROMPT_FILES[@]}" -gt 0 ]; then
       for pf in "${PROMPT_FILES[@]}"; do [ -f "$ta/$pf" ] && pfiles+=("$pf"); done
     else
       for p in "$ta"/prompt.v*.txt; do [ -f "$p" ] && pfiles+=("$(basename "$p")"); done
-      [ "${#pfiles[@]}" -eq 0 ] && [ -f "$ta/prompt.txt" ] && pfiles+=("prompt.txt")
     fi
     for pf in "${pfiles[@]}"; do
       for run in $(seq 1 "$RUNS"); do
