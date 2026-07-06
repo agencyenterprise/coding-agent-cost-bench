@@ -355,13 +355,12 @@ def main():
     _print_report(RESULTS_DIR, rows, eff, crows, intervals)
 
 
-def _pretty(harness, model):
-    """Friendly display name, e.g. GLM-5.2 FP8 (no thinking) / Claude Opus 4.8 (Claude Code)."""
+def _mname(model):
+    """Friendly model name (no harness), e.g. GLM-5.2 FP8 (no thinking) / Claude Opus 4.8.
+    Harness is shown in its own column, so it's not folded in here."""
     prov, last = model.split("/")[0], model.split("/")[-1]
     name = {"claude-opus-4-8": "Claude Opus 4.8"}.get(last, last.replace("-FP8", " FP8"))
     tag = {"modal-nothink": " (no thinking)", "modal-high": " (high reasoning)"}.get(prov, "")
-    if harness == "claude":
-        tag += " (Claude Code)"
     return name + tag
 
 
@@ -397,8 +396,8 @@ def _print_report(results_dir, rows, eff, crows, intervals):
 
     section("Cost per Completed Task")
     print()
-    table(["Model", "Success", "Cost/task", "Avg Time"],
-          [[_pretty(r["harness"], r["model"]),
+    table(["Harness", "Model", "Success", "Cost/task", "Avg Time"],
+          [[harness_disp(r["harness"]), _mname(r["model"]),
             f"{r['passes']}/{r['runs']}  {r['success_rate']:.0%}",
             usd(r["cost_per_successful_task"]),
             f"{r['avg_duration_s']:.0f}s" if r["avg_duration_s"] != "" else "—"] for r in rows])
@@ -410,7 +409,7 @@ def _print_report(results_dir, rows, eff, crows, intervals):
         for r in st:
             gen = r["cost_per_successful_task"]
             idle_c = (_f(r["idle_s"]) or 0) / 3600 * GPU_HOURLY_USD / r["passes"]
-            print(f"\n {_pretty(r['harness'], r['model'])}")
+            print(f"\n {_mname(r['model'])}  [{harness_disp(r['harness'])}]")
             print(f"   generation   ${gen:.3f}")
             print(f" + idle tax     ${idle_c:.3f}")
             print(" " + "─" * 22)
@@ -421,8 +420,8 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     if st:
         section("GPU Utilization")
         print()
-        table(["Model", "Uptime", "Generating", "Idle"],
-              [[_pretty(r["harness"], r["model"]),
+        table(["Harness", "Model", "Uptime", "Generating", "Idle"],
+              [[harness_disp(r["harness"]), _mname(r["model"]),
                 f"{_f(r['active_s']) or 0:.0f} s", f"{_f(r['gen_s']) or 0:.0f} s",
                 f"{_f(r['idle_s']) or 0:.0f} s"] for r in st])
 
@@ -431,8 +430,8 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     glm_out = eff[glm]["out"] if glm else 0
     section("Efficiency")
     print()
-    table(["Model", "Steps", "Tools", "Output Tok", "vs GLM"],
-          [[_pretty(*k), f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}", f"{eff[k]['out']:,}",
+    table(["Harness", "Model", "Steps", "Tools", "Output Tok", "vs GLM"],
+          [[harness_disp(k[0]), _mname(k[1]), f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}", f"{eff[k]['out']:,}",
             f"{eff[k]['out'] / glm_out:.2f}×" if glm and glm_out else "—"] for k in order])
 
     if crows:
