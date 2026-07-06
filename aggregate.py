@@ -58,6 +58,15 @@ def model_disp(ref):
     return f"{p[0]}/{p[-1]}" if len(p) > 1 else ref
 
 
+def task_source(name, tasks_dir="tasks"):
+    """Prompt provenance: 'swe-bench' if the task carries SWE-bench dataset artifacts (a test.patch),
+    else 'invented' (our injected-bug demos + the from-scratch build task). NOTE: swe-bench prompts
+    embed the real problem statement verbatim but are still wrapped in our uniform v2 template."""
+    if os.path.exists(os.path.join(tasks_dir, name, "test.patch")):
+        return "swe-bench"
+    return "swe-bench" if "swebench" in name.lower() else "invented"
+
+
 def load_usage(outdir):
     """(tokens_in, tokens_out, ccusage_cost) for a run from its usage.json.
 
@@ -343,7 +352,8 @@ def main():
 
     # write complexity.csv (data), then render the console report
     comp = task_complexity(task_stat)
-    crows = [{"task": t, "complexity": a["complexity"], "pass_rate": a["pass_rate"], "runs": a["runs"],
+    crows = [{"task": t, "source": task_source(t), "complexity": a["complexity"],
+              "pass_rate": a["pass_rate"], "runs": a["runs"],
               "avg_steps": round(a["avg_steps"], 1), "avg_tools": round(a["avg_tools"], 1),
               "avg_out_tok": round(a["avg_out"]), "avg_dur_s": round(a["avg_dur"], 1)}
              for t, a in sorted(comp.items(), key=lambda kv: kv[1]["complexity"], reverse=True)]
@@ -437,9 +447,11 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     if crows:
         section("Task Difficulty")
         print()
-        table(["Task", "Diff", "Pass", "Avg Steps"],
-              [[_tshort(r["task"]), f"{r['complexity']}", f"{r['pass_rate']:.0%}", f"{r['avg_steps']:.0f}"]
-               for r in crows])
+        table(["Task", "Source", "Diff", "Pass", "Avg Steps"],
+              [[_tshort(r["task"]), r["source"], f"{r['complexity']}", f"{r['pass_rate']:.0%}",
+                f"{r['avg_steps']:.0f}"] for r in crows])
+        print("\n  Source: swe-bench = real dataset issue (embedded verbatim) in our template; "
+              "invented = task + prompt we wrote.")
     print()
 
 

@@ -331,15 +331,17 @@ def complexity_section(difficulty):
         return []
     rows = list(csv.DictReader(open(path)))
     L = ["## Task complexity\n",
-         "**Empirical (0-10, relative)** = observed effort pooled across all models (steps, tool calls, "
-         "output tokens, duration), normalized within this task set. **LLM difficulty (1-5)** is an "
-         "independent blind rating of the task instruction itself. `pass_rate` is the outcome across all runs.",
+         "**Source**: `swe-bench` = a real SWE-bench Verified issue (problem statement embedded verbatim, "
+         "then wrapped in our uniform template); `invented` = a task + prompt we wrote (injected-bug demos "
+         "and the from-scratch build). **Empirical (0-10, relative)** = observed effort pooled across all "
+         "models (steps, tool calls, output tokens, duration). **LLM difficulty (1-5)** is an independent "
+         "blind rating of the instruction. `pass_rate` is the outcome across all runs.",
          "",
-         "| task | empirical 0-10 | LLM 1-5 | pass_rate | avg_steps | avg_out_tok |",
-         "|---|---|---|---|---|---|"]
+         "| task | source | empirical 0-10 | LLM 1-5 | pass_rate | avg_steps | avg_out_tok |",
+         "|---|---|---|---|---|---|---|"]
     for r in rows:
         d = difficulty.get(r["task"], {})
-        L.append(f"| {r['task']} | {r['complexity']} | {d.get('difficulty', '—')} | "
+        L.append(f"| {r['task']} | {r.get('source', '')} | {r['complexity']} | {d.get('difficulty', '—')} | "
                  f"{r['pass_rate']} | {r['avg_steps']} | {r['avg_out_tok']} |")
     L.append("")
     return L
