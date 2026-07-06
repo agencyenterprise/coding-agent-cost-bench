@@ -348,6 +348,12 @@ def main():
             row["cost_basis"] = runs[0]["cost_basis"]
         rows.append(row)
 
+    # order rows so each arm's prompt versions sit together (v1 before v2), arms in matrix order
+    arm_order = {}
+    for d in detailed:
+        arm_order.setdefault((d["harness"], d["model"]), len(arm_order))
+    rows.sort(key=lambda r: (arm_order[(r["harness"], r["model"])], r["prompt"]))
+
     with open(os.path.join(RESULTS_DIR, "summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
