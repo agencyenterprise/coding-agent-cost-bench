@@ -89,8 +89,9 @@ def load_usage(outdir):
 
 def log_stats(outdir):
     """Parse output.log (opencode JSON-lines) once into work/efficiency metrics for a run:
-      call_s  - endpoint generation time: sum over steps of (first response part - step_start),
-                i.e. only the model calls, excluding local tool/script gaps (pip/pytest/git).
+      call_s  - endpoint generation time: sum over steps of (step_finish - step_start), i.e. the FULL
+                request->response wall-clock per model call INCLUDING token streaming (not just
+                time-to-first-token), excluding local tool/script gaps between steps (pip/pytest/git).
       steps   - assistant turns; tools - tool calls; prose - chars of natural-language text;
       reason  - reasoning tokens; out - output tokens (tool args + prose the model emitted)."""
     log = os.path.join(outdir, "output.log")
@@ -99,7 +100,6 @@ def log_stats(outdir):
         return m
     call_ms = 0
     start = None
-    counted = False
     for line in open(log):
         line = line.strip()
         if not line:
@@ -110,21 +110,17 @@ def log_stats(outdir):
             continue
         t, ts, p = ev.get("type"), ev.get("timestamp"), ev.get("part", {})
         if t == "step_start":
-            start, counted, m["steps"] = ts, False, m["steps"] + 1
+            start, m["steps"] = ts, m["steps"] + 1
         elif t == "tool_use":
             m["tools"] += 1
-            if start is not None and not counted and ts is not None:
-                call_ms += ts - start
-                counted = True
         elif t == "text":
             m["prose"] += len(p.get("text", "") or "")
-            if start is not None and not counted and ts is not None:
-                call_ms += ts - start
-                counted = True
         elif t == "step_finish":
             tk = p.get("tokens", {}) or {}
             m["out"] += tk.get("output", 0) or 0
             m["reason"] += tk.get("reasoning", 0) or 0
+            if start is not None and ts is not None:     # full step: request start -> response complete
+                call_ms += ts - start
             start = None
     m["call_s"] = call_ms / 1000.0
     return m
@@ -170,9 +166,10 @@ def claude_stats(outdir):
 
 def gen_intervals(outdir):
     """Absolute-epoch (start, end) windows the model spent GENERATING, per step (step_start ->
-    first tool_use/text), from an opencode output.log. Unioning these across concurrent runs gives
-    concurrency-correct generation wall-clock — so idle = uptime_union - gen_union is always >= 0
-    (unlike active_s - sum(call_s), which breaks when parallel runs generate at the same time)."""
+    step_finish = the full request->response, INCLUDING token streaming — not just time-to-first-
+    token), from an opencode output.log. Unioning these across concurrent runs gives concurrency-
+    correct generation wall-clock — so idle = uptime_union - gen_union is always >= 0 (unlike
+    active_s - sum(call_s), which breaks when parallel runs generate at the same time)."""
     log = os.path.join(outdir, "output.log")
     out = []
     if not os.path.exists(log):
@@ -189,10 +186,8 @@ def gen_intervals(outdir):
         t, ts = ev.get("type"), ev.get("timestamp")
         if t == "step_start":
             start = ts
-        elif t in ("tool_use", "text") and start is not None and ts is not None:
-            out.append((start / 1000.0, ts / 1000.0))     # ms epoch -> s
-            start = None
-        elif t == "step_finish":
+        elif t == "step_finish" and start is not None and ts is not None:
+            out.append((start / 1000.0, ts / 1000.0))     # full step wall-clock (ms epoch -> s)
             start = None
     return out
 
