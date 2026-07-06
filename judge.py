@@ -270,7 +270,7 @@ def cost_analysis(summary):
     try:
         gpu_rows = [r for r in summary if str(r.get("cost_basis", "")).startswith("gpu")]
         up = sum(float(r["active_s"]) for r in gpu_rows if r.get("active_s"))
-        gen = sum(float(r["call_s"]) for r in gpu_rows if r.get("call_s"))
+        gen = sum(float(r["gen_s"]) for r in gpu_rows if r.get("gen_s"))   # generation wall-clock (concurrency-safe)
         idle = max(0.0, up - gen)
         L += [f"> **⚠️ Endpoint idle (charged once, not per-arm).** Modal bills the container's "
               f"**uptime**, not compute-seconds. Across all GLM arms the endpoint was up {up:.0f}s but "
@@ -382,7 +382,7 @@ def main():
     if os.path.exists(summ):
         s = list(csv.DictReader(open(summ)))
         cols = ["harness", "model", "passes", "runs", "success_rate", "avg_tokens_in",
-                "avg_tokens_out", "avg_duration_s", "call_s", "active_s", "idle_s",
+                "avg_tokens_out", "avg_duration_s", "call_s", "gen_s", "active_s", "idle_s",
                 "overlap_s", "cost_per_successful_task", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
         def _cell(c, r):

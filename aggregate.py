@@ -159,6 +159,35 @@ def claude_stats(outdir):
     return m
 
 
+def gen_intervals(outdir):
+    """Absolute-epoch (start, end) windows the model spent GENERATING, per step (step_start ->
+    first tool_use/text), from an opencode output.log. Unioning these across concurrent runs gives
+    concurrency-correct generation wall-clock — so idle = uptime_union - gen_union is always >= 0
+    (unlike active_s - sum(call_s), which breaks when parallel runs generate at the same time)."""
+    log = os.path.join(outdir, "output.log")
+    out = []
+    if not os.path.exists(log):
+        return out
+    start = None
+    for line in open(log):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        t, ts = ev.get("type"), ev.get("timestamp")
+        if t == "step_start":
+            start = ts
+        elif t in ("tool_use", "text") and start is not None and ts is not None:
+            out.append((start / 1000.0, ts / 1000.0))     # ms epoch -> s
+            start = None
+        elif t == "step_finish":
+            start = None
+    return out
+
+
 def union_seconds(intervals):
     """Wall-clock seconds the endpoint was actively serving = union of (start, end) run
     intervals. Overlapping/parallel runs are merged, so 3 runs sharing a 3-min window count
@@ -216,7 +245,8 @@ def main():
         sys.exit(f"no manifest at {manifest} — run run_bench.sh first")
 
     detailed = []
-    intervals = defaultdict(list)   # (harness,model) -> [(start, end), ...] for GPU costing
+    intervals = defaultdict(list)   # (harness,model) -> [(start, end), ...] run intervals (uptime)
+    genivs = defaultdict(list)      # (harness,model) -> [(start, end), ...] generation windows (concurrency-safe)
     eff = defaultdict(lambda: {"steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0})
     task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0, "pass": 0})
     with open(manifest) as f:
@@ -233,6 +263,8 @@ def main():
             else:
                 tin, tout, ccost = load_usage(row.get("outdir", ""))
                 pm = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log
+                if is_self_hosted(m):
+                    genivs[key] += gen_intervals(row.get("outdir", ""))   # absolute gen windows to union
                 cs = pm["call_s"]
                 basis = "gpu_calls" if is_self_hosted(m) else "api_ccusage"
             for k in eff[key]:
@@ -271,31 +303,32 @@ def main():
         durs = [_f(r["duration_s"]) for r in runs if _f(r["duration_s"]) is not None]
         active = union_seconds(intervals[key])                        # wall-clock union = sole-tenant uptime
         overlap = sum(e - s for s, e in intervals[key]) - active      # time compressed by parallelism
-        call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)
-        idle = max(0.0, active - call_total)                          # up but NOT generating
+        call_total = sum(v for r in runs if (v := _f(r.get("call_s"))) is not None)   # generation WORK (sum)
+        gen_wall = union_seconds(genivs[key])                         # generation WALL-CLOCK (union; concurrency-safe)
+        idle = max(0.0, active - gen_wall)                            # up but not generating anything (>= 0)
         row = {
             "harness": harness, "model": model, "runs": n, "passes": passes,
             "success_rate": round(passes / n, 3),
             "avg_tokens_in": round(statistics.mean(r["tokens_in"] for r in runs)),
             "avg_tokens_out": round(statistics.mean(r["tokens_out"] for r in runs)),
             "avg_duration_s": round(statistics.mean(durs), 1) if durs else "",
-            "call_s": round(call_total, 1) if call_total else "",
+            "call_s": round(call_total, 1) if call_total else "",     # total generation work (info)
+            "gen_s": round(gen_wall, 1) if gen_wall else "",          # generation wall-clock (billed basis)
             "active_s": round(active, 1) if active else "",
-            "idle_s": round(idle, 1) if (intervals[key] and call_total) else "",   # this arm's own wall-clock idle (info)
+            "idle_s": round(idle, 1) if (intervals[key] and gen_wall) else "",
             "overlap_s": round(overlap, 1) if intervals[key] else "",
             "total_cost_usd": "", "cost_per_successful_task": "", "cost_basis": "",
         }
         if is_self_hosted(model):
-            if call_total:
-                # per-arm cost = GENERATION only (call_s × rate). Endpoint idle is NOT charged per
-                # arm — it's a shared endpoint property, reported once below (charging it per arm
-                # double-blames the low-reasoning arm for the endpoint simply being up).
-                cost = call_total / 3600 * GPU_HOURLY_USD
+            # cost = generation WALL-CLOCK × rate (union of gen windows, so concurrent tasks aren't
+            # double-counted). idle = uptime − gen wall-clock >= 0. sole-tenant = uptime × rate.
+            if gen_wall:
+                cost = gen_wall / 3600 * GPU_HOURLY_USD
                 row["total_cost_usd"] = round(cost, 4)
                 row["cost_per_successful_task"] = round(cost / passes, 4) if passes else ""
-                row["cost_basis"] = "gpu_calls"
+                row["cost_basis"] = "gpu_gen"
             else:
-                row["cost_basis"] = "gpu_calls (no log timing)"
+                row["cost_basis"] = "gpu_gen (no log timing)"
         else:   # token-billed (opencode APIs) or Claude Code (reports its own $)
             total = sum(r["cost_usd"] for r in runs if r["cost_usd"] != "")
             row["total_cost_usd"] = round(total, 4)
@@ -382,17 +415,16 @@ def _print_report(results_dir, rows, eff, crows, intervals):
             print(f" + idle tax     ${idle_c:.3f}")
             print(" " + "─" * 22)
             print(f" = total        ${gen + idle_c:.3f} / task")
-        print("\n  Idle tax = endpoint up but not generating while this arm runs alone (pip/pytest/git).")
-        print("  It's recoverable by packing the endpoint — so cutting reasoning barely helps sole-tenant,")
-        print("  where idle dominates; the win shows up only when the GPU is shared/packed.")
+        print("\n  Idle tax = endpoint up but not generating (local pip/pytest/git) while this arm runs alone.")
+        print("  Recoverable by packing the endpoint with concurrent work — other users/tasks filling the gaps.")
 
     if st:
         section("GPU Utilization")
         print()
-        table(["Model", "Call", "Idle", "Overlap"],
+        table(["Model", "Uptime", "Generating", "Idle"],
               [[_pretty(r["harness"], r["model"]),
-                f"{_f(r['call_s']) or 0:.0f} s", f"{_f(r['idle_s']) or 0:.0f} s",
-                f"{_f(r['overlap_s']) or 0:.0f} s"] for r in st])
+                f"{_f(r['active_s']) or 0:.0f} s", f"{_f(r['gen_s']) or 0:.0f} s",
+                f"{_f(r['idle_s']) or 0:.0f} s"] for r in st])
 
     order = [(r["harness"], r["model"]) for r in rows]
     glm = next((k for k in order if is_self_hosted(k[1])), None)
