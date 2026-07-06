@@ -97,9 +97,10 @@ Writes **`results/report.md`**: the numbers table, a **timeline** (start/end + o
 a **cost breakdown**, a **break-even table** (how many parallel tasks on Modal beat Claude), and
 short, blinded per-task notes. All sections are generated from `summary.csv`, so re-running is safe.
 
-## Run in Docker (no host deps)
-To avoid installing opencode / Claude Code / a specific Python locally — and to dodge host env
-drift (e.g. Python 3.14 breaking old repos) — run the whole thing in a container. It bundles node +
+## Run in Docker (optional — no host deps)
+The committed tasks all run natively on a modern host (**Python 3.14** included). Docker is only for
+avoiding local installs of opencode / Claude Code / node — or for running old SWE instances that need
+an older Python (e.g. `pytest-dev/pytest-*`, see [SWEBENCH.md](SWEBENCH.md)). It bundles node +
 opencode + Claude Code + Python 3.11 + git; the GLM endpoint stays on Modal.
 ```bash
 cp .env.example .env && $EDITOR .env     # creds (used at runtime, never baked in)

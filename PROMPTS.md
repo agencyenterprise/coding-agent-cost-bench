@@ -76,7 +76,7 @@ All six demo tasks carry `v1`, `v2`, and `v3`:
 | Task | v1 (`prompt.v1.txt`) | v2 (`prompt.v2.txt`) | v3 (`prompt.v3.txt`) |
 |---|---|---|---|
 | `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template | terse + env/verify cmd |
-| `demo-swebench-pytest-dev__pytest-5787`, `-6197` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
+| `demo-swebench-psf__requests-6028` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
 | `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) | terse + create-next-app + build/test/API checks |
 
 New SWE-bench tasks get both automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw
