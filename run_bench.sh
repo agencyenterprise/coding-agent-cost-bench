@@ -14,7 +14,8 @@ set -euo pipefail
 
 # Each entry is  <harness>:<model-ref>  (harness = opencode | claude). The same model can
 # appear under both harnesses on purpose (model-isolation vs real-world Claude Code comp).
-MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
+# modal + modal-nothink kept ADJACENT so the endpoint stays warm between them; Opus/Claude-Code last.
+MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:modal-nothink/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
 PROMPT_FILE="prompt.txt"   # per-task prompt to use; e.g. --prompt prompt.v1.txt for the baseline arm
 RUNS=3

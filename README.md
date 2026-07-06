@@ -38,9 +38,10 @@ Re-run `./setup.sh` anytime; it only creates what's missing. `./setup.sh --help`
 Each entry is **`harness:model-ref`** (`harness` = `opencode` | `claude`). The same model can appear
 under both harnesses — that's the point (model isolation vs real-world). Default matrix:
 ```
-opencode:modal/zai-org/GLM-5.2-FP8      # GLM (model isolation)
-opencode:anthropic/claude-opus-4-8      # Opus, same harness as GLM (clean comparison)
-claude:anthropic/claude-opus-4-8        # Opus in Claude Code's own CLI (real-world product comp)
+opencode:modal/zai-org/GLM-5.2-FP8           # GLM, default (max) reasoning
+opencode:modal-nothink/zai-org/GLM-5.2-FP8   # GLM, reasoning off (adjacent, so endpoint stays warm)
+opencode:anthropic/claude-opus-4-8           # Opus, same harness as GLM (clean comparison)
+claude:anthropic/claude-opus-4-8             # Opus in Claude Code's own CLI (real-world product comp)
 ```
 `claude:` needs the `claude` CLI on PATH; it can't serve GLM/GPT/Gemini (Anthropic-only).
 
