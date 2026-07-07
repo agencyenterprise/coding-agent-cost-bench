@@ -31,7 +31,7 @@ PORT=$((20000 + RANDOM % 20000))
 export PORT HOSTNAME=127.0.0.1
 npm run start > /tmp/kanban-verify-$PORT.log 2>&1 &
 server_pid=$!
-trap 'kill "$server_pid" 2>/dev/null; pkill -P "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null' EXIT
+trap 'kill "$server_pid" 2>/dev/null; pkill -P "$server_pid" 2>/dev/null; wait "$server_pid" 2>/dev/null || true' EXIT
 
 base="http://127.0.0.1:$PORT"
 for i in $(seq 1 60); do
