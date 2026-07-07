@@ -29,7 +29,7 @@ RUN printf '{"hasCompletedOnboarding":true}\n' > /home/bench/.claude.json
 WORKDIR /app
 USER root
 COPY . /app
-RUN chmod +x run_bench.sh clean.sh 2>/dev/null || true && \
+RUN chmod +x run_bench.sh clear_results.sh 2>/dev/null || true && \
     chown -R bench:bench /app
 
 USER bench
