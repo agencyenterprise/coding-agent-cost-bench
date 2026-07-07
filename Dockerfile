@@ -19,13 +19,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pinned agent CLIs
 RUN npm i -g opencode-ai@1.17.13 @anthropic-ai/claude-code@2.1.193
 
+# non-root user — claude --dangerously-skip-permissions refuses to run as root
+RUN useradd -m -u 1001 bench
+USER bench
+
 # skip Claude Code's first-run onboarding so `claude -p` is non-interactive (RISK: verify the key/flag)
-RUN printf '{"hasCompletedOnboarding":true}\n' > /root/.claude.json
+RUN printf '{"hasCompletedOnboarding":true}\n' > /home/bench/.claude.json
 
 WORKDIR /app
+USER root
 COPY . /app
-RUN chmod +x run_bench.sh clean.sh 2>/dev/null || true
+RUN chmod +x run_bench.sh clean.sh 2>/dev/null || true && \
+    chown -R bench:bench /app
 
+USER bench
 ENV OPENCODE_CONFIG=/app/opencode.jsonc NO_COLOR=1
 RUN npx -y ccusage --help >/dev/null 2>&1 || true   # prefetch ccusage so per-run usage.json is clean
 
