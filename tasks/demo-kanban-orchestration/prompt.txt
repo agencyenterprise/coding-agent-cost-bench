@@ -1,4 +1,8 @@
-Build a Next.js application. Use the newest Node.js available in mise (mise is accessible). Use `create-next-app` to produce the initial project layout (App Router, TypeScript).
+The workspace is already scaffolded: `create-next-app` (App Router, TypeScript, Tailwind, ESLint, no src/ dir) has run and the following dependencies are installed and ready to use — do NOT re-run `create-next-app` or `npm install` for these:
+
+- `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities`
+- `@tanstack/react-query` (v5)
+- `vitest`, `@vitejs/plugin-react`, `jsdom`, `@testing-library/react`, `@testing-library/dom`, `@testing-library/user-event`, `@testing-library/jest-dom`, `@vitest/coverage-v8`
 
 Before writing any code, use your todo tool to record a detailed plan broken into subtasks — file paths, acceptance criteria, and pinned API contracts. Then execute every subtask yourself: create files, edit files, run shell commands, run tests. Do not stop after planning.
 
@@ -24,17 +28,17 @@ Quality requirements:
 - Clean, well-formatted, idiomatic TypeScript/React code
 
 Deliverables:
-- Next.js app in the current workspace root (do not create a nested subdirectory; stay in place)
-- README.md explaining what the app does, how to set up the environment, and how to run locally
+- All code in the current workspace root (do not create a nested subdirectory)
+- README.md explaining what the app does and how to run it locally
 - No authentication, no environment secrets required
 
 ## VALIDATION
 
 Once implementation is complete, run these checks yourself:
-- Run the test suite and confirm all tests pass
+- Run the full test suite (`vitest run`). If any test fails, fix the code or the test and re-run — repeat until every test is green. You MUST NOT finish with failing, skipped-to-avoid-failure, or commented-out tests; do not delete or weaken tests to make them pass
 - Run `next build` and confirm it completes without errors
 - Boot the built app locally, confirm `curl /api/health` returns 200 and `curl /api/board` returns valid JSON with 3 columns and 6 cards
 
-Iterate on failures until all checks pass or you hit a hard blocker you cannot resolve (report it clearly).
+Iterate on failures until all checks pass or you hit a hard blocker you cannot resolve (report it clearly). A run that ends with a red test suite is a failed run.
 
 Do not stop at the plan. Do not ask for confirmation. Execute: plan → implement → validate.
