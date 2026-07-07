@@ -19,8 +19,9 @@ Drag-and-drop is a nice touch but use any approach you like — don't reach for 
 - Componentize sensibly; don't dump everything into one file.
 
 ## Environment
-- Empty workspace. Use `create-next-app` (App Router, TypeScript) to scaffold, then build from there.
-- Install only what you actually need.
+- Already scaffolded: `create-next-app` (App Router, TypeScript, Tailwind) has run and dependencies
+  (including Vitest) are installed. Do NOT re-run `create-next-app` or reinstall — build in place.
+- Install only anything additional you actually need.
 
 ## Before finishing
 - Run `npx vitest run` and `npm run build` once, and fix anything that fails.

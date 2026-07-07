@@ -2,4 +2,4 @@ Build a single-board kanban app (Trello-like) with Next.js (App Router, TypeScri
 
 Back it with Next.js API route handlers over an in-memory store seeded with 3 columns and 6 cards. Include `/api/health` (returns 200) and `/api/board` (returns the full board as JSON), plus whatever CRUD/move endpoints you need.
 
-Empty workspace: scaffold with `create-next-app` (App Router, TypeScript) and install only what you need. Add at least one Vitest test for the store's move-card logic. Before finishing, confirm `npm run build` and `npx vitest run` both pass (exit 0) and that `/api/board` returns 3 columns and 6 cards.
+The workspace is already scaffolded (`create-next-app`, App Router + TypeScript + Tailwind, dependencies installed) — build in place, do not re-run it or reinstall. Add at least one Vitest test for the store's move-card logic. Before finishing, confirm `npm run build` and `npx vitest run` both pass (exit 0) and that `/api/board` returns 3 columns and 6 cards.
