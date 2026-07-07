@@ -1,0 +1,1 @@
+tests/config/test_config.py::test_csv_regex_error

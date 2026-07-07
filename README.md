@@ -58,7 +58,16 @@ Common flags:
 | `-j, --jobs N` | max task×run jobs **in parallel within a group** | 30 |
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
 | `--task NAME` | run **only** this task (dir name), e.g. `--task demo-kanban-orchestration` | all |
+| `--prompts LIST` | restrict to these per-task prompt files (comma/space) | **all `prompt*.txt`** |
 | `--delete-repo` | discard the mutated repo | keep |
+
+**Every prompt version runs by default.** Each task holds `prompt.v1.txt` = `v1` (terse baseline / raw
+issue), `prompt.v2.txt` = `v2` (shaped uniform template), and `prompt.v3.txt` = `v3` (terse + the
+operational scaffolding v2 carries, a control to split style from operational context). The sweep
+runs every version present (v1 first) and tags each result with it (`prompt` column,
+threaded into `summary.csv` + `report.md` + the complexity view), so versions of the same model are
+separate, comparable rows. See [PROMPTS.md](PROMPTS.md) for what each is, where it came from, and how
+`v3 − v1` vs `v2 − v3` decompose the gain. `--prompts prompt.v1.txt` restricts to just the baseline.
 
 **Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is
 clean (no cross-arm contention inflating its latency); within a group every task×run fires **in
@@ -88,9 +97,10 @@ Writes **`results/report.md`**: the numbers table, a **timeline** (start/end + o
 a **cost breakdown**, a **break-even table** (how many parallel tasks on Modal beat Claude), and
 short, blinded per-task notes. All sections are generated from `summary.csv`, so re-running is safe.
 
-## Run in Docker (no host deps)
-To avoid installing opencode / Claude Code / a specific Python locally — and to dodge host env
-drift (e.g. Python 3.14 breaking old repos) — run the whole thing in a container. It bundles node +
+## Run in Docker (optional — no host deps)
+The committed tasks all run natively on a modern host (**Python 3.14** included). Docker is only for
+avoiding local installs of opencode / Claude Code / node — or for running old SWE instances that need
+an older Python (e.g. `pytest-dev/pytest-*`, see [SWEBENCH.md](SWEBENCH.md)). It bundles node +
 opencode + Claude Code + Python 3.11 + git; the GLM endpoint stays on Modal.
 ```bash
 cp .env.example .env && $EDITOR .env     # creds (used at runtime, never baked in)
@@ -117,13 +127,13 @@ break-even table shows the concurrency needed to beat Claude.
 
 ## Outputs
 - `results/report.md` — the deliverable (numbers + cost analysis + break-even + blinded notes).
-- `results/summary.csv` — per model: `success_rate`, tokens, `avg_duration_s`, `active_s`,
-  `overlap_s`, `cost_per_successful_task`, `cost_basis`.
-- `results/results_detailed.csv` — per (harness,model,task,run): `start`, `end`, `duration_s`, tokens, cost.
+- `results/summary.csv` — per (harness, model, **prompt version**): `success_rate`, tokens,
+  `avg_duration_s`, `active_s`, `overlap_s`, `cost_per_successful_task`, `cost_basis`.
+- `results/results_detailed.csv` — per (harness,model,**prompt**,task,run): `start`, `end`, `duration_s`, tokens, cost.
 - `results/complexity.csv` — per task: **empirical complexity 0–10** (relative, from observed effort
   pooled across all models: steps, tool calls, output tokens, duration), `pass_rate`, and the raw
   averages. `report.md` merges this with an independent blind **LLM difficulty 1–5** per task.
-- `results/<task>__<harness>_<model>__runN/` — `output.log` (transcript), `verify.log`, `usage.json`,
+- `results/<task>__<prompt>__<harness>_<model>__runN/` — `output.log` (transcript), `verify.log`, `usage.json`,
   `final_repo/` (the agent's edited code). `./clean.sh` wipes `results/`.
 
 ---
@@ -137,7 +147,8 @@ code per run, optionally runs `setup.sh`, runs the agent, then `verify.sh` (exit
 
 | File | Required | Purpose |
 |---|---|---|
-| `prompt.txt` | ✅ | instruction handed to the agent |
+| `prompt.v1.txt` | ✅ | baseline instruction handed to the agent (version `v1`) |
+| `prompt.v2.txt` | optional | shaped variant (version `v2`); add more as `prompt.<x>.txt` — see [PROMPTS.md](PROMPTS.md) |
 | `verify.sh` | ✅ | exit `0` = success; runs in the work-dir root |
 | `setup.sh` | optional | runs before the agent (e.g. inject a bug); gets `$TASK_REPO_SRC` |
 | `repo/` **or** `repo.path` **or** `repo.git` | one | self-contained code / local git repo / `<url> [ref]` remote |
@@ -155,6 +166,7 @@ aggregate.py      # manifest + usage.json -> summary.csv / results_detailed.csv
 judge.py          # blinded LLM review + report.md (numbers, cost, break-even)
 clear_results.sh  # wipe results/
 opencode.jsonc    # provider config (secrets via {env:...})
+PROMPTS.md        # prompt-version registry: what v1/v2/... are + where they came from
 tasks/demo-*/     # committed tasks; tasks/<other>/ are gitignored
 results/          # logs + CSVs + report.md (gitignored)
 ```

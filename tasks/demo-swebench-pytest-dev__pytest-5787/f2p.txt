@@ -1,2 +1,0 @@
-testing/test_reports.py::TestReportSerialization::test_chained_exceptions[TestReport]
-testing/test_reports.py::TestReportSerialization::test_chained_exceptions[CollectReport]

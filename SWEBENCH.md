@@ -10,18 +10,33 @@ official number, not one you made up.
 FAIL_TO_PASS test IDs, issue text — nothing fabricated) and writes a
 `tasks/demo-swebench-<id>/` task you then run like any other.
 ```bash
-pip install datasets
-python3 make_swebench_task.py psf__requests-2317     # any real Verified instance id
+python3 make_swebench_task.py psf__requests-6028     # any real Verified instance id
 ./run_bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8 anthropic/claude-opus-4-8"
 ```
-Start with **lightweight repos** (requests, flask, click, pytest) — fast install, offline.
-Heavy scientific repos (numpy, scipy, astropy, scikit-learn) need big deps and are slow/flaky locally.
+No `datasets` install needed — it falls back to the cached HF parquet via `pyarrow`.
+
+### Runs on your host (Python 3.14) — pick instances that do
+The grader installs a **modern pytest** next to the repo, so a **pure-Python** instance runs on a
+modern host (incl. **Python 3.14**) **iff its test files import cleanly there**. Guidance:
+- ✅ **Good**: pure-Python, newest-version — e.g. `psf__requests-6028` and `pylint-dev__pylint-8898`
+  (both committed, validated fail→pass on 3.14). Prefer the highest `version` per repo.
+- The generated `verify.sh` runs pytest with `-o addopts=` so it collects ONLY the target test file —
+  many repos (pylint/sphinx) force whole-tree collection, and one unrelated test file that doesn't
+  import on this Python would otherwise abort the run. An instance is viable on 3.14 iff its own
+  FAIL_TO_PASS **test file** imports there.
+- ❌ **Needs Docker (Python ≤3.11)**: `pytest-dev/pytest-*` — the package under test *is* pytest, so
+  you can't swap in a modern one; old pytest crashes on 3.14 (`ast.Str` removed). Run via `./run_on_docker.sh`.
+- ❌ **Skip**: `sympy/*` (FAIL_TO_PASS are bare test names, not pytest node ids → 0 tests collected);
+  heavy C repos (numpy/scipy/scikit-learn/matplotlib) — slow deps, wheels may not build on 3.14.
+- After generating, **validate the fail→pass loop on 3.14** before trusting it (clone, apply test
+  patch → verify fails, apply the gold patch → verify passes).
 
 ## What the generated task contains
 - `repo.git` — the instance's repo pinned to its `base_commit`
 - `setup.sh` — applies the dataset's **test patch** (introduces the failing tests)
 - `verify.sh` — runs the instance's **FAIL_TO_PASS** tests (exit 0 = solved)
-- `prompt.txt` — the real GitHub issue text (`problem_statement`)
+- `prompt.v1.txt` — the real GitHub issue text (`problem_statement`), verbatim; `prompt.v2.txt` — the
+  same issue wrapped in our shaped template (both run by default — see PROMPTS.md)
 
 ## Comparing to Claude's baseline
 - Official leaderboard + per-model resolved rates: <https://www.swebench.com>

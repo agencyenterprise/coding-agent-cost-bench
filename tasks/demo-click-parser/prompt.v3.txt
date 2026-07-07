@@ -1,0 +1,3 @@
+The test suite tests/test_parser.py is failing (the split_arg_string cases). Fix the implementation in src/click/parser.py so that all tests pass. Do not modify the tests.
+
+Fresh clone, no virtualenv: create `.venv` at the repo root and `.venv/bin/pip install -e . pytest`. Confirm with `.venv/bin/python -m pytest tests/test_parser.py` (exit 0) before finishing.

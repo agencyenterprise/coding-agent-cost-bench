@@ -118,35 +118,55 @@ def opencode_text(stdout):
     return "".join(parts).strip()
 
 
-def judge_run(model, task, status, tscript, dff):
-    prompt = f"""You're reviewing how a coding agent handled a task. Be short, casual and honest —
-no hype, no marketing words, no exaggeration. Call out real strengths AND weaknesses plainly.
-
-Task: {task}
-Outcome: {"passed the tests" if status == "pass" else "did NOT pass the tests"}
-
-Transcript (what it did):
-{tscript[:5000] or "(none)"}
-
-Its code change (diff):
-{dff or "(not available)"}
-
-Reply ONLY with compact JSON:
-{{"approach":"how it went about it, 1 sentence","efficiency":"steps/backtracks/verbosity, 1 sentence","code_quality":"1 sentence","tldr":"one casual honest sentence"}}"""
+def judge_all(model, items):
+    """ONE judge call for ALL runs (instead of one call per run). Sends a blinded, trimmed batch and
+    asks for a JSON object mapping each run's number -> {approach, efficiency, code_quality, tldr}.
+    Trades some per-run context depth for a single round-trip. Returns {index(int): verdict dict},
+    with every index filled (a placeholder for any the judge omitted). `items` carry task/status and
+    the already-blinded transcript+diff."""
+    if not items:
+        return {}
+    # adaptive per-run char budget: a small batch gets rich context, a big one still fits one call
+    budget = max(500, 90000 // len(items))
+    blocks = []
+    for i, it in enumerate(items):
+        blocks.append(
+            f"=== RUN {i} ===\n"
+            f"Task: {it['task']}\n"
+            f"Outcome: {'passed the tests' if it['status'] == 'pass' else 'did NOT pass the tests'}\n"
+            f"Transcript:\n{it['tscript'][:budget] or '(none)'}\n"
+            f"Diff:\n{it['diff'][:budget] or '(not available)'}\n"
+        )
+    prompt = (
+        "You're reviewing how coding agents handled several tasks. Be short, casual and honest — "
+        "no hype, no marketing words, no exaggeration. Judge EACH run independently; call out real "
+        "strengths AND weaknesses plainly.\n\n"
+        f"There are {len(items)} runs below, numbered RUN 0 .. RUN {len(items) - 1}.\n\n"
+        + "\n".join(blocks)
+        + "\n\nReply ONLY with a compact JSON object mapping each run number (as a string key) to its "
+        'review, e.g. {"0": {"approach":"how it went about it","efficiency":"steps/backtracks/verbosity"'
+        ',"code_quality":"...","tldr":"one casual honest sentence"}, "1": {...}}. '
+        "Include every run number 0.." + str(len(items) - 1) + ". One short sentence per field."
+    )
     try:
         r = subprocess.run(["opencode", "run", prompt, "-m", model, "--format", "json"],
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, timeout=900)
     except Exception as e:
-        return {"tldr": f"(judge error: {type(e).__name__})"}
-    text = opencode_text(r.stdout)
-    m = re.search(r"\{.*\}", text, re.DOTALL)
+        return {i: {"tldr": f"(judge error: {type(e).__name__})"} for i in range(len(items))}
+    m = re.search(r"\{.*\}", opencode_text(r.stdout), re.DOTALL)
+    out = {}
     if m:
         try:
-            return json.loads(m.group(0))
+            for k, v in json.loads(m.group(0)).items():
+                try:
+                    out[int(k)] = v
+                except (ValueError, TypeError):
+                    pass
         except Exception:
             pass
-    err = (text or r.stderr or r.stdout or "").strip().replace("\n", " ")
-    return {"tldr": f"(no verdict — {err[:200] or 'empty judge output'})"}
+    for i in range(len(items)):        # never drop a run from the report
+        out.setdefault(i, {"tldr": "(no verdict returned for this run)"})
+    return out
 
 
 def cost_model(summary):
@@ -197,7 +217,8 @@ def efficiency(rows):
     for r in rows:
         m = r["model"]
         h = r.get("harness") or aggregate.harness_of(m)
-        key = (h, m)
+        pv = r.get("prompt", "v1")
+        key = (h, m, pv)
         a = agg.setdefault(key, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
         a["runs"] += 1
         st = aggregate.claude_stats(r.get("outdir", "")) if h == "claude" \
@@ -208,24 +229,25 @@ def efficiency(rows):
     if not agg:
         return []
     L = ["## Efficiency — how much work each run did\n",
-         "Same tasks and prompts, so this reflects **agent behavior** (model + harness). Per task, averaged:",
+         "Same tasks, so this reflects **agent behavior** (model + harness + prompt version). Per task, averaged:",
          "",
-         "| harness | model | steps/task | tool calls/task | output tokens/task |",
-         "|---|---|---|---|---|"]
+         "| harness | model | prompt | steps/task | tool calls/task | output tokens/task |",
+         "|---|---|---|---|---|---|"]
     per = {}
-    for (h, m), a in agg.items():
+    for (h, m, pv), a in agg.items():
         n = max(a["runs"], 1)
-        per[(h, m)] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
-        L.append(f"| {aggregate.harness_disp(h)} | {aggregate.model_disp(m)} | {per[(h, m)][0]:.0f} | "
-                 f"{per[(h, m)][1]:.0f} | {per[(h, m)][2]:.0f} |")
+        per[(h, m, pv)] = (a["steps"] / n, a["tools"] / n, a["out"] / n)
+        L.append(f"| {aggregate.harness_disp(h)} | {aggregate.model_disp(m)} | {pv} | {per[(h, m, pv)][0]:.0f} | "
+                 f"{per[(h, m, pv)][1]:.0f} | {per[(h, m, pv)][2]:.0f} |")
     L.append("")
     gpu = next((k for k in agg if aggregate.is_self_hosted(k[1])), None)
     if gpu:
         for k in agg:
             if k != gpu and per[k][1] and per[k][2]:
-                L.append(f"- vs **{aggregate.harness_disp(k[0])}:{aggregate.model_disp(k[1])}**, the self-hosted run does "
-                         f"~{per[gpu][1] / per[k][1]:.1f}× the tool calls and ~{per[gpu][2] / per[k][2]:.1f}× "
-                         "the output tokens for the same fixes — more work per task, which compounds its GPU cost.")
+                L.append(f"- vs **{aggregate.harness_disp(k[0])}:{aggregate.model_disp(k[1])} (prompt {k[2]})**, the "
+                         f"self-hosted run does ~{per[gpu][1] / per[k][1]:.1f}× the tool calls and "
+                         f"~{per[gpu][2] / per[k][2]:.1f}× the output tokens for the same fixes — more work per "
+                         "task, which compounds its GPU cost.")
         L.append("")
     return L
 
@@ -239,19 +261,52 @@ def timeline(summary):
             continue
         o = aggregate._f(r.get("overlap_s")) or 0.0    # overlap = sum(durations) - union(active)
         par = (a + o) / a                        # avg parallelism: total work / wall-clock
-        L.append(f"- **{aggregate.harness_disp(r['harness'])}:{aggregate.model_disp(r['model'])}** — "
+        pv = r.get("prompt", "")
+        L.append(f"- **{aggregate.harness_disp(r['harness'])}:{aggregate.model_disp(r['model'])}"
+                 f"{' · prompt ' + pv if pv else ''}** — "
                  f"{a:.0f}s wall-clock for {r.get('runs', '?')} runs (~{par:.1f}× parallel)")
     L.append("")
     det = os.path.join(RESULTS_DIR, "results_detailed.csv")
     if os.path.exists(det):
         rows = list(csv.DictReader(open(det)))
-        cols = [c for c in ("task", "model", "run", "start", "end", "duration_s", "status")
+        cols = [c for c in ("task", "model", "prompt", "run", "start", "end", "duration_s", "status")
                 if rows and c in rows[0]]
         L.append("| " + " | ".join(cols) + " |")
         L.append("|" + "|".join(["---"] * len(cols)) + "|")
         for r in rows:
             L.append("| " + " | ".join(str(r.get(c, "")) for c in cols) + " |")
         L.append("")
+    return L
+
+
+def cost_table(summary):
+    """Per-arm cost two ways so the reader sees the range and the concurrency lever:
+    sole-tenant (one task owns the 8×B200) vs packed (endpoint filled with concurrent tasks)."""
+    def packed(r):
+        if aggregate.is_self_hosted(r["model"]):
+            w, p = aggregate._f(r.get("gpu_wall_cost_usd")), aggregate._f(r.get("passes"))
+            return w / p if (w and p) else None
+        return aggregate._f(r.get("cost_per_successful_task"))   # API is per-token: sole == packed
+
+    def usd(v):
+        return f"${v:.3f}" if v is not None else "—"
+
+    L = ["## Cost per completed task — sole-tenant vs packed\n",
+         "For GLM the two numbers bracket reality. **sole** = one task alone on the rented 8×B200 — its "
+         "own generation time × rate (you pay for all 8 GPUs to serve a single task). **packed** = the "
+         "endpoint filled with concurrent tasks — union of generation ÷ tasks. The gap between them is "
+         "the **concurrency lever**: packing the endpoint is what makes GLM cheap. Both count generation "
+         f"only (step_start→step_finish × ~${float(os.environ.get('GLM_GPU_HOURLY_USD','50.7')):.0f}/hr, "
+         "no local scripts). Claude/GPT are per-token — concurrency-invariant — so sole == packed.",
+         "",
+         "| harness | model | prompt | success | $/task sole | $/task packed |",
+         "|---|---|---|---|---|---|"]
+    for r in summary:
+        cst = aggregate._f(r.get("cost_per_successful_task"))
+        L.append(f"| {aggregate.harness_disp(r['harness'])} | {aggregate.model_disp(r['model'])} "
+                 f"| {r.get('prompt', '')} | {r.get('passes', '')}/{r.get('runs', '')} "
+                 f"| {usd(cst)} | {usd(packed(r))} |")
+    L.append("")
     return L
 
 
@@ -331,18 +386,19 @@ def complexity_section(difficulty):
         return []
     rows = list(csv.DictReader(open(path)))
     L = ["## Task complexity\n",
-         "**Source**: `swe-bench` = a real SWE-bench Verified issue (problem statement embedded verbatim, "
-         "then wrapped in our uniform template); `invented` = a task + prompt we wrote (injected-bug demos "
-         "and the from-scratch build). **Empirical (0-10, relative)** = observed effort pooled across all "
-         "models (steps, tool calls, output tokens, duration). **LLM difficulty (1-5)** is an independent "
-         "blind rating of the instruction. `pass_rate` is the outcome across all runs.",
+         "Per **(task, prompt version)** — `v1` (terse/raw issue) usually demands more than `v2` (shaped). "
+         "**Source**: `swe-bench` = a real SWE-bench Verified issue (`v1` = the problem statement verbatim, "
+         "`v2` = it wrapped in our uniform template); `invented` = a task + prompt we wrote. **Empirical "
+         "(0-10, relative)** = observed effort pooled across all models for that pair (steps, tool calls, "
+         "output tokens, duration). **LLM difficulty (1-5)** is an independent blind rating of that exact "
+         "prompt. `pass_rate` is the outcome across all runs of the pair.",
          "",
-         "| task | source | empirical 0-10 | LLM 1-5 | pass_rate | avg_steps | avg_out_tok |",
-         "|---|---|---|---|---|---|---|"]
+         "| task | prompt | source | empirical 0-10 | LLM 1-5 | pass_rate | avg_steps | avg_out_tok |",
+         "|---|---|---|---|---|---|---|---|"]
     for r in rows:
-        d = difficulty.get(r["task"], {})
-        L.append(f"| {r['task']} | {r.get('source', '')} | {r['complexity']} | {d.get('difficulty', '—')} | "
-                 f"{r['pass_rate']} | {r['avg_steps']} | {r['avg_out_tok']} |")
+        d = difficulty.get((r["task"], r.get("prompt", "v1")), {})
+        L.append(f"| {r['task']} | {r.get('prompt', '')} | {r.get('source', '')} | {r['complexity']} | "
+                 f"{d.get('difficulty', '—')} | {r['pass_rate']} | {r['avg_steps']} | {r['avg_out_tok']} |")
     L.append("")
     return L
 
@@ -362,43 +418,52 @@ def main():
         sys.exit("no results/manifest.csv — run run_bench.sh first")
 
     rows = list(csv.DictReader(open(manifest)))
-    # Judge ONE representative run per (harness, model, task): the qualitative note is the same across
-    # repeat runs (repeats are for success-rate stability). Prefer a passing run (most informative).
-    # This is 5 arms × 5 tasks = 25 calls instead of 75 for --runs 3.
+    # Judge ONE representative run per (harness, model, PROMPT, task): the note is the same across
+    # repeat runs (repeats are for success-rate stability), but a different prompt version produces a
+    # different transcript+diff, so each prompt version is judged separately. Prefer a passing run.
     rep = {}
     for r in rows:
-        k = (r.get("harness", "opencode"), r["model"], r["task"])
+        k = (r.get("harness", "opencode"), r["model"], r.get("prompt", "v1"), r["task"])
         if k not in rep or (r["status"] == "pass" and rep[k]["status"] != "pass"):
             rep[k] = r
     judge_rows = list(rep.values())
-    verdicts = {}  # (harness, model) -> list of (task, status, verdict)
-    for i, row in enumerate(judge_rows, 1):
-        m, task, outdir, status = row["model"], row["task"], row.get("outdir", ""), row["status"]
-        h = row.get("harness", "opencode")
-        sys.stderr.write(f"[{i}/{len(judge_rows)}] judging {task} | {h} | {m}\n")
-        v = judge_run(model, task, status, blind(transcript(outdir)), blind(diff(outdir)))
-        verdicts.setdefault(f"{h} · {m}", []).append((task, status, v))
+    # ONE call: build the blinded batch, judge all runs at once, then map verdicts back by index.
+    items = [{"h": r.get("harness", "opencode"), "m": r["model"], "pv": r.get("prompt", "v1"),
+              "task": r["task"], "status": r["status"],
+              "tscript": blind(transcript(r.get("outdir", ""))), "diff": blind(diff(r.get("outdir", "")))}
+             for r in judge_rows]
+    sys.stderr.write(f"judging {len(items)} runs in a single call to {model}\n")
+    notes = judge_all(model, items)
+    verdicts = {}  # "harness · model · prompt" -> list of (task, status, verdict)
+    for idx, it in enumerate(items):
+        verdicts.setdefault(f"{it['h']} · {it['m']} · prompt {it['pv']}", []).append(
+            (it["task"], it["status"], notes.get(idx, {"tldr": "(no verdict)"})))
 
-    # blind LLM difficulty rating, once per unique task (from its prompt)
+    # blind LLM difficulty rating, per unique (task, prompt version) — v1 (raw/terse) and v2 (shaped)
+    # are genuinely different difficulties, so each is rated from its own prompt file.
+    def _prompt_path(task, pv):
+        p = os.path.join("tasks", task, f"prompt.{pv}.txt")
+        return p if os.path.exists(p) else ""
     difficulty = {}
-    tasks_seen = []
+    pairs = []
     for row in rows:
-        if row["task"] not in tasks_seen:
-            tasks_seen.append(row["task"])
-    for i, t in enumerate(tasks_seen, 1):
-        pf = os.path.join("tasks", t, "prompt.txt")
-        prompt = open(pf).read() if os.path.exists(pf) else ""
-        sys.stderr.write(f"[difficulty {i}/{len(tasks_seen)}] {t}\n")
-        difficulty[t] = rate_difficulty(model, t, blind(prompt))
+        key = (row["task"], row.get("prompt", "v1"))
+        if key not in pairs:
+            pairs.append(key)
+    for i, (t, pv) in enumerate(pairs, 1):
+        pf = _prompt_path(t, pv)
+        prompt = open(pf).read() if pf else ""
+        sys.stderr.write(f"[difficulty {i}/{len(pairs)}] {t} | prompt {pv}\n")
+        difficulty[(t, pv)] = rate_difficulty(model, t, blind(prompt))
 
     # build report: numbers (summary.csv) + qualitative notes
     lines = ["# Benchmark report\n", f"_Judge: {model} (blinded review)_\n"]
     summ = os.path.join(RESULTS_DIR, "summary.csv")
     if os.path.exists(summ):
         s = list(csv.DictReader(open(summ)))
-        cols = ["harness", "model", "passes", "runs", "success_rate", "avg_tokens_in",
+        cols = ["harness", "model", "prompt", "passes", "runs", "success_rate", "avg_tokens_in",
                 "avg_tokens_out", "avg_duration_s", "call_s", "gen_s", "active_s", "idle_s",
-                "overlap_s", "cost_per_successful_task", "cost_basis"]
+                "overlap_s", "cost_per_successful_task", "gpu_wall_cost_usd", "cost_basis"]
         cols = [c for c in cols if c in s[0]]
         def _cell(c, r):
             if c == "harness":
@@ -412,6 +477,7 @@ def main():
         for r in s:
             lines.append("| " + " | ".join(_cell(c, r) for c in cols) + " |")
         lines.append("")
+        lines += cost_table(s)
         lines += timeline(s)
         lines += cost_analysis(s)
         lines += cost_model(s)
