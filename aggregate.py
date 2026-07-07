@@ -262,7 +262,9 @@ def main():
     task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0, "pass": 0, "api_cost": 0.0})
     with open(manifest) as f:
         for row in csv.DictReader(f):
-            m = row["model"]
+            m = row.get("model")
+            if not m or not row.get("task") or not row.get("outdir"):
+                continue   # skip malformed/partial lines (e.g. a stray write that corrupted the manifest)
             h = row.get("harness") or harness_of(m)   # harness recorded by run_bench (fallback for old data)
             pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
             key = (h, m, pv)
