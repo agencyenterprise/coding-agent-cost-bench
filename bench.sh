@@ -185,9 +185,17 @@ esac; done
 # removed on exit.
 DEEPCLAUDE_MASTER_KEY="${DEEPCLAUDE_MASTER_KEY:-sk-deepclaude-local}"
 _dc_pool=()
+_dc_free_port() {  # kill whatever is still bound from a prior hard-killed run (idempotent restart)
+  local port="$1"
+  command -v lsof >/dev/null 2>&1 || return 0
+  lsof -ti "tcp:$port" 2>/dev/null | xargs kill 2>/dev/null || true
+}
 _dc_launch_one() {  # port — writes its own config, launches litellm, records the pid for cleanup
   local port="$1" cfg
-  cfg="$(mktemp "${TMPDIR:-/tmp}/litellm.XXXXXX.yaml")"
+  _dc_free_port "$port"
+  # BSD mktemp requires XXXXXX at the end of the basename — ".yaml" after X's made every call
+  # return the same literal path (litellm.XXXXXX.yaml) and fail on the second launch.
+  cfg="$(mktemp "${TMPDIR:-/tmp}/litellm.XXXXXX")"
   _litellm_cfgs+=("$cfg")
   cat > "$cfg" <<YAML
 model_list:
@@ -226,6 +234,8 @@ _dc_wait_ready() {  # port — polled in parallel across the pool, so total wait
 }
 for i in "${!MREF[@]}"; do
   if [ "${HARN[$i]}" = "deepclaude" ]; then
+    rm -f "${TMPDIR:-/tmp}/litellm.XXXXXX.yaml" 2>/dev/null   # leftover from the old broken template
+    rm -rf "$RESULTS_DIR"/.dc_lock_* 2>/dev/null              # stale locks from a hard-killed prior run
     echo "starting litellm pool: $JOBS instance(s) on :${DEEPCLAUDE_PROXY_PORT:-4000}+ -> $MODAL_ENDPOINT (deepclaude harness)" >&2
     for j in $(seq 0 $((JOBS - 1))); do
       port=$(( ${DEEPCLAUDE_PROXY_PORT:-4000} + j ))
