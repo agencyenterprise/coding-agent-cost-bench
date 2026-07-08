@@ -19,6 +19,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # pinned agent CLIs
 RUN npm i -g opencode-ai@1.17.13 @anthropic-ai/claude-code@2.1.193
 
+# LiteLLM proxy for the `deepclaude` harness: Claude Code speaks the Anthropic Messages API
+# (POST /v1/messages), but the Modal GLM-5.2 endpoint is OpenAI-compatible (/v1/chat/completions)
+# and auth'd by Modal-Key/Modal-Secret headers. LiteLLM translates between the two and injects the
+# headers. NOTE: needs a version whose /v1/messages endpoint routes non-Anthropic providers through
+# the messages->completions adapter — 1.63.x only supported anthropic/bedrock/vertex and 500s on an
+# openai/ backend ("Anthropic messages provider config not found"). 1.77.3 has the adapter fallback.
+RUN pip3 install --no-cache-dir --break-system-packages 'litellm[proxy]==1.77.3'
+
 # non-root user — claude --dangerously-skip-permissions refuses to run as root
 RUN useradd -m -u 1001 bench
 USER bench
