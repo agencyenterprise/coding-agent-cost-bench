@@ -38,7 +38,7 @@ and suggest an alternative repo or a self-contained task — don't ship an unval
 Ask if they want a smoke run now:
 ```bash
 source .env
-./run_bench.sh --runs 1 --model opencode:modal/zai-org/GLM-5.2-FP8 \
+./bench.sh --runs 1 --model opencode:modal/zai-org/GLM-5.2-FP8 \
   # (or scope to the new task by temporarily pointing --tasks at a dir with just it)
 ```
 To run only the new task, its dir can be isolated, or run the full set and read its rows

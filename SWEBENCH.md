@@ -11,7 +11,7 @@ FAIL_TO_PASS test IDs, issue text — nothing fabricated) and writes a
 `tasks/demo-swebench-<id>/` task you then run like any other.
 ```bash
 python3 make_swebench_task.py psf__requests-6028     # any real Verified instance id
-./run_bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8 anthropic/claude-opus-4-8"
+./bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8 anthropic/claude-opus-4-8"
 ```
 No `datasets` install needed — it falls back to the cached HF parquet via `pyarrow`.
 

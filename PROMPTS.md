@@ -1,7 +1,7 @@
 # Prompt versions (the manifest)
 
 Each task carries up to **three prompt versions** of the same underlying task, so the *phrasing*
-becomes a measurable variable. Prompt version is a **first-class sweep dimension**: `./run_bench.sh`
+becomes a measurable variable. Prompt version is a **first-class sweep dimension**: `./bench.sh`
 runs every version present for every task, and every result row is tagged with it (`prompt` column,
 threaded through `manifest.csv` → `summary.csv` → `report.md` and the complexity view).
 
@@ -32,9 +32,9 @@ The sweep runs them **in order v1 → v2 → v3**, so the report reads baseline-
 ## Running
 
 ```bash
-./run_bench.sh                            # DEFAULT: runs every prompt.v*.txt present (v1, v2, v3), per task
-./run_bench.sh --prompts prompt.v1.txt    # only v1 (baseline)
-./run_bench.sh --prompts prompt.v2.txt,prompt.v3.txt   # a subset
+./bench.sh                            # DEFAULT: runs every prompt.v*.txt present (v1, v2, v3), per task
+./bench.sh --prompts prompt.v1.txt    # only v1 (baseline)
+./bench.sh --prompts prompt.v2.txt,prompt.v3.txt   # a subset
 ```
 
 Still grouped per model: within each `(harness, model)` group, `tasks × versions × runs` fire in

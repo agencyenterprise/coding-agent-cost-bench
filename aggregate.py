@@ -251,7 +251,7 @@ def gpu_call_cost(call_s):
 def main():
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
-        sys.exit(f"no manifest at {manifest} — run run_bench.sh first")
+        sys.exit(f"no manifest at {manifest} — run bench.sh first")
 
     detailed = []
     # arm = (harness, model, prompt-version): the prompt version is a first-class sweep dimension,
@@ -265,7 +265,7 @@ def main():
             m = row.get("model")
             if not m or not row.get("task") or not row.get("outdir"):
                 continue   # skip malformed/partial lines (e.g. a stray write that corrupted the manifest)
-            h = row.get("harness") or harness_of(m)   # harness recorded by run_bench (fallback for old data)
+            h = row.get("harness") or harness_of(m)   # harness recorded by bench.sh (fallback for old data)
             pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
             key = (h, m, pv)
             s, e = _f(row.get("start")), _f(row.get("end"))

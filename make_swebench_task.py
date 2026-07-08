@@ -10,7 +10,7 @@ Usage (run from the repo root):
     # e.g. python3 make_swebench_task.py psf__requests-6028
 
 Then run it like any other task:
-    ./run_bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8"
+    ./bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8"
 
 Emits prompt.v1/v2/v3.txt, setup.sh, verify.sh (self-sufficient grader), repo.git, test.patch, f2p.txt.
 
@@ -158,7 +158,7 @@ def main() -> None:
         (d / f).chmod(0o755)
 
     print(f"wrote {d}  (repo {repo} @ {base[:10]}, {len(f2p)} FAIL_TO_PASS tests)")
-    print("run:  ./run_bench.sh --runs 1")
+    print("run:  ./bench.sh --runs 1")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 # Build the image and run the benchmark + judge fully inside Docker — no host opencode/claude/python.
 #
 #   ./run_on_docker.sh                 # build, run the default matrix, judge with gemini
-#   ./run_on_docker.sh --runs 3        # any run_bench.sh flags pass straight through
+#   ./run_on_docker.sh --runs 3        # any bench.sh flags pass straight through
 #   JUDGE=openai ./run_on_docker.sh    # pick the judge model (gemini|openai|anthropic|glm)
 #   ./run_on_docker.sh --judge-only    # re-judge existing results/ (no bench -> no GPU cost)
 #   ./run_on_docker.sh --bench-only    # run the bench, skip the judge
@@ -37,7 +37,7 @@ case " ${pass[*]:-} " in
   *" --jobs "* | *" -j "*) : ;;
   *) pass+=(--jobs "${DOCKER_JOBS:-3}") ;;
 esac
-set -- ${pass[@]+"${pass[@]}"}   # remaining args pass through to run_bench.sh
+set -- ${pass[@]+"${pass[@]}"}   # remaining args pass through to bench.sh
 
 # build if requested, or if the image doesn't exist yet
 if [ "$BUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
@@ -55,6 +55,6 @@ dr() {
     -v "$PWD/results:/app/results" --entrypoint "$1" "$IMAGE" "${@:2}"
 }
 
-[ "$DO_BENCH" = 1 ] && { echo ">>> benchmark:  run_bench.sh $*"; dr ./run_bench.sh "$@"; }
+[ "$DO_BENCH" = 1 ] && { echo ">>> benchmark:  bench.sh $*"; dr ./bench.sh "$@"; }
 [ "$DO_JUDGE" = 1 ] && { echo ">>> judge:      judge.py --judge $JUDGE_MODEL"; dr python3 judge.py --judge "$JUDGE_MODEL"; }
 echo ">>> done -> results/report.md  (+ summary.csv, results_detailed.csv, complexity.csv)"

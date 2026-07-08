@@ -30,7 +30,7 @@ MODEL_ENTRIES=()           # collected from repeatable --model
 
 usage() {
   cat >&2 <<EOF
-Usage: ./run_bench.sh [options]
+Usage: ./bench.sh [options]
   -r, --runs N          repeats per (harness,model,task)  [$RUNS]
   -m, --models "a,b"    comma/space list of harness:model [$MODELS_STR]
       --model H:REF     add one harness:model (repeatable), e.g. --model claude:anthropic/claude-opus-4-8
@@ -129,12 +129,12 @@ fi
 
 mkdir -p "$RESULTS_DIR" "$CACHE_DIR"
 
-# single-run guard: refuse to start if another run_bench is already using this RESULTS_DIR
+# single-run guard: refuse to start if another bench.sh run is already using this RESULTS_DIR
 # (two concurrent runs share manifest.csv + run dirs and clobber each other).
 LOCK="$RESULTS_DIR/.run.lock"
 if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
-  echo "another run_bench is already using $RESULTS_DIR (pid $(cat "$LOCK"))." >&2
-  echo "  -> wait for it, kill it, or run with RESULTS_DIR=/some/other/dir ./run_bench.sh" >&2
+  echo "another bench.sh run is already using $RESULTS_DIR (pid $(cat "$LOCK"))." >&2
+  echo "  -> wait for it, kill it, or run with RESULTS_DIR=/some/other/dir ./bench.sh" >&2
   exit 1
 fi
 echo $$ > "$LOCK"
@@ -311,7 +311,7 @@ run_group() {
 # Warm the GLM endpoint up front: a cold / scaled-to-zero 8xB200 returns 503 for a while, and
 # without this every GLM task would hang on 503 until its own timeout (500s x N tasks wasted).
 # POST a 1-token request and poll until 200; if it never comes up, fail fast (bring it up with
-# ./setup.sh) instead of running the whole GLM group against a dead endpoint.
+# ./setup_auto_endpoint.sh) instead of running the whole GLM group against a dead endpoint.
 warm_modal() {
   local model="$1" i code tries="${WARM_TRIES:-16}"
   [ -n "${MODAL_ENDPOINT:-}" ] || { echo "MODAL_ENDPOINT unset" >&2; return 1; }
@@ -331,7 +331,7 @@ for i in "${!MREF[@]}"; do
   if [ "${HARN[$i]}" = "opencode" ]; then case "${MREF[$i]}" in
     modal*/*)
       warm_modal "$(model_id "${MREF[$i]}")" || {
-        echo "GLM endpoint $MODAL_ENDPOINT not ready — bring it up (./setup.sh), then re-run." >&2
+        echo "GLM endpoint $MODAL_ENDPOINT not ready — bring it up (./setup_auto_endpoint.sh), then re-run." >&2
         exit 1; }
       break ;;
   esac; fi

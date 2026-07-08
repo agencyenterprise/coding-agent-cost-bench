@@ -10,7 +10,7 @@ per tier (own port) so max/high/off can run side by side against the same endpoi
     # max = default; hit the endpoint directly (no proxy)
 
 Upstream defaults to $MODAL_ENDPOINT. Measured on a trivial prompt: default ~446 output tokens,
-high ~248 (~45% fewer), off ~5 — same answer. run_bench starts/stops these for modal-nothink/ and
+high ~248 (~45% fewer), off ~5 — same answer. bench.sh starts/stops these for modal-nothink/ and
 modal-high/ arms.
 """
 import argparse

@@ -5,7 +5,7 @@ tools: Bash, Read, Grep, Glob, Write, Edit
 ---
 
 You create ONE benchmark task for this repo and validate it end-to-end. A task lives in
-`tasks/<name>/` and is consumed by `run_bench.sh`. Return a short report; the parent relays it.
+`tasks/<name>/` and is consumed by `bench.sh`. Return a short report; the parent relays it.
 
 ## Conventions (non-negotiable)
 - **Name:** shareable/public tasks MUST be `demo-<slug>` (only `demo-*` is git-tracked).

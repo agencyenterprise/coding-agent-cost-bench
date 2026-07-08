@@ -8,7 +8,7 @@ study / DARPA DICE proposal.
 Same harness for every model isolates the **model** as the only variable (comparing the Claude
 Code *product* vs GLM-in-opencode would mix model + harness).
 
-**Three steps:** [`./setup.sh`](#1-setup) → [`./run_bench.sh`](#2-run) → [`python judge.py`](#3-judge).
+**Three steps:** [`./setup_auto_endpoint.sh`](#1-setup) → [`./bench.sh`](#2-run) → [`python judge.py`](#3-judge).
 
 ---
 
@@ -20,20 +20,20 @@ Code *product* vs GLM-in-opencode would mix model + harness).
 ```bash
 cp .env.example .env      # MODAL_ENDPOINT, MODAL_KEY, MODAL_SECRET, ANTHROPIC_API_KEY, GEMINI_API_KEY, ...
 ```
-`run_bench.sh` and `judge.py` `source .env` themselves — no need to export by hand. Providers
+`bench.sh` and `judge.py` `source .env` themselves — no need to export by hand. Providers
 live in [opencode.jsonc](opencode.jsonc) (committed, secrets via `{env:...}`).
 
 **GLM endpoint** — bring up the Modal auto-endpoint (idempotent, reuses the weights volume,
 enforces one proxy token, waits out provisioning):
 ```bash
 pip install modal && modal setup     # once, to auth the CLI
-./setup.sh                           # creates/echoes the 8×B200 GLM-5.2 endpoint
+./setup_auto_endpoint.sh             # creates/echoes the 8×B200 GLM-5.2 auto-endpoint
 ```
-Re-run `./setup.sh` anytime; it only creates what's missing. `./setup.sh --help` for flags.
+Re-run `./setup_auto_endpoint.sh` anytime; it only creates what's missing (`--help` for flags).
 
 ## 2. Run
 ```bash
-./run_bench.sh                 # default matrix, auto-aggregates
+./bench.sh                 # default matrix, auto-aggregates
 ```
 Each entry is **`harness:model-ref`** (`harness` = `opencode` | `claude`). The same model can appear
 under both harnesses — that's the point (model isolation vs real-world). Default matrix:
@@ -44,7 +44,7 @@ opencode:modal-nothink/zai-org/GLM-5.2-FP8   # GLM, reasoning off
 opencode:anthropic/claude-opus-4-8           # Opus, same harness as GLM (clean comparison)
 claude:anthropic/claude-opus-4-8             # Opus in Claude Code's own CLI (real-world product comp)
 ```
-The three `modal*` arms are a **reasoning sweep** (max / high / off) — run_bench starts one
+The three `modal*` arms are a **reasoning sweep** (max / high / off) — bench.sh starts one
 `reasoning_proxy.py` per proxied tier (own port) so they run concurrently on the one endpoint.
 `claude:` needs the `claude` CLI on PATH; it can't serve GLM/GPT/Gemini (Anthropic-only).
 
@@ -79,13 +79,13 @@ Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/s
 `cost_basis = claude_code`; opencode API rows are `api_ccusage`; GLM is `gpu_calls`.
 
 **Reasoning sweep (GLM max / high / off).** GLM-5.2 defaults to *max* reasoning while Opus runs with
-none — which inflates GLM's tokens/cost. `run_bench` auto-starts a `reasoning_proxy.py` per proxied
+none — which inflates GLM's tokens/cost. `bench.sh` auto-starts a `reasoning_proxy.py` per proxied
 tier (opencode can't add `chat_template_kwargs`; the Modal endpoint forwards it to SGLang — verified):
 - `modal/…` → default/max (no proxy)
 - `modal-high/…` → `reasoning_effort:high` (spike: ~45% fewer tokens, same answer)
 - `modal-nothink/…` → `enable_thinking:false` (~99% fewer on a trivial task)
 
-The default matrix already includes all three, so a plain `./run_bench.sh` runs the sweep. The open
+The default matrix already includes all three, so a plain `./bench.sh` runs the sweep. The open
 question these arms answer: how much success do you lose as you dial reasoning down, vs the cost saved?
 
 ## 3. Judge
@@ -97,6 +97,23 @@ Writes **`results/report.md`**: the numbers table, a **timeline** (start/end + o
 a **cost breakdown**, a **break-even table** (how many parallel tasks on Modal beat Claude), and
 short, blinded per-task notes. All sections are generated from `summary.csv`, so re-running is safe.
 
+## AEP vs App (two ways to host GLM on Modal)
+Same tasks, same harness, same auth — the **only** variable is how GLM-5.2 is hosted, so the two
+`results/` sets are directly comparable:
+
+```bash
+./run_auto_endpoint.sh    # managed Auto-Endpoint (setup_auto_endpoint.sh) -> results/aep/
+./run_app.sh              # hand-rolled App (modal_app.py, SGLang) -> results/app/
+```
+Both just re-point `MODAL_ENDPOINT` and set `RESULTS_DIR`, then call `bench.sh` (all its flags
+pass through). The App path deploys [modal_app.py](modal_app.py) — a custom SGLang OpenAI server on
+8×B200 reusing the same weights volume, exposed with `requires_proxy_auth=True` so the same
+Modal-Key/Secret work. Point at an already-deployed App with `APP_ENDPOINT=https://…/v1`.
+
+> `modal_app.py` is a **starting point** — the GLM-5.2-FP8 SGLang flags (version, quant, mamba /
+> flashinfer knobs, context length) need a deploy + smoke test and tuning on your account; see the
+> `TODO`s in the file. That tuning is exactly where Modal's own guidance would plug in.
+
 ## Run in Docker (optional — no host deps)
 The committed tasks all run natively on a modern host (**Python 3.14** included). Docker is only for
 avoiding local installs of opencode / Claude Code / node — or for running old SWE instances that need
@@ -105,7 +122,7 @@ opencode + Claude Code + Python 3.11 + git; the GLM endpoint stays on Modal.
 ```bash
 cp .env.example .env && $EDITOR .env     # creds (used at runtime, never baked in)
 ./run_on_docker.sh --runs 1              # builds the image, runs the bench AND the judge
-JUDGE=openai ./run_on_docker.sh --runs 3 # pick the judge; run_bench flags pass through
+JUDGE=openai ./run_on_docker.sh --runs 3 # pick the judge; bench.sh flags pass through
 ```
 `results/` is mounted back to the host. See [Dockerfile](Dockerfile) — Claude Code runs headless via
 `ANTHROPIC_API_KEY`.
@@ -160,8 +177,12 @@ benchmark use `repo.git` pinned to a tag/SHA, or SWE-bench Verified
 
 ## Layout
 ```
-setup.sh          # bring up the Modal GLM-5.2 auto-endpoint (idempotent)
-run_bench.sh      # run task × model × run, then aggregate
+setup_auto_endpoint.sh # bring up the managed Modal AEP (idempotent)
+setup_app.sh      # deploy the App (modal_app.py) + print its /v1 URL
+modal_app.py      # hand-rolled Modal App (SGLang GLM-5.2 server) — the "App" alternative to the AEP
+run_auto_endpoint.sh  # bench the managed AEP        -> results/aep/
+run_app.sh            # bench the App (modal_app.py) -> results/app/
+bench.sh      # core: run task × model × prompt × run, then aggregate (both wrappers call this)
 aggregate.py      # manifest + usage.json -> summary.csv / results_detailed.csv
 judge.py          # blinded LLM review + report.md (numbers, cost, break-even)
 clear_results.sh  # wipe results/
@@ -172,10 +193,10 @@ results/          # logs + CSVs + report.md (gitignored)
 ```
 
 ## Gotchas
-- **`opencode models` shows only `opencode/*`** → provider config not loaded; `run_bench.sh` sets
+- **`opencode models` shows only `opencode/*`** → provider config not loaded; `bench.sh` sets
   `OPENCODE_CONFIG` automatically.
 - **Anthropic/OpenAI 404 "Not Found"** → a stray `*_BASE_URL` env var (e.g. Claude Desktop's
-  `ANTHROPIC_BASE_URL` without `/v1`). `run_bench.sh` and `judge.py` unset these.
+  `ANTHROPIC_BASE_URL` without `/v1`). `bench.sh` and `judge.py` unset these.
 - **GLM `$/task` looks huge** → the idle tax + batch-1. The 8×B200 bills ~$50/hr whenever up; run
   tasks densely / in parallel (`--jobs`) so the same GPU-hour covers more tasks. Turn the endpoint
   off when not benchmarking.

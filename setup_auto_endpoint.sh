@@ -3,7 +3,7 @@
 # Re-runnable: creates the endpoint only if missing, and enforces exactly ONE proxy token
 # that matches .env. Reuses the pre-downloaded weights volume (no re-download).
 #
-#   ./setup.sh [options]
+#   ./setup_auto_endpoint.sh [options]
 #
 # Env vars are accepted as fallbacks (MODAL_ENDPOINT_NAME, GLM_MODEL, GLM_VOLUME, ...).
 set -euo pipefail
@@ -19,7 +19,7 @@ WAIT_SLEEP="${WAIT_SLEEP:-15}"
 
 usage() {
   cat >&2 <<EOF
-Usage: ./setup.sh [options]
+Usage: ./setup_auto_endpoint.sh [options]
       --name NAME           Modal auto-endpoint name     [$NAME]
       --model ID            model id on the endpoint     [$MODEL]
       --volume NAME         pre-downloaded weights vol   [$VOLUME]
@@ -63,7 +63,7 @@ if [ "$n" -eq 0 ]; then
   echo
   modal workspace proxy-tokens create
   echo
-  echo ">>> copy the values above into $ENV_FILE, then re-run ./setup.sh :"
+  echo ">>> copy the values above into $ENV_FILE, then re-run ./setup_auto_endpoint.sh :"
   echo '    export MODAL_KEY="wk-..."'
   echo '    export MODAL_SECRET="ws-..."'
   exit 1
@@ -87,7 +87,7 @@ elif [ "$env_key" = "$server_ids" ]; then
 else
   echo "MISMATCH: $ENV_FILE has '$env_key' but the server token is '$server_ids'." >&2
   echo "use the value that token was created with, or delete it and recreate:" >&2
-  echo "    modal workspace proxy-tokens delete $server_ids && ./setup.sh" >&2
+  echo "    modal workspace proxy-tokens delete $server_ids && ./setup_auto_endpoint.sh" >&2
   exit 1
 fi
 
@@ -139,7 +139,7 @@ echo >&2
 
 case "${status:-}" in
   ""|provisioning|pending|creating|starting|building|initializing|queued)
-    echo "still provisioning after $((WAIT_TRIES * WAIT_SLEEP))s — re-run ./setup.sh later." >&2
+    echo "still provisioning after $((WAIT_TRIES * WAIT_SLEEP))s — re-run ./setup_auto_endpoint.sh later." >&2
     exit 1 ;;
 esac
 echo "endpoint '$NAME' is up (status=$status)."
@@ -155,4 +155,4 @@ else
   echo "set MODAL_ENDPOINT in $ENV_FILE — copy the URL from the dashboard:"
   echo "  https://modal.com/endpoints/ (open '$NAME') → use <url>/v1"
 fi
-echo "then: source .env && ./run_bench.sh"
+echo "then: source .env && ./bench.sh"

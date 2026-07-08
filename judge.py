@@ -415,7 +415,7 @@ def main():
 
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
-        sys.exit("no results/manifest.csv — run run_bench.sh first")
+        sys.exit("no results/manifest.csv — run bench.sh first")
 
     rows = list(csv.DictReader(open(manifest)))
     # Judge ONE representative run per (harness, model, PROMPT, task): the note is the same across
