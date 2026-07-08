@@ -248,6 +248,14 @@ def gpu_call_cost(call_s):
     return call_s / 3600 * GPU_HOURLY_USD if call_s else 0.0
 
 
+def resolve_outdir(outdir):
+    """manifest.csv stores outdir as an absolute path under whatever RESULTS_DIR wrote it (e.g.
+    /app/results/... from inside Docker). Re-anchor to the current RESULTS_DIR so reading the
+    manifest from a different mount (e.g. locally against the bind-mounted results/ folder) doesn't
+    silently return empty stats for every run — every stats function keys off this failing open()."""
+    return os.path.join(RESULTS_DIR, os.path.basename(outdir)) if outdir else outdir
+
+
 def main():
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
@@ -265,15 +273,26 @@ def main():
             m = row.get("model")
             if not m or not row.get("task") or not row.get("outdir"):
                 continue   # skip malformed/partial lines (e.g. a stray write that corrupted the manifest)
+            row["outdir"] = resolve_outdir(row["outdir"])
             h = row.get("harness") or harness_of(m)   # harness recorded by bench.sh (fallback for old data)
             pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
             key = (h, m, pv)
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
                 intervals[key].append((s, e))
-            if h == "claude":                          # Claude Code reports its own cost/usage/turns
+            if h in ("claude", "deepclaude"):          # both parse Claude Code's stream-json output.log
                 pm = claude_stats(row.get("outdir", ""))
-                tin, tout, ccost, cs, basis = pm["tin"], pm["tout"], pm["cost"], pm["call_s"], "claude_code"
+                tin, tout, ccost, cs = pm["tin"], pm["tout"], pm["cost"], pm["call_s"]
+                # deepclaude runs GLM on Modal -> GPU wall-clock $ (like the opencode modal arms), NOT
+                # Claude Code's self-reported price (which is meaningless for a non-Anthropic model).
+                basis = "gpu_calls" if is_self_hosted(m) else "claude_code"
+                if is_self_hosted(m) and s is not None and cs:
+                    # Claude Code's stream-json has no step_start/step_finish like opencode's log, so
+                    # there's no per-turn generation window to union — only one number per run
+                    # (duration_api_ms). Anchor it at the run's start as a single [s, s+cs] block; this
+                    # still correctly detects overlap with other runs sharing the GLM endpoint, which is
+                    # all the union is used for (packed cost / idle time).
+                    genivs[key].append((s, s + cs))
             else:
                 tin, tout, ccost = load_usage(row.get("outdir", ""))
                 pm = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log

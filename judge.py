@@ -221,7 +221,7 @@ def efficiency(rows):
         key = (h, m, pv)
         a = agg.setdefault(key, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
         a["runs"] += 1
-        st = aggregate.claude_stats(r.get("outdir", "")) if h == "claude" \
+        st = aggregate.claude_stats(r.get("outdir", "")) if h in ("claude", "deepclaude") \
             else aggregate.log_stats(r.get("outdir", ""))
         a["steps"] += st["steps"]
         a["tools"] += st["tools"]
@@ -418,6 +418,8 @@ def main():
         sys.exit("no results/manifest.csv — run bench.sh first")
 
     rows = list(csv.DictReader(open(manifest)))
+    for r in rows:
+        r["outdir"] = aggregate.resolve_outdir(r.get("outdir", ""))
     # Judge ONE representative run per (harness, model, PROMPT, task): the note is the same across
     # repeat runs (repeats are for success-rate stability), but a different prompt version produces a
     # different transcript+diff, so each prompt version is judged separately. Prefer a passing run.

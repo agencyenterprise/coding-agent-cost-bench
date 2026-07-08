@@ -52,6 +52,7 @@ dr() {
   docker run --rm \
     -e ANTHROPIC_API_KEY -e GEMINI_API_KEY -e OPENAI_API_KEY \
     -e MODAL_ENDPOINT -e MODAL_KEY -e MODAL_SECRET \
+    -e DEEPCLAUDE_PROXY_PORT -e DEEPCLAUDE_MASTER_KEY \
     -v "$PWD/results:/app/results" --entrypoint "$1" "$IMAGE" "${@:2}"
 }
 
