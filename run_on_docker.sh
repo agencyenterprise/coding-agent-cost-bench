@@ -3,11 +3,11 @@
 #
 #   ./run_on_docker.sh                 # build, run the default matrix, judge with gemini
 #   ./run_on_docker.sh --runs 3        # any bench.sh flags pass straight through
-#   JUDGE=openai ./run_on_docker.sh    # pick the judge model (gemini|openai|anthropic|glm)
+#   ./run_on_docker.sh --judge openai  # pick the judge model (gemini|openai|anthropic|glm)
 #   ./run_on_docker.sh --judge-only    # re-judge existing results/ (no bench -> no GPU cost)
 #   ./run_on_docker.sh --bench-only    # run the bench, skip the judge
 #   ./run_on_docker.sh --no-build ...  # reuse the current image (skip docker build)
-#   DOCKER_JOBS=2 ./run_on_docker.sh   # in-container concurrency (default 3; your own --jobs wins)
+#   ./run_on_docker.sh --jobs 2 ...    # in-container concurrency (default 3)
 #
 # Creds come from .env (sourced + forwarded by name; never baked in). results/ is mounted to the host.
 # Defaults to --jobs 3 in-container: 5 simultaneous agents OOM the shared Docker VM. Also free VM
@@ -16,19 +16,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 IMAGE="${IMAGE:-glm-bench}"
-JUDGE_MODEL="${JUDGE:-gemini}"
+JUDGE_MODEL="gemini"
 command -v docker >/dev/null 2>&1 || { echo "docker not found — install Docker first" >&2; exit 1; }
 [ -f .env ] || { echo "need .env with creds — cp .env.example .env and fill it in" >&2; exit 1; }
 
 BUILD=1; DO_BENCH=1; DO_JUDGE=1
-[ -n "${NO_JUDGE:-}" ] && DO_JUDGE=0
 pass=()
-for a in "$@"; do
-  case "$a" in
-    --no-build)   BUILD=0 ;;
-    --judge-only) DO_BENCH=0 ;;
-    --bench-only) DO_JUDGE=0 ;;
-    *)            pass+=("$a") ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-build)   BUILD=0; shift ;;
+    --judge-only) DO_BENCH=0; shift ;;
+    --bench-only) DO_JUDGE=0; shift ;;
+    --judge)      JUDGE_MODEL="$2"; shift 2 ;;
+    *)            pass+=("$1"); shift ;;
   esac
 done
 # 5 simultaneous Node agents + pip installs OOM the shared Docker VM (the last-launched task gets

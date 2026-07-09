@@ -23,12 +23,14 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 
-RESULTS_DIR = os.environ.get("RESULTS_DIR", "./results")
+# Defaults; overridden by --results-dir / --rate in main(). (judge.py imports this module and sets
+# these two attributes directly, so they stay module-level rather than env-driven.)
+RESULTS_DIR = "./results"
 
 # Hourly run-rate of the 8xB200 auto-endpoint while it's actively serving. Measured from this
 # workspace's own Modal billing ($32.08 over the 38 active minutes of the first run = $50.7/hr,
-# i.e. ~$6.34 per B200-hour x 8). Override with GLM_GPU_HOURLY_USD if the GPU/count differs.
-GPU_HOURLY_USD = float(os.environ.get("GLM_GPU_HOURLY_USD", "50.7"))
+# i.e. ~$6.34 per B200-hour x 8). Override per hardware tier with --rate.
+GPU_HOURLY_USD = 50.7
 
 
 def is_self_hosted(model):
@@ -257,9 +259,19 @@ def resolve_outdir(outdir):
 
 
 def main():
+    import argparse
+    global RESULTS_DIR, GPU_HOURLY_USD
+    ap = argparse.ArgumentParser(description="Aggregate benchmark results into summary.csv.")
+    ap.add_argument("--results-dir", default=RESULTS_DIR, help="results dir to read/write [%(default)s]")
+    ap.add_argument("--rate", type=float, default=GPU_HOURLY_USD,
+                    help="GLM GPU $/hr for this hardware tier [%(default)s]")
+    args = ap.parse_args()
+    RESULTS_DIR, GPU_HOURLY_USD = args.results_dir, args.rate
+
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
-        sys.exit(f"no manifest at {manifest} — run bench.sh first")
+        sys.exit(f"no manifest at {manifest} — run bench.sh first "
+                 f"(or point --results-dir at the right folder, e.g. --results-dir results/app-8xH200)")
 
     detailed = []
     # arm = (harness, model, prompt-version): the prompt version is a first-class sweep dimension,

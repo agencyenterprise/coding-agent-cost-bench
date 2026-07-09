@@ -42,6 +42,8 @@ opencode:modal/zai-org/GLM-5.2-FP8           # GLM, default (max) reasoning
 opencode:modal-high/zai-org/GLM-5.2-FP8      # GLM, reasoning_effort=high  (~45% fewer tokens)
 opencode:modal-nothink/zai-org/GLM-5.2-FP8   # GLM, reasoning off
 deepclaude:modal/zai-org/GLM-5.2-FP8         # GLM inside Claude Code's loop (via LiteLLM proxy)
+deepclaude:modal-high/zai-org/GLM-5.2-FP8    # deepclaude + reasoning_effort=high
+deepclaude:modal-nothink/zai-org/GLM-5.2-FP8 # deepclaude + thinking off
 opencode:anthropic/claude-opus-4-8           # Opus, same harness as GLM (clean comparison)
 claude:anthropic/claude-opus-4-8             # Opus in Claude Code's own CLI (real-world product comp)
 ```
@@ -112,13 +114,16 @@ Same tasks, same harness, same auth — the **only** variable is how GLM-5.2 is 
 `results/` sets are directly comparable:
 
 ```bash
-./run_auto_endpoint.sh    # managed Auto-Endpoint (setup_auto_endpoint.sh) -> results/aep/
-./run_app.sh              # hand-rolled App (modal_app.py, SGLang) -> results/app/
+./run_auto_endpoint.sh                    # managed Auto-Endpoint -> results/aep/
+./run_app.sh                              # hand-rolled App (modal_app.py, SGLang) -> results/app/
+./run_app.sh --tier 8xH200 --runs 3       # a cheaper hardware tier -> results/app-8xH200/
 ```
-Both just re-point `MODAL_ENDPOINT` and set `RESULTS_DIR`, then call `bench.sh` (all its flags
-pass through). The App path deploys [modal_app.py](modal_app.py) — a custom SGLang OpenAI server on
-8×B200 reusing the same weights volume, exposed with `requires_proxy_auth=True` so the same
-Modal-Key/Secret work. Point at an already-deployed App with `APP_ENDPOINT=https://…/v1`.
+Both re-point the endpoint and call `bench.sh` (all its flags pass through). The App path deploys
+[modal_app.py](modal_app.py) — a custom SGLang OpenAI server reusing the same weights volume,
+`requires_proxy_auth=True` so the same Modal-Key/Secret work. Everything is a **flag** (no env to
+export): `--tier 8xB200|8xH200|4xB200` (or `--gpu`/`--n-gpus`/`--rate`), `--results-dir`,
+`--app-endpoint https://…/v1` to skip deploy, `--judge <m>` to build the report. Each tier's
+results auto-scope to `results/app-<N>x<GPU>` so they don't clobber. (Secrets stay in `.env`.)
 
 > `modal_app.py` is a **starting point** — the GLM-5.2-FP8 SGLang flags (version, quant, mamba /
 > flashinfer knobs, context length) need a deploy + smoke test and tuning on your account; see the
@@ -131,8 +136,8 @@ an older Python (e.g. `pytest-dev/pytest-*`, see [SWEBENCH.md](SWEBENCH.md)). It
 opencode + Claude Code + Python 3.11 + git; the GLM endpoint stays on Modal.
 ```bash
 cp .env.example .env && $EDITOR .env     # creds (used at runtime, never baked in)
-./run_on_docker.sh --runs 1              # builds the image, runs the bench AND the judge
-JUDGE=openai ./run_on_docker.sh --runs 3 # pick the judge; bench.sh flags pass through
+./run_on_docker.sh --runs 1                 # builds the image, runs the bench AND the judge
+./run_on_docker.sh --judge openai --runs 3  # pick the judge; bench.sh flags pass through
 ```
 `results/` is mounted back to the host. See [Dockerfile](Dockerfile) — Claude Code runs headless via
 `ANTHROPIC_API_KEY`.
@@ -145,8 +150,8 @@ Every cost carries a `cost_basis`:
   `cost_basis = api_ccusage`. You pay per token, $0 when idle.
 - **GLM on Modal** → you rent the whole 8×B200 endpoint (~$50.7/hr while up). We charge **only the
   minutes the model actually ran** — the *union* of run intervals (parallel runs count once, not
-  summed) × the hourly rate — excluding idle warm/scale-down. `cost_basis = gpu_active`. Override
-  the rate with `GLM_GPU_HOURLY_USD`.
+  summed) × the hourly rate — excluding idle warm/scale-down. `cost_basis = gpu_calls`. Set the
+  per-tier rate with `--rate` (e.g. `--rate 36.6` for 8×H200).
 
 **Why `--jobs` matters:** GLM's per-task cost is `rate ÷ throughput`. One task at a time wastes ~7/8
 of the GPU; running many in parallel shrinks the interval union and slashes $/task. The report's

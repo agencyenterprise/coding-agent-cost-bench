@@ -8,3 +8,4 @@ tasks/*
 !tasks/demo-*/
 .cache/
 .app_endpoint
+.app_tier.json

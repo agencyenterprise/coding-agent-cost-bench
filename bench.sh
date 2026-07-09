@@ -18,9 +18,9 @@ set -euo pipefail
 #   - claude:     Claude Code's own CLI + auth (Anthropic models only)
 #   - deepclaude: Claude Code's CLI, but pointed at the Modal GLM endpoint through a LiteLLM proxy that
 #                 translates Anthropic /v1/messages -> OpenAI /v1/chat/completions (the "deepclaude" trick).
-#                 Use a modal/ ref so its $ is GPU-billed (wall-clock), not priced as an Anthropic model.
+#                 Use a modal*/ ref so its $ is GPU-billed (wall-clock), not priced as an Anthropic model.
 # All modal* GLM arms (max / high / off) run concurrently on the one endpoint; Opus/Claude-Code after.
-MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:modal-high/zai-org/GLM-5.2-FP8,opencode:modal-nothink/zai-org/GLM-5.2-FP8,deepclaude:modal/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
+MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:modal-high/zai-org/GLM-5.2-FP8,opencode:modal-nothink/zai-org/GLM-5.2-FP8,deepclaude:modal/zai-org/GLM-5.2-FP8,deepclaude:modal-high/zai-org/GLM-5.2-FP8,deepclaude:modal-nothink/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
 ONLY_TASK=""               # run just one task (its dir name under $TASKS_DIR); empty = all
 PROMPTS_STR=""             # restrict to these per-task prompt files (comma/space); empty = ALL prompt*.txt
@@ -47,6 +47,8 @@ Usage: ./bench.sh [options]
       --timeout SECS    kill a stuck agent                [$TIMEOUT_SECS]
       --retries N       retries on opencode server err    [$RETRIES]
       --delay SECS      pause between a group's runs       [$RUN_DELAY]
+      --results-dir DIR where results land                [./results]
+      --rate USD_PER_HR GLM GPU \$/hr for the cost calc    [50.7]
       --delete-repo     discard the mutated repo          [$KEEP_REPO]
   -h, --help
 EOF
@@ -64,6 +66,8 @@ while [ $# -gt 0 ]; do
     --timeout) TIMEOUT_SECS="$2"; shift 2;;
     --retries) RETRIES="$2"; shift 2;;
     --delay) RUN_DELAY="$2"; shift 2;;
+    --results-dir) RESULTS_DIR_ARG="$2"; shift 2;;   # where results land (was the RESULTS_DIR env)
+    --rate) GLM_RATE="$2"; shift 2;;                  # GLM GPU $/hr for aggregate (was GLM_GPU_HOURLY_USD env)
     --delete-repo) KEEP_REPO=0; shift;;
     -h|--help) usage; exit 0;;
     *) echo "unknown arg: $1" >&2; usage; exit 1;;
@@ -107,7 +111,8 @@ if [ -f .env ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/results}"   # override for smoke tests without clobbering ./results
+RESULTS_DIR="${RESULTS_DIR_ARG:-$SCRIPT_DIR/results}"   # --results-dir; default ./results
+GLM_RATE="${GLM_RATE:-50.7}"                            # --rate; GLM GPU $/hr passed to aggregate
 CACHE_DIR="$SCRIPT_DIR/.cache/repos"   # remote repos cloned once, reused per run
 export OPENCODE_CONFIG="$SCRIPT_DIR/opencode.jsonc"   # honored from /tmp clones too
 export NO_COLOR=1                                     # no ANSI in logs
@@ -154,9 +159,9 @@ echo $$ > "$LOCK"
 _proxies=()
 _litellm_cfgs=()
 _cleanup() {
+  _dc_stop_pool
   for p in "${_proxies[@]:-}"; do kill "$p" 2>/dev/null; done
   for c in "${_litellm_cfgs[@]:-}"; do rm -f "$c"; done   # generated configs hold Modal creds — never leave them around
-  rm -rf "$RESULTS_DIR"/.dc_lock_* 2>/dev/null
   rm -f "$LOCK"
 }
 trap _cleanup EXIT
@@ -176,7 +181,7 @@ for i in "${!MREF[@]}"; do case "${MREF[$i]}" in
 esac; done
 
 # LiteLLM proxy POOL for the deepclaude harness: exposes Claude Code's Anthropic /v1/messages endpoint
-# and forwards to the Modal GLM endpoint as OpenAI /v1/chat/completions, injecting the Modal-Key/Secret
+# and forwards to the GLM endpoint (direct for modal/, via reasoning_proxy for modal-high/nothink).
 # headers. ONE INSTANCE PER CONCURRENT SLOT (sized to $JOBS) — fake_stream's SSE fabrication below is
 # not concurrency-safe: two simultaneous fake-streamed responses on the SAME litellm process corrupt
 # each other's content blocks ("API Error: Content block not found" on whichever request lost the
@@ -185,13 +190,29 @@ esac; done
 # removed on exit.
 DEEPCLAUDE_MASTER_KEY="${DEEPCLAUDE_MASTER_KEY:-sk-deepclaude-local}"
 _dc_pool=()
+_dc_pids=()
+_dc_upstream_for() {  # model ref -> GLM OpenAI base URL (reasoning proxy for high/off, else direct)
+  case "$1" in
+    modal-high/*)    echo "${HIGH_ENDPOINT:-}";;
+    modal-nothink/*) echo "${NOTHINK_ENDPOINT:-}";;
+    *)               echo "${MODAL_ENDPOINT:-}";;
+  esac
+}
 _dc_free_port() {  # kill whatever is still bound from a prior hard-killed run (idempotent restart)
   local port="$1"
   command -v lsof >/dev/null 2>&1 || return 0
   lsof -ti "tcp:$port" 2>/dev/null | xargs kill 2>/dev/null || true
 }
-_dc_launch_one() {  # port — writes its own config, launches litellm, records the pid for cleanup
-  local port="$1" cfg
+_dc_stop_pool() {  # tear down the per-group litellm pool (groups run one at a time)
+  local p port
+  for p in "${_dc_pids[@]:-}"; do kill "$p" 2>/dev/null; done
+  _dc_pids=()
+  for port in "${_dc_pool[@]:-}"; do _dc_free_port "$port"; done
+  _dc_pool=()
+  rm -rf "$RESULTS_DIR"/.dc_lock_* 2>/dev/null
+}
+_dc_launch_one() {  # port upstream — writes its own config, launches litellm, records the pid for cleanup
+  local port="$1" upstream="$2" cfg
   _dc_free_port "$port"
   # BSD mktemp requires XXXXXX at the end of the basename — ".yaml" after X's made every call
   # return the same literal path (litellm.XXXXXX.yaml) and fail on the second launch.
@@ -202,7 +223,7 @@ model_list:
   - model_name: zai-org/GLM-5.2-FP8
     litellm_params:
       model: openai/zai-org/GLM-5.2-FP8
-      api_base: ${MODAL_ENDPOINT}
+      api_base: ${upstream}
       api_key: dummy
       extra_headers:
         Modal-Key: ${MODAL_KEY}
@@ -221,7 +242,7 @@ general_settings:
   master_key: ${DEEPCLAUDE_MASTER_KEY}
 YAML
   litellm --config "$cfg" --host 127.0.0.1 --port "$port" > "$RESULTS_DIR/litellm_$port.log" 2>&1 &
-  _proxies+=($!)   # must run in THIS shell (not a background subshell) so $! lands in the real array
+  _dc_pids+=($!)   # separate from reasoning_proxy pids — pool is restarted per deepclaude group
 }
 _dc_wait_ready() {  # port — polled in parallel across the pool, so total wait ~= one instance's boot time
   local port="$1" i
@@ -232,25 +253,22 @@ _dc_wait_ready() {  # port — polled in parallel across the pool, so total wait
   echo "  litellm :$port did not come up — see $RESULTS_DIR/litellm_$port.log" >&2
   return 1
 }
-for i in "${!MREF[@]}"; do
-  if [ "${HARN[$i]}" = "deepclaude" ]; then
-    rm -f "${TMPDIR:-/tmp}/litellm.XXXXXX.yaml" 2>/dev/null   # leftover from the old broken template
-    rm -rf "$RESULTS_DIR"/.dc_lock_* 2>/dev/null              # stale locks from a hard-killed prior run
-    echo "starting litellm pool: $JOBS instance(s) on :${DEEPCLAUDE_PROXY_PORT:-4000}+ -> $MODAL_ENDPOINT (deepclaude harness)" >&2
-    for j in $(seq 0 $((JOBS - 1))); do
-      port=$(( ${DEEPCLAUDE_PROXY_PORT:-4000} + j ))
-      _dc_launch_one "$port"
-      _dc_pool+=("$port")
-    done
-    _dc_wait_pids=()
-    for port in "${_dc_pool[@]}"; do ( _dc_wait_ready "$port" ) & _dc_wait_pids+=($!); done
-    _dc_ok=1
-    for p in "${_dc_wait_pids[@]}"; do wait "$p" || _dc_ok=0; done
-    [ "$_dc_ok" = 1 ] || exit 1
-    echo "  litellm pool ready: ${#_dc_pool[@]} instance(s) on ports ${_dc_pool[*]}" >&2
-    break   # one pool total — "groups run one at a time", so only one deepclaude group is ever live
-  fi
-done
+_dc_start_pool() {  # upstream — one pool per deepclaude group, sized to $JOBS
+  local upstream="$1" j port
+  _dc_stop_pool   # idempotent: clear any prior pool before relaunching (e.g. next reasoning tier)
+  rm -f "${TMPDIR:-/tmp}/litellm.XXXXXX.yaml" 2>/dev/null   # leftover from the old broken template
+  echo "starting litellm pool: $JOBS instance(s) on :${DEEPCLAUDE_PROXY_PORT:-4000}+ -> $upstream (deepclaude harness)" >&2
+  for j in $(seq 0 $((JOBS - 1))); do
+    port=$(( ${DEEPCLAUDE_PROXY_PORT:-4000} + j ))
+    _dc_launch_one "$port" "$upstream"
+    _dc_pool+=("$port")
+  done
+  _dc_wait_pids=()
+  for port in "${_dc_pool[@]}"; do ( _dc_wait_ready "$port" ) & _dc_wait_pids+=($!); done
+  _dc_ok=1
+  for p in "${_dc_wait_pids[@]}"; do wait "$p" || _dc_ok=0; done
+  [ "$_dc_ok" = 1 ]
+}
 _dc_claim() {   # blocks until a pool slot is free, prints the claimed port
   local port
   while :; do
@@ -411,7 +429,13 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
 # endpoint concurrently (the packed scenario we want to measure) — and one model's contention is
 # never mixed with another model's runs, keeping each model's numbers clean.
 run_group() {
-  local harness="$1" model="$2" pids=() task tn ta run pf pfiles p alive
+  local harness="$1" model="$2" pids=() task tn ta run pf pfiles p alive upstream
+  if [ "$harness" = "deepclaude" ]; then
+    upstream="$(_dc_upstream_for "$model")"
+    [ -n "$upstream" ] || { echo "deepclaude upstream unset for $model (reasoning proxy not up?)" >&2; exit 1; }
+    _dc_start_pool "$upstream" || exit 1
+    echo "  litellm pool ready: ${#_dc_pool[@]} instance(s) on ports ${_dc_pool[*]}" >&2
+  fi
   for task in "$TASKS_DIR"/*/; do
     [ -f "$task/prompt.v1.txt" ] || continue
     tn="$(basename "$task")"
@@ -442,6 +466,7 @@ run_group() {
     done
   done
   [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}" 2>/dev/null || true   # finish this group before the next
+  if [ "$harness" = "deepclaude" ]; then _dc_stop_pool; fi
 }
 
 # Warm the GLM endpoint up front: a cold / scaled-to-zero 8xB200 returns 503 for a while, and
@@ -485,4 +510,4 @@ done
 trap - INT TERM
 
 echo "Done -> $MANIFEST"
-RESULTS_DIR="$RESULTS_DIR" python3 "$SCRIPT_DIR/aggregate.py"
+python3 "$SCRIPT_DIR/aggregate.py" --results-dir "$RESULTS_DIR" --rate "$GLM_RATE"

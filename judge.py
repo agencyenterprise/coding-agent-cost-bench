@@ -41,7 +41,7 @@ def load_env(path=".env"):
 
 
 load_env()
-RESULTS_DIR = os.environ.get("RESULTS_DIR", "./results")
+RESULTS_DIR = "./results"   # overridden by --results-dir in main()
 JUDGES = {
     "openai": "openai/gpt-5.1",
     "gemini": "google/gemini-3-flash-preview",
@@ -172,7 +172,7 @@ def judge_all(model, items):
 def cost_model(summary):
     """Closing the gap: how concurrency turns the sole-tenant uptime cost into the call-time floor,
     and how that floor compares to Claude. All from measured summary numbers."""
-    rate = float(os.environ.get("GLM_GPU_HOURLY_USD", "50.7"))
+    rate = aggregate.GPU_HOURLY_USD
     gpu = next((r for r in summary if str(r.get("cost_basis", "")).startswith("gpu")), None)
     api = next((r for r in summary if r.get("cost_basis") == "api_ccusage"), None)
     try:
@@ -296,7 +296,7 @@ def cost_table(summary):
          "own generation time × rate (you pay for all 8 GPUs to serve a single task). **packed** = the "
          "endpoint filled with concurrent tasks — union of generation ÷ tasks. The gap between them is "
          "the **concurrency lever**: packing the endpoint is what makes GLM cheap. Both count generation "
-         f"only (step_start→step_finish × ~${float(os.environ.get('GLM_GPU_HOURLY_USD','50.7')):.0f}/hr, "
+         f"only (step_start→step_finish × ~${aggregate.GPU_HOURLY_USD:.0f}/hr, "
          "no local scripts). Claude/GPT are per-token — concurrency-invariant — so sole == packed.",
          "",
          "| harness | model | prompt | success | $/task sole | $/task packed |",
@@ -312,7 +312,7 @@ def cost_table(summary):
 
 def cost_analysis(summary):
     """Narrative on WHY the two costs differ — generated from summary.csv so it can't drift."""
-    rate = float(os.environ.get("GLM_GPU_HOURLY_USD", "50.7"))
+    rate = aggregate.GPU_HOURLY_USD
     gpu = next((r for r in summary if str(r.get("cost_basis", "")).startswith("gpu")), None)
     api = next((r for r in summary if r.get("cost_basis") == "api_ccusage"), None)
     L = ["## Cost — what's really going on\n",
@@ -404,18 +404,28 @@ def complexity_section(difficulty):
 
 
 def main():
+    global RESULTS_DIR
     args = sys.argv[1:]
-    model = None
-    if "--model" in args:
-        model = args[args.index("--model") + 1]
-    elif "--judge" in args:
-        model = JUDGES.get(args[args.index("--judge") + 1])
+
+    def _opt(name, default=None):   # tiny flag reader (keeps the existing --judge/--model style)
+        return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
+
+    model = _opt("--model") or JUDGES.get(_opt("--judge", ""))
     if not model:
-        sys.exit("usage: judge.py --judge openai|gemini|anthropic|glm   (or --model <ref>)")
+        sys.exit("usage: judge.py --judge openai|gemini|anthropic|glm [--model <ref>] "
+                 "[--results-dir DIR] [--rate USD_PER_HR]")
+
+    # --results-dir / --rate replace the old RESULTS_DIR / GLM_GPU_HOURLY_USD env vars. aggregate.py
+    # is imported here, so set ITS globals too (resolve_outdir + gpu_call_cost key off them).
+    RESULTS_DIR = _opt("--results-dir", RESULTS_DIR)
+    aggregate.RESULTS_DIR = RESULTS_DIR
+    if _opt("--rate"):
+        aggregate.GPU_HOURLY_USD = float(_opt("--rate"))
 
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
-        sys.exit("no results/manifest.csv — run bench.sh first")
+        sys.exit(f"no manifest at {manifest} — run bench.sh first "
+                 f"(or pass --results-dir, e.g. --results-dir results/app-8xH200)")
 
     rows = list(csv.DictReader(open(manifest)))
     for r in rows:

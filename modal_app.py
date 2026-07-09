@@ -7,35 +7,43 @@ This mirrors the AEP's actual serving config (SGLang image + server args + env, 
 auto-endpoint source) so it's a *fair* replica — EXCEPT the GPU, which the AEP hardcodes to 8×B200
 and we expose as a default you can override (the whole point of the App path: try cheaper tiers).
 
-    modal deploy modal_app.py                                  # 8×B200 (default), like the AEP
-    APP_GPU_TYPE=B200 APP_N_GPUS=4 modal deploy modal_app.py    # a cheaper tier to compare
-    # -> OpenAI API at  https://<workspace>--glm-5-2-app-<...>.modal.run/v1
-    # setup_app.sh does this and prints the /v1 URL; run_app.sh captures it.
+    ./run_app.sh --gpu B200 --n-gpus 8      # 8×B200 (default), like the AEP
+    ./run_app.sh --gpu H200 --n-gpus 8      # a cheaper tier to compare
+    # run_app.sh -> setup_app.sh writes .app_tier.json + `modal deploy`s this, then benches the
+    # resulting /v1 URL. The GPU/weights come from that file (this module reads no env except creds).
 
 Auth: requires_proxy_auth=True, so the same Modal-Key/Modal-Secret headers bench.sh sends work.
 
-⚠️  Deploy + smoke-test before trusting numbers: `--tp-size` follows APP_N_GPUS, but some GPU counts
+⚠️  Deploy + smoke-test before trusting numbers: `--tp-size` follows --n-gpus, but some GPU counts
 need arg changes (attention/MoE sharding), and the weights volume must actually hold the model
-(set APP_MODEL_PATH / APP_WEIGHTS_VOLUME). The server args below are copied from the live AEP.
+(--model-path / --weights-volume). The server args below are copied from the live AEP.
 """
+import json
 import os
 import subprocess
 
 import modal
 
-# --- GPU: default to the AEP's 8×B200, overridable at deploy time (don't hardcode) ---
-GPU_TYPE = os.environ.get("APP_GPU_TYPE", "B200")
-N_GPUS = int(os.environ.get("APP_N_GPUS", "8"))
-GPU = f"{GPU_TYPE}:{N_GPUS}"
-
 SERVED_MODEL_NAME = "zai-org/GLM-5.2-FP8"
 MODEL_REVISION = "a0b55e88465d1a06afece97bc8d6b366aff39089"   # pinned, matches the AEP
-# Where the weights live. Default: the repo id, which SGLang downloads into the mounted HF-cache
-# volume on first cold start (persists after). Point APP_MODEL_PATH at a pre-populated volume path
-# (e.g. /weights/zai-org/GLM-5.2-FP8) to skip the ~700 GB download.
-WEIGHTS_VOLUME = os.environ.get("APP_WEIGHTS_VOLUME", "glm-app-hf-cache")
 WEIGHTS_MOUNT = "/weights"
-MODEL_PATH = os.environ.get("APP_MODEL_PATH", SERVED_MODEL_NAME)
+
+# Hardware tier + weights come from .app_tier.json, which setup_app.sh writes from its --gpu/--n-gpus
+# flags right before `modal deploy` (modal deploy can't forward CLI args to this module, and we keep
+# operational knobs out of env vars — only .env creds live in the environment). Defaults = the AEP's
+# 8×B200. model_path default = the repo id (SGLang downloads into the mounted HF-cache volume on the
+# first cold start, persists after); set it to a pre-populated volume path to skip the ~700 GB pull.
+_tier = {}
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".app_tier.json")) as _f:
+        _tier = json.load(_f)
+except Exception:
+    pass
+GPU_TYPE = _tier.get("gpu_type") or "B200"
+N_GPUS = int(_tier.get("n_gpus") or 8)
+GPU = f"{GPU_TYPE}:{N_GPUS}"
+WEIGHTS_VOLUME = _tier.get("weights_volume") or "glm-app-hf-cache"
+MODEL_PATH = _tier.get("model_path") or SERVED_MODEL_NAME
 
 PORT = 8000
 MINUTES = 60
