@@ -28,22 +28,27 @@ SERVED_MODEL_NAME = "zai-org/GLM-5.2-FP8"
 MODEL_REVISION = "a0b55e88465d1a06afece97bc8d6b366aff39089"   # pinned, matches the AEP
 WEIGHTS_MOUNT = "/weights"
 
-# Hardware tier + weights come from .app_tier.json, which setup_app.sh writes from its --gpu/--n-gpus
-# flags right before `modal deploy` (modal deploy can't forward CLI args to this module, and we keep
-# operational knobs out of env vars — only .env creds live in the environment). Defaults = the AEP's
-# 8×B200. model_path default = the repo id (SGLang downloads into the mounted HF-cache volume on the
-# first cold start, persists after); set it to a pre-populated volume path to skip the ~700 GB pull.
+# Hardware tier + weights come from .cache/app_tier.json, which setup_app.sh writes from its
+# --gpu/--n-gpus flags right before `modal deploy` (modal deploy can't forward CLI args to this
+# module, and we keep operational knobs out of env vars — only .env creds live in the environment).
+# ⚠️ This module runs TWICE: locally at `modal deploy` (where the file IS present) AND inside the
+# container at runtime (where it is NOT — .cache/ isn't shipped). So we read the file at deploy, then
+# BAKE the resolved values into the image env (see IMAGE_ENV) so the runtime read picks them up from
+# os.environ — hence os.environ wins over the file below. Without this, serve()'s SERVER_ARGS default
+# to B200 in-container and emit Blackwell-only args (fp8 KV + trtllm) on non-Blackwell GPUs → crash.
+# Defaults = the AEP's 8×B200. model_path default = the repo id (SGLang downloads into the mounted
+# HF-cache volume on the first cold start, persists after); point it at a pre-populated volume to skip.
 _tier = {}
 try:
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "app_tier.json")) as _f:
         _tier = json.load(_f)
 except Exception:
     pass
-GPU_TYPE = _tier.get("gpu_type") or "B200"
-N_GPUS = int(_tier.get("n_gpus") or 8)
+GPU_TYPE = os.environ.get("APP_GPU_TYPE") or _tier.get("gpu_type") or "B200"
+N_GPUS = int(os.environ.get("APP_N_GPUS") or _tier.get("n_gpus") or 8)
 GPU = f"{GPU_TYPE}:{N_GPUS}"
-WEIGHTS_VOLUME = _tier.get("weights_volume") or "glm-app-hf-cache"
-MODEL_PATH = _tier.get("model_path") or SERVED_MODEL_NAME
+WEIGHTS_VOLUME = os.environ.get("APP_WEIGHTS_VOLUME") or _tier.get("weights_volume") or "glm-app-hf-cache"
+MODEL_PATH = os.environ.get("APP_MODEL_PATH") or _tier.get("model_path") or SERVED_MODEL_NAME
 
 PORT = 8000
 MINUTES = 60
@@ -62,6 +67,13 @@ IMAGE_ENV = {
     "SGLANG_TIMEOUT_KEEP_ALIVE": "300",
     "TORCHINDUCTOR_COMPILE_THREADS": "1",
     "HF_HOME": WEIGHTS_MOUNT,          # cache/download weights into the mounted volume
+    # Bake the deploy-time tier into the image so the in-container runtime read (above) sees it —
+    # .cache/app_tier.json is NOT shipped to the container, so without this the runtime silently
+    # defaults to B200 and emits Blackwell-only server args on the wrong GPU. These win over the file.
+    "APP_GPU_TYPE": GPU_TYPE,
+    "APP_N_GPUS": str(N_GPUS),
+    "APP_WEIGHTS_VOLUME": WEIGHTS_VOLUME,
+    "APP_MODEL_PATH": MODEL_PATH,
 }
 
 # SGLang server args. Most are the live AEP's GLM-5.2 config, but a few are ARCHITECTURE-SPECIFIC.
