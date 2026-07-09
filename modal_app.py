@@ -64,12 +64,14 @@ IMAGE_ENV = {
     "HF_HOME": WEIGHTS_MOUNT,          # cache/download weights into the mounted volume
 }
 
-# SGLang server args. Most are the live AEP's GLM-5.2 config, but the DSA attention sub-backends are
-# ARCHITECTURE-SPECIFIC. The AEP runs on Blackwell (B200) and forces the `trtllm` FMHA runner, which
-# is Blackwell-only — on Hopper (H200/H100) it dies during cuda-graph capture with
-# "TllmGenFmhaRunner ... Unsupported architecture". So we branch: Blackwell keeps the AEP-proven
-# trtllm backends; Hopper drops them and lets SGLang pick Hopper-safe DSA sub-backends, with a
-# smaller cuda-graph and mem-fraction. ⚠️ The Hopper path is best-effort — smoke-test each tier.
+# SGLang server args. Most are the live AEP's GLM-5.2 config, but a few are ARCHITECTURE-SPECIFIC.
+# The AEP runs on Blackwell (B200); its DSA attention uses the `trtllm` FMHA runner, which is
+# Blackwell-only — on Hopper (H200/H100) it dies during cuda-graph capture ("TllmGenFmhaRunner ...
+# Unsupported architecture"). CRUCIAL: SGLang auto-selects the trtllm DSA backend *because the KV
+# cache is fp8_e4m3* ("Set DSA backends for fp8_e4m3 KV Cache: prefill=trtllm, decode=trtllm") — so
+# just omitting --dsa-*-backend is NOT enough; we must also drop fp8 KV on Hopper so SGLang can pick
+# a Hopper-safe DSA backend. Blackwell keeps the AEP-proven fp8-KV + trtllm config.
+# ⚠️ Best-effort — smoke-test Hopper; if SGLang still forces trtllm, GLM-5.2 DSA may be Blackwell-only here.
 _BLACKWELL = GPU_TYPE.upper().startswith(("B", "GB"))   # B200 / B100 / GB200
 
 SERVER_ARGS = [
@@ -81,7 +83,6 @@ SERVER_ARGS = [
     "--attention-backend", "dsa",         # GLM-5.2 needs DSA / MLA
     "--dsa-topk-backend", "sgl-kernel",
     "--fp8-gemm-backend", "deep_gemm",     # DeepGEMM runs on both Hopper and Blackwell
-    "--kv-cache-dtype", "fp8_e4m3",
     "--reasoning-parser", "glm45",
     "--speculative-algorithm", "EAGLE",
     "--speculative-eagle-topk", "1",
@@ -90,8 +91,9 @@ SERVER_ARGS = [
     "--tool-call-parser", "glm47",
     "--trust-remote-code",
 ]
-if _BLACKWELL:   # AEP-proven Blackwell config
-    SERVER_ARGS += ["--dsa-decode-backend", "trtllm", "--dsa-prefill-backend", "trtllm",
+if _BLACKWELL:   # AEP-proven Blackwell config: fp8 KV + trtllm DSA
+    SERVER_ARGS += ["--kv-cache-dtype", "fp8_e4m3",
+                    "--dsa-decode-backend", "trtllm", "--dsa-prefill-backend", "trtllm",
                     "--cuda-graph-max-bs", "32", "--mem-fraction-static", "0.85"]
 else:            # Hopper (H200/H100): NO trtllm FMHA (Blackwell-only) — let SGLang choose sub-backends
     SERVER_ARGS += ["--cuda-graph-max-bs", "16", "--mem-fraction-static", "0.80"]
