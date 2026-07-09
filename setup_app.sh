@@ -22,8 +22,9 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 
 APP_NAME="glm-5-2-app-benchmark"     # must match modal.App(name=...) in modal_app.py
-CACHE="$PWD/.app_endpoint"           # remembered URL, for idempotent reuse
-TIER="$PWD/.app_tier.json"           # hardware tier read by modal_app.py at deploy (replaces APP_* env)
+mkdir -p "$PWD/.cache"               # generated state lives under .cache/ (already gitignored)
+CACHE="$PWD/.cache/app_endpoint"     # remembered URL, for idempotent reuse
+TIER="$PWD/.cache/app_tier.json"     # hardware tier read by modal_app.py at deploy (replaces APP_* env)
 
 # Write the tier ONLY if it changed, so its mtime marks the last real tier change (drives redeploy).
 desired="$(printf '{"gpu_type":"%s","n_gpus":%s,"weights_volume":"%s","model_path":"%s"}' \

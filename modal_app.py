@@ -35,7 +35,7 @@ WEIGHTS_MOUNT = "/weights"
 # first cold start, persists after); set it to a pre-populated volume path to skip the ~700 GB pull.
 _tier = {}
 try:
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".app_tier.json")) as _f:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "app_tier.json")) as _f:
         _tier = json.load(_f)
 except Exception:
     pass
@@ -64,20 +64,24 @@ IMAGE_ENV = {
     "HF_HOME": WEIGHTS_MOUNT,          # cache/download weights into the mounted volume
 }
 
-# SGLang server args, copied from the live AEP (the correct GLM-5.2-FP8 flags).
+# SGLang server args. Most are the live AEP's GLM-5.2 config, but the DSA attention sub-backends are
+# ARCHITECTURE-SPECIFIC. The AEP runs on Blackwell (B200) and forces the `trtllm` FMHA runner, which
+# is Blackwell-only — on Hopper (H200/H100) it dies during cuda-graph capture with
+# "TllmGenFmhaRunner ... Unsupported architecture". So we branch: Blackwell keeps the AEP-proven
+# trtllm backends; Hopper drops them and lets SGLang pick Hopper-safe DSA sub-backends, with a
+# smaller cuda-graph and mem-fraction. ⚠️ The Hopper path is best-effort — smoke-test each tier.
+_BLACKWELL = GPU_TYPE.upper().startswith(("B", "GB"))   # B200 / B100 / GB200
+
 SERVER_ARGS = [
     "--served-model-name", SERVED_MODEL_NAME,
     "--chunked-prefill-size", "32768",
-    "--cuda-graph-max-bs", "32",
     "--disable-cuda-graph-padding",
     "--disable-piecewise-cuda-graph",
     "--dist-timeout", "3600",
-    "--dsa-decode-backend", "trtllm",
-    "--dsa-prefill-backend", "trtllm",
+    "--attention-backend", "dsa",         # GLM-5.2 needs DSA / MLA
     "--dsa-topk-backend", "sgl-kernel",
-    "--fp8-gemm-backend", "deep_gemm",
+    "--fp8-gemm-backend", "deep_gemm",     # DeepGEMM runs on both Hopper and Blackwell
     "--kv-cache-dtype", "fp8_e4m3",
-    "--mem-fraction-static", "0.85",
     "--reasoning-parser", "glm45",
     "--speculative-algorithm", "EAGLE",
     "--speculative-eagle-topk", "1",
@@ -86,6 +90,11 @@ SERVER_ARGS = [
     "--tool-call-parser", "glm47",
     "--trust-remote-code",
 ]
+if _BLACKWELL:   # AEP-proven Blackwell config
+    SERVER_ARGS += ["--dsa-decode-backend", "trtllm", "--dsa-prefill-backend", "trtllm",
+                    "--cuda-graph-max-bs", "32", "--mem-fraction-static", "0.85"]
+else:            # Hopper (H200/H100): NO trtllm FMHA (Blackwell-only) — let SGLang choose sub-backends
+    SERVER_ARGS += ["--cuda-graph-max-bs", "16", "--mem-fraction-static", "0.80"]
 
 image = (
     modal.Image.from_registry(SGLANG_IMAGE_TAG)
