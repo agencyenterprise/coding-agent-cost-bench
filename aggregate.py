@@ -19,9 +19,11 @@ import csv
 import json
 import os
 import statistics
+import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 
 # Defaults; overridden by --results-dir / --rate in main(). (judge.py imports this module and sets
 # these two attributes directly, so they stay module-level rather than env-driven.)
@@ -258,6 +260,32 @@ def resolve_outdir(outdir):
     return os.path.join(RESULTS_DIR, os.path.basename(outdir)) if outdir else outdir
 
 
+def _report_file_url(path):
+    return Path(path).resolve().as_uri()
+
+
+def _terminal_link(text, url):
+    """OSC 8 hyperlink — clickable in Cursor/VS Code/iTerm/etc."""
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
+def _open_report(path):
+    url = _report_file_url(path)
+    if sys.platform == "darwin":
+        subprocess.run(["open", url], check=False)
+    else:
+        import webbrowser
+        webbrowser.open(url)
+
+
+def _emit_report_ready(path, *, open_browser=False):
+    abs_path = str(Path(path).resolve())
+    url = _report_file_url(abs_path)
+    print(f"✓ report: {_terminal_link(abs_path, url)}")
+    if open_browser:
+        _open_report(abs_path)
+
+
 def main():
     import argparse
     global RESULTS_DIR, GPU_HOURLY_USD
@@ -265,8 +293,18 @@ def main():
     ap.add_argument("--results-dir", default=RESULTS_DIR, help="results dir to read/write [%(default)s]")
     ap.add_argument("--rate", type=float, default=GPU_HOURLY_USD,
                     help="GLM GPU $/hr for this hardware tier [%(default)s]")
+    ap.add_argument("--open", action=argparse.BooleanOptionalAction, default=None,
+                    help="open report.html in the default browser "
+                         "(default: on macOS in an interactive terminal)")
     args = ap.parse_args()
     RESULTS_DIR, GPU_HOURLY_USD = args.results_dir, args.rate
+    open_report = args.open
+    if open_report is None:
+        open_report = (
+            sys.platform == "darwin"
+            and sys.stdout.isatty()
+            and not os.environ.get("CI")
+        )
 
     manifest = os.path.join(RESULTS_DIR, "manifest.csv")
     if not os.path.exists(manifest):
@@ -421,8 +459,8 @@ def main():
             w.writerows(arows)
     if rows:
         path = _html_report(RESULTS_DIR, rows, arows, eff, crows, overall_peak, detailed)
-        print(f"✓ report: {path}")
-        print(f"  data:   {RESULTS_DIR}/summary.csv  arms.csv  complexity.csv  results_detailed.csv")
+        _emit_report_ready(path, open_browser=open_report)
+        print(f"  data:   {RESULTS_DIR}/summary.csv  {RESULTS_DIR}/arms.csv  {RESULTS_DIR}/complexity.csv  {RESULTS_DIR}/results_detailed.csv")
 
 
 def _mname(model):
@@ -430,7 +468,8 @@ def _mname(model):
     Harness is shown in its own column, so it's not folded in here."""
     prov, last = model.split("/")[0], model.split("/")[-1]
     name = {"claude-opus-4-8": "Claude Opus 4.8"}.get(last, last.replace("-FP8", " FP8"))
-    tag = {"modal-nothink": " (no thinking)", "modal-high": " (high reasoning)"}.get(prov, "")
+    tag = {"modal": " (max reasoning)", "modal-nothink": " (no thinking)",
+           "modal-high": " (high reasoning)"}.get(prov, "")
     return name + tag
 
 
@@ -440,11 +479,9 @@ def _tshort(t):
 
 
 def _arm_label(harness, model):
-    """Concise arm name for the rollup: default / high / no-think for the GLM reasoning tiers,
-    and '<model> · <harness>' for API models."""
-    prov = model.split("/")[0]
+    """Arm name for rollup tables: full model name (incl. reasoning tier) for GLM; '<model> · <harness>' for API."""
     if is_self_hosted(model):
-        return {"modal": "default", "modal-high": "high", "modal-nothink": "no-think"}.get(prov, prov)
+        return _mname(model)
     return f"{_mname(model)} · {harness_disp(harness)}"
 
 
@@ -462,6 +499,59 @@ def peak_concurrency(ivals):
         cur += d
         peak = max(peak, cur)
     return peak
+
+
+def avg_concurrency(ivals):
+    """Time-weighted mean concurrent generation windows over the union wall-clock."""
+    ev = []
+    for s, e in ivals:
+        if s is None or e is None or e < s:
+            continue
+        ev.append((s, 1)); ev.append((e, -1))
+    if not ev:
+        return 0.0
+    ev.sort(key=lambda x: (x[0], x[1]))
+    cur = 0
+    prev = None
+    area = 0.0
+    for t, d in ev:
+        if prev is not None and cur > 0 and t > prev:
+            area += cur * (t - prev)
+        cur += d
+        prev = t
+    wall = union_seconds(ivals)
+    return area / wall if wall else 0.0
+
+
+def packing_factor(ivals):
+    """Effective parallelism = Σ step durations ÷ union(gen wall-clock)."""
+    total = sum(e - s for s, e in ivals if s is not None and e is not None and e >= s)
+    wall = union_seconds(ivals)
+    return total / wall if wall else 0.0
+
+
+def concurrency_scenarios(sole, avg, peak, packing, packed):
+    """$/task ladder: sole → projected at lower conc → measured packed at observed packing."""
+    if sole in ("", None):
+        return []
+    sole = float(sole)
+    out = [{"label": "Sole (1 task)", "conc": 1, "cost": sole, "basis": "measured"}]
+    if avg:
+        avg = float(avg)
+        half = avg / 2
+        out.append({"label": "Half avg", "conc": round(half, 1),
+                    "cost": round(sole / half, 4), "basis": "projected"})
+        out.append({"label": "Avg observed", "conc": round(avg, 1),
+                    "cost": round(sole / avg, 4), "basis": "projected"})
+    if peak not in ("", None):
+        pk = float(peak)
+        out.append({"label": "Peak instant (spike)", "conc": pk,
+                    "cost": round(sole / pk, 4), "basis": "projected"})
+    if packing and packed not in ("", None):
+        out.append({"label": "Packed (this run)", "conc": round(float(packing), 1),
+                    "cost": packed, "basis": "measured",
+                    "peak": round(float(peak), 1) if peak not in ("", None) else ""})
+    return out
 
 
 def family_rollup(rows):
@@ -500,10 +590,13 @@ def arm_rollup(rows, genivs=None):
     for (harness, model) in order:
         g = groups[(harness, model)]
         sh = is_self_hosted(model)
-        peak = ""
+        peak = avg_c = packing = ""
         if genivs is not None and sh:
             ivs = [iv for k, v in genivs.items() if k[0] == harness and k[1] == model for iv in v]
-            peak = peak_concurrency(ivs) if ivs else ""
+            if ivs:
+                peak = peak_concurrency(ivs)
+                avg_c = round(avg_concurrency(ivs), 1)
+                packing = round(packing_factor(ivs), 1)
         runs = sum(int(r["runs"]) for r in g)
         passes = sum(int(r["passes"]) for r in g)
         srates = [float(r["success_rate"]) for r in g if r.get("success_rate") not in ("", None)]
@@ -521,6 +614,8 @@ def arm_rollup(rows, genivs=None):
             "avg_tokens_out": round(out_tok / runs) if runs else 0,
             "gpu_s_per_run": round(gpu_s / runs, 1) if (sh and gpu_s and runs) else "",
             "peak_concurrency": peak,
+            "avg_concurrency": avg_c,
+            "packing_factor": packing,
             "cost_sole_per_task": sole,
             # API models are per-token (concurrency-invariant), so packed == sole for them.
             "cost_packed_per_task": (round(wall_total / passes, 4) if (sh and passes) else sole),
@@ -630,6 +725,39 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     cost_tbl = tbl([("Harness", 0), ("Model", 0), ("Prompt", 0), ("Success", 0),
                     ("$/task sole", 1), ("$/task packed", 1), ("Avg time", 1)],
                    [f"<tr>{c}</tr>" for c in cost_body])
+
+    # ---- concurrency ladder (sole → projected → measured packed) ----
+    conc_html = ""
+    glm_arms = [a for a in arms if is_self_hosted(a["model"]) and a.get("cost_sole_per_task") != ""]
+    if glm_arms:
+        conc_body = []
+        for a in glm_arms:
+            for i, sc in enumerate(concurrency_scenarios(
+                    a["cost_sole_per_task"], a.get("avg_concurrency"), a.get("peak_concurrency"),
+                    a.get("packing_factor"), a.get("cost_packed_per_task"))):
+                arm_cell = (f"<td><b>{esc(a['arm'])}</b></td>" if i == 0
+                            else "<td class='mut'>↳</td>")
+                tag = ('<span class="tag">measured</span>' if sc["basis"] == "measured"
+                       else '<span class="tag">projected</span>')
+                cls = ' class="best"' if sc["label"] == "Packed (this run)" else ""
+                peak_note = ""
+                if sc.get("peak"):
+                    peak_note = f' <span class=mut>(peak {sc["peak"]:.0f}×)</span>'
+                conc_body.append(
+                    f"<tr{cls}>{arm_cell}<td>{esc(sc['label'])}</td>"
+                    f"<td class='num'>{sc['conc']:.1f}×{peak_note}</td>"
+                    f"<td class='num'>{usd(sc['cost'])}</td><td>{tag}</td></tr>")
+        conc_html = (
+            "<h2>Concurrency cost ladder</h2>"
+            "<p class=note>How <b>$/task</b> changes as you pack concurrent tasks onto the GPU. "
+            "<b>Concurrent tasks</b> = generation requests in flight (from opencode step_start→step_finish logs). "
+            "<b>Peak instant</b> is the max at any single moment (a spike); <b>avg / packed</b> is the "
+            "time-weighted mean over the run (~what the endpoint actually sustained). "
+            "<b>Sole</b> and <b>Packed</b> costs are measured; middle rows project ideal linear packing "
+            "(<code>sole ÷ N</code>). Measured packed is usually higher than projected at the same avg "
+            "because failures, idle gaps between steps, and contention burn GPU time without delivering passes.</p>"
+            + tbl([("Arm", 0), ("Scenario", 0), ("Concurrent tasks", 1), ("$/task", 1), ("Basis", 0)],
+                  conc_body))
 
     # ---- efficiency ----
     order = [(r["harness"], r["model"], r["prompt"]) for r in rows]
@@ -757,9 +885,8 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 f"<td>{verdict}</td></tr>")
         be_html = ("<h2>Break-even concurrency vs Opus</h2>"
                    f"<p class=note>Opus is per-token (flat ${opus_flat:.3f}/task). A GLM arm matches it once it runs "
-                   "≈ (GLM sole ÷ Opus) tasks in parallel. ⚠️ This assumes <i>ideal</i> linear packing — the real "
-                   "break-even is higher because the endpoint is throughput-bound. A concurrency sweep is needed to "
-                   "measure the true crossover; this is the lower bound.</p>"
+                   "≈ (GLM sole ÷ Opus) tasks in parallel. ⚠️ Assumes <i>ideal</i> linear packing — real "
+                   "break-even is higher once you account for idle time and contention.</p>"
                    + tbl([("Arm", 0), ("GLM $/task (alone)", 1), ("Opus flat $", 1),
                           ("Break-even conc.", 1), ("Peak this run", 1), ("Status", 0)], be_body))
 
@@ -771,6 +898,12 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         chips.append(("Best $/task packed", usd(best_packed)))
     if overall_peak:
         chips.append(("Peak concurrency", str(overall_peak)))
+    avg_overall = ""
+    if glm_arms:
+        avgs = [_f(a.get("avg_concurrency")) for a in glm_arms if _f(a.get("avg_concurrency"))]
+        if avgs:
+            avg_overall = round(sum(avgs) / len(avgs), 1)
+            chips.append(("Avg concurrency", f"{avg_overall}×"))
     chips_html = "".join(f'<div class="chip"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for k, v in chips)
     gen = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -784,13 +917,14 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 
 <h2>Reasoning / Arm Rollup</h2>
 <p class="note">One row per arm, pooled across prompt versions (success = range over v1–v3). Costs are
-passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually <b>high</b>
-&mdash; decisive, fewest turns &mdash; while <b>default</b> over-thinks and <b>no-think</b> thrashes. <b>Peak conc</b> = max simultaneous generation requests
-this arm drove{f' (overall peak this run: {overall_peak})' if overall_peak else ''}.</p>
+passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually
+<b>high reasoning</b> &mdash; decisive, fewest turns &mdash; while <b>max reasoning</b> over-thinks and
+<b>no thinking</b> thrashes. <b>Peak conc</b> = max simultaneous generation requests at one instant;
+<b>avg conc</b> = sustained mean over the run{f' (overall peak this run: {overall_peak})' if overall_peak else ''}.</p>
 {arm_tbl}
 
 <h2>Success by Model</h2>
-<p class="note">GLM broken out by reasoning arm — default / high / no-think — with each API model separate.
+<p class="note">GLM-5.2 broken out by reasoning tier (max / high / no thinking), with each API model separate.
 The headline per-variant success comparison.</p>
 {fam_tbl}
 
@@ -799,6 +933,8 @@ The headline per-variant success comparison.</p>
 $/task <b>packed</b> = endpoint filled with concurrent tasks (union of generation ÷ tasks). The gap is
 the concurrency lever; API models are per-token, so the columns match for them.</p>
 {cost_tbl}
+
+{conc_html}
 
 <h2>Efficiency</h2>
 <p class="note">Steps, tool calls, and output tokens per arm; “vs GLM” compares output volume to the GLM baseline.</p>
