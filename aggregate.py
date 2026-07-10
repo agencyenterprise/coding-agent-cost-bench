@@ -877,8 +877,45 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             mbody.append("<tr>" + "".join(tds) + "</tr>")
         matrix_html = ("<h2>Per-task × arm pass matrix</h2>"
                        "<p class=note>Where each arm actually passes or fails (pooled across runs). "
-                       "Green = all pass, red = all fail, amber = partial. This is where GLM's capability gap vs Opus shows.</p>"
+                       "Green means all pass, red means all fail, amber means partial. This is where GLM's "
+                       "capability gap versus Opus shows up.</p>"
                        + tbl(head, mbody))
+
+    # ---- per-task cost & result: every (task, arm) on its own line ----
+    pertask_html = ""
+    if detailed:
+        agg, order_pt = {}, []
+        for d in detailed:
+            k = (d["task"], d["harness"], d["model"])
+            if k not in agg:
+                agg[k] = {"runs": 0, "passes": 0, "cost": [], "dur": []}
+                order_pt.append(k)
+            e = agg[k]
+            e["runs"] += 1
+            e["passes"] += 1 if d["status"] == "pass" else 0
+            c, du = _f(d.get("cost_usd")), _f(d.get("duration_s"))
+            if c is not None:
+                e["cost"].append(c)
+            if du is not None:
+                e["dur"].append(du)
+        order_pt.sort(key=lambda k: (_tshort(k[0]), _arm_label(k[1], k[2])))
+        ptbody = []
+        for k in order_pt:
+            task, h, m = k
+            e = agg[k]
+            cost = statistics.mean(e["cost"]) if e["cost"] else None
+            dur = statistics.mean(e["dur"]) if e["dur"] else None
+            bg = ("var(--best)" if e["passes"] == e["runs"]
+                  else ("rgba(220,38,38,.16)" if e["passes"] == 0 else "rgba(217,119,6,.16)"))
+            ptbody.append(
+                f"<tr><td>{esc(_tshort(task))}</td><td>{esc(_arm_label(h, m))}</td>"
+                f"<td class='num' style='background:{bg}'>{e['passes']}/{e['runs']}</td>"
+                f"<td class='num'>{usd(cost) if cost is not None else '·'}</td>"
+                f"<td class='num'>{(str(round(dur))+'s') if dur is not None else '·'}</td></tr>")
+        pertask_html = ("<h2>Per-task cost &amp; result</h2>"
+                        "<p class=note>Every task and arm on its own line: whether it passed and what it cost "
+                        "(sole, one task at a time). Good for spotting which tasks are expensive or flaky.</p>"
+                        + tbl([("Task", 0), ("Arm", 0), ("Passed", 1), ("$/task", 1), ("Avg time", 1)], ptbody))
 
     # ---- #4 break-even concurrency vs Opus (derived from measured sole cost) ----
     be_html = ""
@@ -1081,6 +1118,7 @@ the concurrency lever; API models are per-token, so the columns match for them.<
 {perf_html}
 {be_html}
 {matrix_html}
+{pertask_html}
 {diff_html}
 {glossary_html}
 <footer>Self-contained report written by aggregate.py. Numbers mirror summary.csv / arms.csv / complexity.csv.</footer>
