@@ -764,7 +764,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         if a["success_min"] == "":
             return "·"
         lo, hi = a["success_min"], a["success_max"]
-        return f"{lo:.0%}" if lo == hi else f"{lo:.0%}–{hi:.0%}"
+        return f"{lo:.0%}" if lo == hi else f"{lo:.0%} to {hi:.0%}"
 
     def sbar(frac, label, extra=""):
         f = 0 if frac in ("", None) else float(frac)
@@ -1017,7 +1017,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                         "<b>Billed $</b> is your real number: the actual endpoint bill split across calls by "
                         "concurrency, so a task only carries the seconds it was truly generating and parallel "
                         "tasks share the seconds they overlapped (Opus is per-token, so its billed = its API cost). "
-                        "<b>$/task sole</b> is the modeled cost if that task had the GPU entirely to itself — the "
+                        "<b>$/task sole</b> is the modeled cost if that task had the GPU entirely to itself, the "
                         "ceiling you'd pay with zero batching. A blank means unknown, usually a run that timed out "
                         "before it could report. The cheapest setup that passed is highlighted green per task.</p>"
                         + tbl([("Task", 0), ("Setup", 0), ("Passed", 1), ("Billed $", 1),
@@ -1054,7 +1054,14 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     ntask = len({r["task"] for r in crows}) if crows else 0
     best_packed = min((a["cost_packed_per_task"] for a in sh), default="")
     n_setups = len(rows)                                  # one row per setup (harness + model + reasoning)
-    n_runs = sum(int(r["runs"]) for r in rows)            # total individual runs = setups × tasks
+    n_runs = sum(int(r["runs"]) for r in rows)            # total individual runs
+    # describe the run shape correctly for any --runs value (1 run each, or N times each)
+    _per = round(n_runs / (n_setups * ntask)) if (n_setups and ntask) else 0
+    if n_setups and ntask and _per >= 1 and n_setups * ntask * _per == n_runs:
+        _each = "once each" if _per == 1 else f"{_per} times each"
+        run_structure = f"{n_setups} setups solving {ntask} tasks {_each}, {n_runs} runs in all"
+    else:
+        run_structure = f"{n_setups} setups across {ntask} tasks, {n_runs} runs in all"
     chips = [("Setups", str(n_setups)), ("Tasks", str(ntask))]
     if billing.get("cost"):
         chips.append(("Actual AEP bill (run window)", f"${billing['cost']:.2f}"))
@@ -1089,9 +1096,9 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             f"the hour the run spanned.</p>"
             f"<p class=note><b>${billing['cost']:.2f}</b> billed over <b>{_wh:.2f} h</b>"
             + (f" (≈ <b>${_eh:.2f}/hr</b> while up)." if _eh else ".")
-            + " That splits into <b>${:.2f} spent actively generating</b> — attributed to individual calls in the "
-              "<i>Billed $</i> column below, each second shared among whatever was running at that moment — and "
-              "<b>${:.2f} warm but not generating</b> (gaps between steps, local tool time, and the cold-start / "
+            + " That splits into <b>${:.2f} spent actively generating</b>, attributed to individual calls in the "
+              "<i>Billed $</i> column below (each second shared among whatever was running at that moment), plus "
+              "<b>${:.2f} warm but not generating</b> (gaps between steps, local tool time, and the cold-start and "
               "scale-down edges). You pay for the endpoint being up, not per request, so the warm slice is the "
               "price of holding the GPUs ready.</p>".format(_active, _idle))
 
@@ -1113,7 +1120,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                      "model (Opus) it's just the per-token cost."),
         ("Actively generating vs warm", "Of the endpoint bill, the part spent while some call was generating "
                                         "(split into the Billed $ column) versus the part where the endpoint was "
-                                        "up but idle — between-step gaps, local tool time, and the cold-start / "
+                                        "up but idle: between-step gaps, local tool time, and the cold-start and "
                                         "scale-down edges. You pay for the GPUs being held, not per request."),
         ("$/task sole", "What one task costs running alone on the GPU: its own generation seconds times the "
                         "hourly rate. A modeled ceiling with zero batching, not what you were billed."),
@@ -1167,8 +1174,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 not leaderboard scores. A task only counts when the project's own tests go from failing to passing.
 Every model gets the same {nswe} real GitHub issues (from SWE-bench Verified{_proj}, ranging from
 15-minute fixes to multi-hour ones). The only thing we change is the model and how it's configured.
-Each <b>setup</b> — a harness + model + reasoning effort — solves all {ntask} tasks once, so this run is
-{n_setups} setups × {ntask} tasks = {n_runs} runs in all.</p>
+Each <b>setup</b> is a harness, a model, and a reasoning effort. This run is {run_structure}.</p>
 <div class="tw" style="padding:16px 10px">
 <svg viewBox="0 0 960 200" role="img" aria-label="Pipeline: generate locally, then grade in the cloud"
      style="width:100%;height:auto;max-width:960px;display:block;margin:auto">
