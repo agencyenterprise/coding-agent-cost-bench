@@ -180,8 +180,12 @@ def claude_stats(outdir):
             m["tout"] = m["out"] = int(u.get("output_tokens", 0) or 0)
             m["cost"] = float(ev.get("total_cost_usd", 0) or 0)
             m["call_s"] = (ev.get("duration_api_ms", 0) or 0) / 1000.0
+            m["has_result"] = True                     # Claude Code reports cost/usage only here
             if ev.get("num_turns"):
                 m["steps"] = ev["num_turns"]
+    # A killed/timed-out run never emits `result`, so cost/usage are unknown, not zero.
+    if not m.get("has_result"):
+        m["cost"] = None
     return m
 
 
@@ -386,14 +390,17 @@ def main():
             ts["pass"] += 1 if row["status"] == "pass" else 0
             if is_self_hosted(m):
                 ts["api_cost"] += gpu_call_cost(cs)
-            run_cost = round(gpu_call_cost(cs), 4) if is_self_hosted(m) else round(ccost, 6)
+            if is_self_hosted(m):
+                run_cost = round(gpu_call_cost(cs), 4) if cs else ""
+            else:                                       # ccost is None for a Claude run killed before
+                run_cost = round(ccost, 6) if ccost is not None else ""   # its result event (cost unknown)
             detailed.append({
                 "task": row["task"], "harness": h, "model": m, "prompt": pv, "run": row["run"],
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
                 "call_s": round(cs, 2),
                 "tokens_in": tin, "tokens_out": tout,
-                "cost_usd": run_cost if (run_cost or not is_self_hosted(m)) else "",
+                "cost_usd": run_cost,
                 "cost_basis": basis,
             })
     if not detailed:
@@ -900,6 +907,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 e["dur"].append(du)
         order_pt.sort(key=lambda k: (_tshort(k[0]), _arm_label(k[1], k[2])))
         ptbody = []
+        last_task = None
         for k in order_pt:
             task, h, m = k
             e = agg[k]
@@ -907,14 +915,22 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             dur = statistics.mean(e["dur"]) if e["dur"] else None
             bg = ("var(--best)" if e["passes"] == e["runs"]
                   else ("rgba(220,38,38,.16)" if e["passes"] == 0 else "rgba(217,119,6,.16)"))
+            tname = _tshort(task)
+            new_group = tname != last_task
+            # show the task name only on its first row, and rule off the top of each new group
+            task_cell = f"<b>{esc(tname)}</b>" if new_group else ""
+            tr = ("<tr style='border-top:2px solid var(--border)'>"
+                  if (new_group and last_task is not None) else "<tr>")
+            last_task = tname
             ptbody.append(
-                f"<tr><td>{esc(_tshort(task))}</td><td>{esc(_arm_label(h, m))}</td>"
+                f"{tr}<td>{task_cell}</td><td>{esc(_arm_label(h, m))}</td>"
                 f"<td class='num' style='background:{bg}'>{e['passes']}/{e['runs']}</td>"
                 f"<td class='num'>{usd(cost) if cost is not None else '·'}</td>"
                 f"<td class='num'>{(str(round(dur))+'s') if dur is not None else '·'}</td></tr>")
         pertask_html = ("<h2>Per-task cost &amp; result</h2>"
-                        "<p class=note>Every task and arm on its own line: whether it passed and what it cost "
-                        "(sole, one task at a time). Good for spotting which tasks are expensive or flaky.</p>"
+                        "<p class=note>Every task, with its arms grouped underneath: whether each passed and what "
+                        "it cost (sole, one task at a time). A blank $/task means the cost is unknown, usually a "
+                        "run that timed out before it could report.</p>"
                         + tbl([("Task", 0), ("Arm", 0), ("Passed", 1), ("$/task", 1), ("Avg time", 1)], ptbody))
 
     # ---- #4 break-even concurrency vs Opus (derived from measured sole cost) ----
@@ -947,8 +963,11 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 
     ntask = len({r["task"] for r in crows}) if crows else 0
     best_packed = min((a["cost_packed_per_task"] for a in sh), default="")
-    chips = [("GPU rate", f"${GPU_HOURLY_USD:.2f}/hr"), ("Arms", str(len(arms))),
-             ("Tasks", str(ntask))]
+    n_harness = len({r["harness"] for r in rows})
+    n_model = len({r["model"].split("/")[-1] for r in rows})
+    n_runs = sum(int(r["runs"]) for r in rows)
+    chips = [("Harnesses", str(n_harness)), ("Models", str(n_model)),
+             ("Tasks", str(ntask)), ("Runs", str(n_runs))]
     if best_packed != "":
         chips.append(("Best $/task packed", usd(best_packed)))
     if overall_peak:
