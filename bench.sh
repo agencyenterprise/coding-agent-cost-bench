@@ -4,11 +4,12 @@
 # (opencode). Writes results/manifest.csv + per-run logs, then aggregate.py ->
 # results/summary.csv (cost per successful task).
 #
-# A task is a dir under tasks/<name>/:
-#   prompt.v1.txt (required) baseline instruction; prompt.v2.txt (optional) shaped variant
-#   verify.sh    (optional) exit 0 = success; runs in the work dir
+# A task is a dir under tasks/<name>/ (a SWE-bench Verified instance — see SWEBENCH.md):
+#   prompt.v1.txt (required) baseline instruction; prompt.v2/v3.txt (optional) variants
 #   setup.sh     (optional) runs in the work dir BEFORE the agent; gets $TASK_REPO_SRC
-#   one source:  repo/ (self-contained) | repo.path (local git) | repo.git (<url> [ref])
+#   test.patch   marks a SWE task; grading is Modal-exclusive (grade_swe.sh -> resolved.json)
+#   repo.git     the source: <url> [ref], cloned fresh per run
+# Grading is on Modal only — there is no host verify.sh.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -279,17 +280,11 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
   done
   dur="$(python3 -c "print(f'{$end - $start:.2f}')")"
 
-  # SWE-bench tasks (they carry a test.patch) are graded on Modal via the official per-instance Docker
-  # image (grade_swe.sh -> resolved.json); host verify.sh is redundant there — and its per-run
-  # `pip install` wastes disk/time and fails anyway on old-Python repos. So skip it for SWE tasks and
-  # let resolved.json set the real pass/fail at aggregate time. Non-SWE tasks still use verify.sh.
+  # Grading is Modal-exclusive: the agent's patch is graded in the instance's official SWE-bench
+  # Docker image (grade_swe.sh -> swe_eval_modal.py -> resolved.json), and aggregate.py uses that for
+  # pass/fail. bench.sh only GENERATES + records the patch; there is no host verify. status stays n/a
+  # here and is filled from resolved.json at aggregate time (run with --swe-grade / ./grade_swe.sh).
   status="n/a"
-  if [ -f "$task_abs/test.patch" ]; then
-    : # graded on Modal (resolved.json) — see grade_swe.sh / swe_eval_modal.py
-  elif [ -f "$task_abs/verify.sh" ]; then
-    ( cd "$work" && PATH="$agent_path" bash "$task_abs/verify.sh" ) > "$outdir/verify.log" 2>&1 \
-      && status="pass" || status="fail"
-  fi
 
   case "$harness" in
     claude) : ;;   # cost/usage/efficiency come from output.log (stream-json), parsed by aggregate.py
