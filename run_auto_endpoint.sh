@@ -2,17 +2,17 @@
 # Benchmark GLM-5.2 on Modal's managed AUTO-ENDPOINT (AEP).
 #
 # Ensures the AEP is up (setup_auto_endpoint.sh, idempotent), points the harness at it via
-# MODAL_ENDPOINT, and runs the standard bench into results/aep/. Pair with run_app.sh (same harness,
-# a hand-rolled App) for an apples-to-apples AEP-vs-App comparison.
+# MODAL_ENDPOINT, and runs the standard bench into results/aep-<timestamp>/. Pair with run_app.sh
+# (same harness, a hand-rolled App) for an apples-to-apples AEP-vs-App comparison.
 #
-#   ./run_auto_endpoint.sh                 # default matrix -> results/aep/
+#   ./run_auto_endpoint.sh                 # default matrix -> results/aep-<timestamp>/
 #   ./run_auto_endpoint.sh --runs 3        # any bench.sh flag passes through
 #   ./run_auto_endpoint.sh --skip-setup    # assume the AEP is already up
 #   ./run_auto_endpoint.sh --judge gemini  # also build report.md after the run
 #
 # Flags (rest passes to bench.sh):
 #   --rate USD_PER_HR  $/hr for the cost calc     (default 50.7 — the AEP's 8×B200)
-#   --results-dir DIR  results location           (default results/aep)
+#   --results-dir DIR  results location           (default results/aep-<timestamp>)
 #   --judge M          build report.md with judge M after the run
 #   --skip-setup       don't run setup_auto_endpoint.sh (assume warm)
 # (MODAL_* creds come from .env.)
@@ -20,7 +20,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 [ -f .env ] && { set -a; source .env; set +a; }
 
-RATE="50.7"; RDIR="$PWD/results/aep"; JUDGE=""; SKIP_SETUP=""
+RATE="50.7"; RDIR=""; JUDGE=""; SKIP_SETUP=""
 _pass=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -33,6 +33,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 set -- ${_pass[@]+"${_pass[@]}"}
+
+RDIR="${RDIR:-$PWD/results/aep-$(date +%Y-%m-%dT%H%M%S)}"
 
 : "${MODAL_ENDPOINT:?set MODAL_ENDPOINT in .env (the AEP /v1 URL), or run ./setup_auto_endpoint.sh first}"
 

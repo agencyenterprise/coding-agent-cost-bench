@@ -35,30 +35,17 @@ Re-run `./setup_auto_endpoint.sh` anytime; it only creates what's missing (`--he
 ```bash
 ./bench.sh                 # default matrix, auto-aggregates
 ```
-Each entry is **`harness:model-ref`** (`harness` = `opencode` | `claude` | `deepclaude`). The same
-model can appear under different harnesses — that's the point (model isolation vs real-world). Default matrix:
+Each entry is **`harness:model-ref`** (`harness` = `opencode` | `claude`). The same model can appear
+under different harnesses — that's the point (model isolation vs real-world). Default matrix:
 ```
 opencode:modal/zai-org/GLM-5.2-FP8           # GLM, default (max) reasoning
 opencode:modal-high/zai-org/GLM-5.2-FP8      # GLM, reasoning_effort=high  (~45% fewer tokens)
 opencode:modal-nothink/zai-org/GLM-5.2-FP8   # GLM, reasoning off
-deepclaude:modal/zai-org/GLM-5.2-FP8         # GLM inside Claude Code's loop (via LiteLLM proxy)
-deepclaude:modal-high/zai-org/GLM-5.2-FP8    # deepclaude + reasoning_effort=high
-deepclaude:modal-nothink/zai-org/GLM-5.2-FP8 # deepclaude + thinking off
-opencode:anthropic/claude-opus-4-8           # Opus, same harness as GLM (clean comparison)
 claude:anthropic/claude-opus-4-8             # Opus in Claude Code's own CLI (real-world product comp)
 ```
 The three `modal*` arms are a **reasoning sweep** (max / high / off) — bench.sh starts one
 `reasoning_proxy.py` per proxied tier (own port) so they run concurrently on the one endpoint.
 `claude:` needs the `claude` CLI on PATH; it can't serve GLM/GPT/Gemini (Anthropic-only).
-
-**`deepclaude:`** runs GLM-5.2 *inside Claude Code's own agent loop* — the [deepclaude](https://github.com/aattaran/deepclaude)
-trick, so you can measure the Claude Code product driving a non-Anthropic model. Claude Code only
-speaks the Anthropic Messages API (`/v1/messages`), while the Modal GLM endpoint is OpenAI-compatible,
-so run_bench starts a **LiteLLM proxy** that translates between them and injects the `Modal-Key/Secret`
-headers. Claude Code is pointed at it via `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` +
-`ANTHROPIC_DEFAULT_*_MODEL` (same env vars `deepclaude.sh` sets). Use a `modal/` ref so its cost is
-GPU-billed (wall-clock), not mispriced as an Anthropic model. Needs the `claude` CLI, `litellm`, and
-`MODAL_*` — all present in the Docker image.
 
 Common flags:
 

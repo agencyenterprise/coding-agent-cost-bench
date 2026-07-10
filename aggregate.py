@@ -287,24 +287,19 @@ def main():
                 continue   # skip malformed/partial lines (e.g. a stray write that corrupted the manifest)
             row["outdir"] = resolve_outdir(row["outdir"])
             h = row.get("harness") or harness_of(m)   # harness recorded by bench.sh (fallback for old data)
+            if h == "deepclaude":
+                continue   # deepclaude harness removed — drop any lingering rows from older runs
+            if h == "opencode" and not is_self_hosted(m):
+                continue   # Opus·opencode arm dropped — opencode now drives only the GLM (modal*) arms
             pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
             key = (h, m, pv)
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
                 intervals[key].append((s, e))
-            if h in ("claude", "deepclaude"):          # both parse Claude Code's stream-json output.log
+            if h == "claude":                          # parses Claude Code's stream-json output.log
                 pm = claude_stats(row.get("outdir", ""))
                 tin, tout, ccost, cs = pm["tin"], pm["tout"], pm["cost"], pm["call_s"]
-                # deepclaude runs GLM on Modal -> GPU wall-clock $ (like the opencode modal arms), NOT
-                # Claude Code's self-reported price (which is meaningless for a non-Anthropic model).
-                basis = "gpu_calls" if is_self_hosted(m) else "claude_code"
-                if is_self_hosted(m) and s is not None and cs:
-                    # Claude Code's stream-json has no step_start/step_finish like opencode's log, so
-                    # there's no per-turn generation window to union — only one number per run
-                    # (duration_api_ms). Anchor it at the run's start as a single [s, s+cs] block; this
-                    # still correctly detects overlap with other runs sharing the GLM endpoint, which is
-                    # all the union is used for (packed cost / idle time).
-                    genivs[key].append((s, s + cs))
+                basis = "claude_code"                   # Anthropic model, Claude Code reports its own $
             else:
                 tin, tout, ccost = load_usage(row.get("outdir", ""))
                 pm = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log
@@ -416,15 +411,18 @@ def main():
             w = csv.DictWriter(f, fieldnames=list(crows[0].keys()))
             w.writeheader()
             w.writerows(crows)
-    arows = arm_rollup(rows)
+    arows = arm_rollup(rows, genivs)
+    all_gen = [iv for k, v in genivs.items() if is_self_hosted(k[1]) for iv in v]
+    overall_peak = peak_concurrency(all_gen) if all_gen else None
     if arows:
         with open(os.path.join(RESULTS_DIR, "arms.csv"), "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=list(arows[0].keys()))
             w.writeheader()
             w.writerows(arows)
     if rows:
-        _html_report(RESULTS_DIR, rows, arows, eff, crows)
-    _print_report(RESULTS_DIR, rows, eff, crows, intervals)
+        path = _html_report(RESULTS_DIR, rows, arows, eff, crows, overall_peak, detailed)
+        print(f"✓ report: {path}")
+        print(f"  data:   {RESULTS_DIR}/summary.csv  arms.csv  complexity.csv  results_detailed.csv")
 
 
 def _mname(model):
@@ -443,20 +441,54 @@ def _tshort(t):
 
 def _arm_label(harness, model):
     """Concise arm name for the rollup: default / high / no-think for the GLM reasoning tiers,
-    'deepclaude' for that harness, and '<model> · <harness>' for API models."""
+    and '<model> · <harness>' for API models."""
     prov = model.split("/")[0]
     if is_self_hosted(model):
-        reason = {"modal": "default", "modal-high": "high", "modal-nothink": "no-think"}.get(prov, prov)
-        if harness == "deepclaude":
-            return "deepclaude" if reason == "default" else f"deepclaude ({reason})"
-        return reason
+        return {"modal": "default", "modal-high": "high", "modal-nothink": "no-think"}.get(prov, prov)
     return f"{_mname(model)} · {harness_disp(harness)}"
 
 
-def arm_rollup(rows):
+def peak_concurrency(ivals):
+    """Max number of generation windows open at the same instant (sweep line over start/end
+    events). Touching intervals (one ends exactly as the next starts) do NOT count as overlapping."""
+    ev = []
+    for s, e in ivals:
+        if s is None or e is None or e < s:
+            continue
+        ev.append((s, 1)); ev.append((e, -1))
+    ev.sort(key=lambda x: (x[0], x[1]))     # at equal timestamps process ends (-1) before starts (+1)
+    cur = peak = 0
+    for _, d in ev:
+        cur += d
+        peak = max(peak, cur)
+    return peak
+
+
+def family_rollup(rows):
+    """One row per reasoning arm — GLM broken out by default / high / no-think (NOT pooled), each API
+    model separate — pooled passes/runs per arm. The headline per-variant success comparison."""
+    groups, order = {}, []
+    for r in rows:
+        label = _arm_label(r["harness"], r["model"])
+        if label not in groups:
+            groups[label] = []
+            order.append(label)
+        groups[label].append(r)
+    out = []
+    for label in order:
+        g = groups[label]
+        runs = sum(int(r["runs"]) for r in g)
+        passes = sum(int(r["passes"]) for r in g)
+        out.append({"family": label, "runs": runs, "passes": passes,
+                    "success_rate": round(passes / runs, 3) if runs else ""})
+    return out
+
+
+def arm_rollup(rows, genivs=None):
     """Collapse the per-(arm, prompt) summary rows into one row per arm (harness+model), pooling
     across prompt versions. Success is a min–max range over the versions; costs are passes-weighted
-    so they match the per-prompt 'Cost per Completed Task' table. Ordering follows `rows`."""
+    so they match the per-prompt 'Cost per Completed Task' table. If genivs (per-(h,m,prompt) list of
+    absolute gen windows) is passed, also report peak concurrent generation requests. Order follows `rows`."""
     groups, order = {}, []
     for r in rows:
         k = (r["harness"], r["model"])
@@ -468,6 +500,10 @@ def arm_rollup(rows):
     for (harness, model) in order:
         g = groups[(harness, model)]
         sh = is_self_hosted(model)
+        peak = ""
+        if genivs is not None and sh:
+            ivs = [iv for k, v in genivs.items() if k[0] == harness and k[1] == model for iv in v]
+            peak = peak_concurrency(ivs) if ivs else ""
         runs = sum(int(r["runs"]) for r in g)
         passes = sum(int(r["passes"]) for r in g)
         srates = [float(r["success_rate"]) for r in g if r.get("success_rate") not in ("", None)]
@@ -484,6 +520,7 @@ def arm_rollup(rows):
             "success_pooled": round(passes / runs, 3) if runs else "",
             "avg_tokens_out": round(out_tok / runs) if runs else 0,
             "gpu_s_per_run": round(gpu_s / runs, 1) if (sh and gpu_s and runs) else "",
+            "peak_concurrency": peak,
             "cost_sole_per_task": sole,
             # API models are per-token (concurrency-invariant), so packed == sole for them.
             "cost_packed_per_task": (round(wall_total / passes, 4) if (sh and passes) else sole),
@@ -526,7 +563,7 @@ a{color:var(--accent)}
 """
 
 
-def _html_report(results_dir, rows, arms, eff, crows):
+def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detailed=None):
     """Write a self-contained report.html (inline CSS, light/dark aware) next to the CSVs."""
     import html as _h
     from datetime import datetime
@@ -562,14 +599,24 @@ def _html_report(results_dir, rows, arms, eff, crows):
     for a in arms:
         cls = ' class="best"' if a["arm"] == best else ""
         gps = f'{a["gpu_s_per_run"]:.0f}s' if a["gpu_s_per_run"] != "" else "—"
+        pk = a.get("peak_concurrency", "")
         arm_body.append(
             f"<tr{cls}><td><b>{esc(a['arm'])}</b></td>"
             f"<td>{sbar(a['success_pooled'], rng(a), f'<span class=mut>{a['passes']}/{a['runs']}</span>')}</td>"
             f"<td class='num'>{a['avg_tokens_out']:,}</td><td class='num'>{gps}</td>"
+            f"<td class='num'>{pk if pk != '' else '—'}</td>"
             f"<td class='num'>{usd(a['cost_sole_per_task'])}</td>"
             f"<td class='num'>{usd(a['cost_packed_per_task'])}</td></tr>")
     arm_tbl = tbl([("Arm", 0), ("Success", 0), ("Out Tok", 1), ("GPU-s/run", 1),
-                   ("$/task sole", 1), ("$/task packed", 1)], arm_body)
+                   ("Peak conc", 1), ("$/task sole", 1), ("$/task packed", 1)], arm_body)
+
+    # ---- success by model family (GLM all variants vs API models) ----
+    fam = family_rollup(rows)
+    fam_body = [f"<tr><td><b>{esc(x['family'])}</b></td><td class='num'>{x['passes']}</td>"
+                f"<td class='num'>{x['runs']}</td>"
+                f"<td>{sbar(x['success_rate'], f'{x['success_rate']:.1%}' if x['success_rate']!='' else '—')}</td></tr>"
+                for x in fam]
+    fam_tbl = tbl([("Model / arm", 0), ("Passed", 1), ("Total", 1), ("Success", 0)], fam_body)
 
     # ---- cost per completed task (per harness/model/prompt) ----
     cost_body = [
@@ -610,12 +657,120 @@ def _html_report(results_dir, rows, arms, eff, crows):
                      + tbl([("Task", 0), ("Prompt", 0), ("Source", 0), ("Diff", 1), ("Pass", 1),
                             ("API $", 1), ("Avg steps", 1)], diff_body))
 
+    # ---- #1 cost spread + #2 throughput (per arm, from per-run `detailed`) ----
+    perf_html = ""
+    if detailed:
+        costs, gen_s, out_tok = {}, {}, {}
+        for d in detailed:
+            k = (d["harness"], d["model"])
+            c, cs, to = _f(d.get("cost_usd")), _f(d.get("call_s")), _f(d.get("tokens_out"))
+            if c is not None:
+                costs.setdefault(k, []).append(c)
+            gen_s[k] = gen_s.get(k, 0.0) + (cs or 0)
+            out_tok[k] = out_tok.get(k, 0.0) + (to or 0)
+        eff_arm = {}
+        for (h, m, pv), v in eff.items():
+            e = eff_arm.setdefault((h, m), {"steps": 0, "tools": 0})
+            e["steps"] += v["steps"]; e["tools"] += v["tools"]
+
+        def q(vals, p):
+            if not vals:
+                return None
+            s = sorted(vals)
+            return s[min(len(s) - 1, int(round(p * (len(s) - 1))))]
+        perf_body = []
+        for a in arms:
+            k = (a["harness"], a["model"])
+            cv = costs.get(k, [])
+            med, p90 = q(cv, 0.5), q(cv, 0.9)
+            sd = statistics.pstdev(cv) if len(cv) > 1 else 0.0
+            tps = (out_tok.get(k, 0) / gen_s[k]) if gen_s.get(k) else None
+            e = eff_arm.get(k, {"steps": 0, "tools": 0})
+            rn = a["runs"] or 1
+            perf_body.append(
+                f"<tr><td><b>{esc(a['arm'])}</b></td>"
+                f"<td class='num'>{usd(med) if med is not None else '—'}</td>"
+                f"<td class='num'>{usd(p90) if p90 is not None else '—'}</td>"
+                f"<td class='num'>{('$%.3f' % sd)}</td>"
+                f"<td class='num'>{('%.0f' % tps) if tps else '—'}</td>"
+                f"<td class='num'>{e['steps']/rn:.1f}</td>"
+                f"<td class='num'>{e['tools']/rn:.1f}</td></tr>")
+        perf_html = ("<h2>Cost spread &amp; throughput</h2>"
+                     "<p class=note>Per-run cost distribution (median / p90 / std-dev) shows how <i>reliable</i> "
+                     "each arm's cost is, not just the mean. Tok/s = output tokens ÷ generation seconds; "
+                     "steps &amp; tools per run show <i>why</i> — fewer turns = cheaper. (Reasoning-vs-answer token "
+                     "split isn't in the logs; total output in the rollup above is the proxy.)</p>"
+                     + tbl([("Arm", 0), ("Median $", 1), ("p90 $", 1), ("Std-dev $", 1),
+                            ("Tok/s", 1), ("Steps/run", 1), ("Tools/run", 1)], perf_body))
+
+    # ---- #3 per-task × arm pass-rate matrix (from `detailed`) ----
+    matrix_html = ""
+    if detailed:
+        arm_seq = [a["arm"] for a in arms]
+        cell = {}
+        tasks_seen = []
+        for d in detailed:
+            t = _tshort(d["task"])
+            if t not in tasks_seen:
+                tasks_seen.append(t)
+            al = _arm_label(d["harness"], d["model"])
+            pt = cell.setdefault((t, al), [0, 0])
+            pt[1] += 1
+            pt[0] += 1 if d["status"] == "pass" else 0
+        head = [("Task", 0)] + [(a, 1) for a in arm_seq]
+        mbody = []
+        for t in tasks_seen:
+            tds = [f"<td>{esc(t)}</td>"]
+            for al in arm_seq:
+                p, tot = cell.get((t, al), [0, 0])
+                if tot == 0:
+                    tds.append("<td class='num mut'>·</td>")
+                    continue
+                r = p / tot
+                bg = "var(--best)" if r == 1 else ("rgba(220,38,38,.16)" if r == 0 else "rgba(217,119,6,.16)")
+                tds.append(f"<td class='num' style='background:{bg}'>{p}/{tot}</td>")
+            mbody.append("<tr>" + "".join(tds) + "</tr>")
+        matrix_html = ("<h2>Per-task × arm pass matrix</h2>"
+                       "<p class=note>Where each arm actually passes or fails (pooled across prompt versions + runs). "
+                       "Green = all pass, red = all fail, amber = partial. This is where GLM's capability gap vs Opus shows.</p>"
+                       + tbl(head, mbody))
+
+    # ---- #4 break-even concurrency vs Opus (derived from measured sole cost) ----
+    be_html = ""
+    api_sole = [a["cost_sole_per_task"] for a in arms
+                if not is_self_hosted(a["model"]) and a["cost_sole_per_task"] != ""]
+    opus_flat = min(api_sole) if api_sole else None
+    if opus_flat:
+        be_body = []
+        for a in arms:
+            if not is_self_hosted(a["model"]) or a["cost_sole_per_task"] == "":
+                continue
+            nstar = a["cost_sole_per_task"] / opus_flat
+            pk = a.get("peak_concurrency", "")
+            verdict = ("✓ reached" if (pk != "" and pk >= nstar) else "not yet")
+            be_body.append(
+                f"<tr><td><b>{esc(a['arm'])}</b></td>"
+                f"<td class='num'>{usd(a['cost_sole_per_task'])}</td>"
+                f"<td class='num'>{usd(opus_flat)}</td>"
+                f"<td class='num'>{nstar:.1f}×</td>"
+                f"<td class='num'>{pk if pk != '' else '—'}</td>"
+                f"<td>{verdict}</td></tr>")
+        be_html = ("<h2>Break-even concurrency vs Opus</h2>"
+                   f"<p class=note>Opus is per-token (flat ${opus_flat:.3f}/task). A GLM arm matches it once it runs "
+                   "≈ (GLM sole ÷ Opus) tasks in parallel. ⚠️ This assumes <i>ideal</i> linear packing — the real "
+                   "break-even is higher because the endpoint is throughput-bound. A concurrency sweep is needed to "
+                   "measure the true crossover; this is the lower bound.</p>"
+                   + tbl([("Arm", 0), ("GLM $/task (alone)", 1), ("Opus flat $", 1),
+                          ("Break-even conc.", 1), ("Peak this run", 1), ("Status", 0)], be_body))
+
     ntask = len({r["task"] for r in crows}) if crows else 0
     best_packed = min((a["cost_packed_per_task"] for a in sh), default="")
     chips = [("GPU rate", f"${GPU_HOURLY_USD:.2f}/hr"), ("Arms", str(len(arms))),
              ("Tasks", str(ntask)), ("Prompt versions", str(len({r["prompt"] for r in rows})))]
     if best_packed != "":
         chips.append(("Best $/task packed", usd(best_packed)))
+    if overall_peak:
+        chips.append(("Peak concurrency", str(overall_peak)))
     chips_html = "".join(f'<div class="chip"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for k, v in chips)
     gen = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -630,8 +785,14 @@ def _html_report(results_dir, rows, arms, eff, crows):
 <h2>Reasoning / Arm Rollup</h2>
 <p class="note">One row per arm, pooled across prompt versions (success = range over v1–v3). Costs are
 passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually <b>high</b>
-&mdash; decisive, fewest turns &mdash; while <b>default</b> over-thinks and <b>no-think</b> thrashes.</p>
+&mdash; decisive, fewest turns &mdash; while <b>default</b> over-thinks and <b>no-think</b> thrashes. <b>Peak conc</b> = max simultaneous generation requests
+this arm drove{f' (overall peak this run: {overall_peak})' if overall_peak else ''}.</p>
 {arm_tbl}
+
+<h2>Success by Model</h2>
+<p class="note">GLM broken out by reasoning arm — default / high / no-think — with each API model separate.
+The headline per-variant success comparison.</p>
+{fam_tbl}
 
 <h2>Cost per Completed Task</h2>
 <p class="note">$/task <b>sole</b> = one task alone on the GPU (its own generation time × rate).
@@ -643,6 +804,9 @@ the concurrency lever; API models are per-token, so the columns match for them.<
 <p class="note">Steps, tool calls, and output tokens per arm; “vs GLM” compares output volume to the GLM baseline.</p>
 {eff_tbl}
 
+{perf_html}
+{be_html}
+{matrix_html}
 {diff_html}
 <footer>Self-contained report written by aggregate.py. Numbers mirror summary.csv / arms.csv / complexity.csv.</footer>
 </div></body></html>"""
@@ -650,116 +814,6 @@ the concurrency lever; API models are per-token, so the columns match for them.<
     with open(path, "w") as f:
         f.write(doc)
     return path
-
-
-def _print_report(results_dir, rows, eff, crows, intervals):
-    W = 79
-    def rule(ch):
-        print(ch * W)
-    def section(title):
-        print("\n" + "═" * W + f"\n {title}\n" + "═" * W)
-    def table(headers, body):
-        cols = list(zip(*([headers] + body)))
-        w = [max(len(str(c)) for c in col) for col in cols]
-        pad = lambda vals: "  " + "  ".join(str(v).ljust(w[j]) for j, v in enumerate(vals))
-        print(pad(headers))
-        print("  " + "  ".join("─" * w[j] for j in range(len(headers))))
-        for b in body:
-            print(pad(b))
-
-    rule("─"); print(" Coding Agent Cost Bench"); rule("─")
-    print("\n✓ Results written:")
-    print(f"    {results_dir}/report.html   ← open in a browser")
-    print(f"    {results_dir}/results_detailed.csv")
-    print(f"    {results_dir}/summary.csv")
-    print(f"    {results_dir}/arms.csv")
-    print("\nGPU pricing")
-    print(f"  GLM endpoint: ${GPU_HOURLY_USD:.2f}/hr (charged only while generating)")
-
-    def usd(v):
-        return f"${v:.3f}" if v not in ("", None) else "—"
-
-    def packed_per_task(r):
-        # GLM: shared-endpoint wall-clock (gen union) ÷ passes. API/Claude: per-token = same as sole.
-        if is_self_hosted(r["model"]):
-            w, p = _f(r.get("gpu_wall_cost_usd")), r.get("passes")
-            return w / p if (w and p) else ""
-        return r.get("cost_per_successful_task")
-
-    section("Cost per Completed Task")
-    print()
-    table(["Harness", "Model", "Prompt", "Success", "$/task sole", "$/task packed", "Avg Time"],
-          [[harness_disp(r["harness"]), _mname(r["model"]), r["prompt"],
-            f"{r['passes']}/{r['runs']}  {r['success_rate']:.0%}",
-            usd(r["cost_per_successful_task"]), usd(packed_per_task(r)),
-            f"{r['avg_duration_s']:.0f}s" if r["avg_duration_s"] != "" else "—"] for r in rows])
-    print("\n  $/task sole   = one task alone on the 8×B200 — its own generation time × rate (no packing).")
-    print("  $/task packed = endpoint filled with concurrent tasks — union of generation ÷ tasks.")
-    print(f"  Both count generation only (step_start→step_finish × ${GPU_HOURLY_USD:.2f}/hr, no local scripts).")
-    print("  The gap between them is the concurrency lever. API models are per-token (concurrency-")
-    print("  invariant), so both columns match for Claude/GPT/Gemini.")
-    print("  Prompt = task prompt version (v1 baseline / v2 shaped / v3 control; see PROMPTS.md).")
-
-    arms = arm_rollup(rows)
-    if arms:
-        def _rng(a):
-            if a["success_min"] == "":
-                return "—"
-            lo, hi = a["success_min"], a["success_max"]
-            return f"{lo:.0%}" if lo == hi else f"{lo:.0%}–{hi:.0%}"
-        section("Reasoning / Arm Rollup")
-        print("  (one row per arm, pooled across prompt versions; success = range over v1–v3)\n")
-        table(["Arm", "Success", "Out Tok", "GPU-s/run", "$/task sole", "$/task packed"],
-              [[a["arm"], f"{a['passes']}/{a['runs']} ({_rng(a)})", f"{a['avg_tokens_out']:,}",
-                f"{a['gpu_s_per_run']:.0f}s" if a["gpu_s_per_run"] != "" else "—",
-                usd(a["cost_sole_per_task"]), usd(a["cost_packed_per_task"])] for a in arms])
-        print("\n  Out Tok = mean output tokens/run; GPU-s/run = generation seconds/run (self-hosted only).")
-        print("  Costs are passes-weighted, so they match the per-prompt table above. The usual sweet")
-        print("  spot is 'high': decisive → fewest turns → cheapest per completed task, while 'default'")
-        print("  over-thinks (most output) and 'no-think' thrashes (more turns than high).")
-
-    st = [r for r in rows if is_self_hosted(r["model"]) and r["cost_per_successful_task"] != "" and r["passes"]]
-    if st:
-        section("If you own the GPU (single tenant)")
-        for r in st:
-            gen = r["cost_per_successful_task"]
-            idle_c = (_f(r["idle_s"]) or 0) / 3600 * GPU_HOURLY_USD / r["passes"]
-            print(f"\n {_mname(r['model'])}  [{harness_disp(r['harness'])} · prompt {r['prompt']}]")
-            print(f"   generation   ${gen:.3f}")
-            print(f" + idle tax     ${idle_c:.3f}")
-            print(" " + "─" * 22)
-            print(f" = total        ${gen + idle_c:.3f} / task")
-        print("\n  Idle tax = endpoint up but not generating (local pip/pytest/git) while this arm runs alone.")
-        print("  Recoverable by packing the endpoint with concurrent work — other users/tasks filling the gaps.")
-
-    if st:
-        section("GPU Utilization")
-        print()
-        table(["Harness", "Model", "Prompt", "Uptime", "Generating", "Idle"],
-              [[harness_disp(r["harness"]), _mname(r["model"]), r["prompt"],
-                f"{_f(r['active_s']) or 0:.0f} s", f"{_f(r['gen_s']) or 0:.0f} s",
-                f"{_f(r['idle_s']) or 0:.0f} s"] for r in st])
-
-    order = [(r["harness"], r["model"], r["prompt"]) for r in rows]
-    glm = next((k for k in order if is_self_hosted(k[1])), None)
-    glm_out = eff[glm]["out"] if glm else 0
-    section("Efficiency")
-    print()
-    table(["Harness", "Model", "Prompt", "Steps", "Tools", "Output Tok", "vs GLM"],
-          [[harness_disp(k[0]), _mname(k[1]), k[2], f"{eff[k]['steps']:,}", f"{eff[k]['tools']:,}", f"{eff[k]['out']:,}",
-            f"{eff[k]['out'] / glm_out:.2f}×" if glm and glm_out else "—"] for k in order])
-
-    if crows:
-        section("Task Difficulty")
-        print()
-        table(["Task", "Prompt", "Source", "Diff", "Pass", "API $", "Avg Steps"],
-              [[_tshort(r["task"]), r["prompt"], r["source"], f"{r['complexity']}", f"{r['pass_rate']:.0%}",
-                usd(r.get("avg_api_cost_usd")),
-                f"{r['avg_steps']:.0f}"] for r in crows])
-        print("\n  Diff is per (task, prompt version): v1 (terse/raw) usually demands more than v2 (shaped).")
-        print("  Source: swe-bench = real dataset issue (embedded verbatim) in our template; "
-              "invented = task + prompt we wrote.")
-    print()
 
 
 if __name__ == "__main__":

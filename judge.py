@@ -217,11 +217,15 @@ def efficiency(rows):
     for r in rows:
         m = r["model"]
         h = r.get("harness") or aggregate.harness_of(m)
+        if h == "deepclaude":
+            continue   # deepclaude harness removed — drop any lingering rows from older runs
+        if h == "opencode" and not aggregate.is_self_hosted(m):
+            continue   # Opus·opencode arm dropped — opencode now drives only the GLM (modal*) arms
         pv = r.get("prompt", "v1")
         key = (h, m, pv)
         a = agg.setdefault(key, {"runs": 0, "steps": 0, "tools": 0, "out": 0})
         a["runs"] += 1
-        st = aggregate.claude_stats(r.get("outdir", "")) if h in ("claude", "deepclaude") \
+        st = aggregate.claude_stats(r.get("outdir", "")) if h == "claude" \
             else aggregate.log_stats(r.get("outdir", ""))
         a["steps"] += st["steps"]
         a["tools"] += st["tools"]

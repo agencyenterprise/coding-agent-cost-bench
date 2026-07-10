@@ -10,11 +10,11 @@
 #   ./run_app.sh --tier 8xH200 --judge gemini       # also build report.md after
 #
 # Flags (everything else passes through to bench.sh, e.g. --task / --prompts):
-#   --tier NAME        8xB200 | 8xH200 | 4xB200  (sets gpu+count+rate; explicit flags override)
+#   --tier NAME        8xB200 | 8xH200       (sets gpu+count+rate; explicit flags override)
 #   --gpu TYPE         GPU type              (default B200)
 #   --n-gpus N         GPU count / TP size   (default 8)
 #   --rate USD_PER_HR  $/hr for this tier's cost calc  (default 50.7)
-#   --results-dir DIR  results location      (default results/app-<N>x<GPU>)
+#   --results-dir DIR  results location      (default results/app-<N>x<GPU>-<timestamp>)
 #   --app-endpoint URL bench an already-deployed App; skips setup_app.sh
 #   --force-deploy     redeploy even if unchanged
 #   --judge M          build report.md with judge M (gemini|openai|anthropic|glm) after the run
@@ -45,12 +45,11 @@ set -- ${_pass[@]+"${_pass[@]}"}
 case "$TIER" in
   8xB200) GPU="${GPU:-B200}"; NGPUS="${NGPUS:-8}"; RATE="${RATE:-50.7}";;
   8xH200) GPU="${GPU:-H200}"; NGPUS="${NGPUS:-8}"; RATE="${RATE:-36.6}";;
-  4xB200) GPU="${GPU:-B200}"; NGPUS="${NGPUS:-4}"; RATE="${RATE:-25.3}";;
   "")     ;;
-  *)      echo "unknown --tier '$TIER' (8xB200|8xH200|4xB200)" >&2; exit 1;;
+  *)      echo "unknown --tier '$TIER' (8xB200|8xH200)" >&2; exit 1;;
 esac
 GPU="${GPU:-B200}"; NGPUS="${NGPUS:-8}"; RATE="${RATE:-50.7}"
-RDIR="${RDIR:-$PWD/results/app-${NGPUS}x${GPU}}"
+RDIR="${RDIR:-$PWD/results/app-${NGPUS}x${GPU}-$(date +%Y-%m-%dT%H%M%S)}"
 
 # provision the App at this tier (setup_app.sh writes .app_tier.json + deploys), unless an endpoint
 # was given. MODAL_ENDPOINT is an allowed .env var — the harness reads it to reach the endpoint.
