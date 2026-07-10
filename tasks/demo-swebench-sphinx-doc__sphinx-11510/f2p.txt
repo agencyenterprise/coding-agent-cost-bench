@@ -1,0 +1,2 @@
+tests/test_directive_other.py::test_include_source_read_event
+tests/test_directive_other.py::test_include_source_read_event_nested_includes

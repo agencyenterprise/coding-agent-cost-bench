@@ -15,12 +15,13 @@
 #   --results-dir DIR  results location           (default results/aep-<timestamp>)
 #   --judge M          build report.md with judge M after the run
 #   --skip-setup       don't run setup_auto_endpoint.sh (assume warm)
+#   --swe-grade        after the run, grade SWE tasks on Modal (official Docker) -> resolved.json
 # (MODAL_* creds come from .env.)
 set -euo pipefail
 cd "$(dirname "$0")"
 [ -f .env ] && { set -a; source .env; set +a; }
 
-RATE="50.7"; RDIR=""; JUDGE=""; SKIP_SETUP=""
+RATE="50.7"; RDIR=""; JUDGE=""; SKIP_SETUP=""; SWE_GRADE=""
 _pass=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,7 +29,8 @@ while [ $# -gt 0 ]; do
     --results-dir) RDIR="$2"; shift 2;;
     --judge)       JUDGE="$2"; shift 2;;
     --skip-setup)  SKIP_SETUP=1; shift;;
-    -h|--help)     sed -n '2,18p' "$0"; exit 0;;
+    --swe-grade)   SWE_GRADE=1; shift;;
+    -h|--help)     sed -n '2,19p' "$0"; exit 0;;
     *)             _pass+=("$1"); shift;;
   esac
 done
@@ -44,4 +46,5 @@ mkdir -p "$RDIR"
 echo ">>> AEP benchmark  (endpoint: $MODAL_ENDPOINT @ \$${RATE}/hr)  ->  $RDIR"
 ./bench.sh --results-dir "$RDIR" --rate "$RATE" "$@"
 [ -n "$JUDGE" ] && python3 judge.py --judge "$JUDGE" --results-dir "$RDIR" --rate "$RATE"
+[ -n "$SWE_GRADE" ] && ./grade_swe.sh --results-dir "$RDIR"
 echo ">>> AEP done -> $RDIR/  (run 'python3 judge.py --judge <m> --results-dir $RDIR' for report.md)"

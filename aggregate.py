@@ -71,6 +71,13 @@ def task_source(name, tasks_dir="tasks"):
     return "swe-bench" if "swebench" in name.lower() else "invented"
 
 
+def _pred_key(harness, model, prompt, run):
+    """Reconstruct make_predictions.py's model_name_or_path for one run, so a SWE task's pass/fail
+    can be looked up in resolved.json (the official Modal Docker grade)."""
+    safe = model.replace("/", "_").replace(":", "_").replace(" ", "_")
+    return f"{harness}__{safe}__{prompt}__run{run}"
+
+
 def load_usage(outdir):
     """(tokens_in, tokens_out, ccusage_cost) for a run from its usage.json.
 
@@ -311,6 +318,16 @@ def main():
         sys.exit(f"no manifest at {manifest} — run bench.sh first "
                  f"(or point --results-dir at the right folder, e.g. --results-dir results/app-8xH200)")
 
+    # Official SWE-bench grade (from grade_swe.sh / swe_eval_modal.py). If present, it overrides the
+    # host verify.sh pass/fail for SWE tasks — Docker-in-the-right-Python is the trustworthy signal.
+    resolved_map = {}
+    _rp = os.path.join(RESULTS_DIR, "resolved.json")
+    if os.path.exists(_rp):
+        try:
+            resolved_map = json.load(open(_rp))
+        except Exception:
+            resolved_map = {}
+
     detailed = []
     # arm = (harness, model, prompt-version): the prompt version is a first-class sweep dimension,
     # so v1 vs v2 of the SAME (harness, model) are separate rows and never pooled together.
@@ -330,6 +347,11 @@ def main():
             if h == "opencode" and not is_self_hosted(m):
                 continue   # Opus·opencode arm dropped — opencode now drives only the GLM (modal*) arms
             pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
+            if resolved_map and "swebench" in row["task"].lower():
+                iid = row["task"].split("demo-swebench-", 1)[-1]      # task dir -> SWE instance id
+                rk = f"{iid}::{_pred_key(h, m, pv, row.get('run'))}"  # composite: same mnp recurs per instance
+                if rk in resolved_map:                 # official Docker grade wins over host verify
+                    row["status"] = "pass" if resolved_map[rk].get("resolved") else "fail"
             key = (h, m, pv)
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:

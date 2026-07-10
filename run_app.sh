@@ -18,12 +18,13 @@
 #   --app-endpoint URL bench an already-deployed App; skips setup_app.sh
 #   --force-deploy     redeploy even if unchanged
 #   --judge M          build report.md with judge M (gemini|openai|anthropic|glm) after the run
+#   --swe-grade        after the run, grade SWE tasks on Modal (official Docker) -> resolved.json
 # (Secrets — MODAL_*, HF_TOKEN — still come from .env; only knobs are flags.)
 set -euo pipefail
 cd "$(dirname "$0")"
 [ -f .env ] && { set -a; source .env; set +a; }
 
-GPU=""; NGPUS=""; RATE=""; RDIR=""; APP_ENDPOINT=""; FORCE=""; JUDGE=""; TIER=""
+GPU=""; NGPUS=""; RATE=""; RDIR=""; APP_ENDPOINT=""; FORCE=""; JUDGE=""; TIER=""; SWE_GRADE=""
 _pass=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -35,7 +36,8 @@ while [ $# -gt 0 ]; do
     --app-endpoint) APP_ENDPOINT="$2"; shift 2;;
     --force-deploy) FORCE=1; shift;;
     --judge)        JUDGE="$2"; shift 2;;
-    -h|--help)      sed -n '2,20p' "$0"; exit 0;;
+    --swe-grade)    SWE_GRADE=1; shift;;
+    -h|--help)      sed -n '2,21p' "$0"; exit 0;;
     *)              _pass+=("$1"); shift;;
   esac
 done
@@ -62,4 +64,5 @@ mkdir -p "$RDIR"
 echo ">>> App benchmark  (${NGPUS}x${GPU} @ \$${RATE}/hr, endpoint: $MODAL_ENDPOINT)  ->  $RDIR"
 ./bench.sh --results-dir "$RDIR" --rate "$RATE" "$@"
 [ -n "$JUDGE" ] && python3 judge.py --judge "$JUDGE" --results-dir "$RDIR" --rate "$RATE"
+[ -n "$SWE_GRADE" ] && ./grade_swe.sh --results-dir "$RDIR"
 echo ">>> App done -> $RDIR/  (compare tiers by their cost_per_successful_task)"
