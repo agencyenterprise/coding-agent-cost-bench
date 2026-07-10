@@ -76,6 +76,12 @@ def main() -> None:
     (d / "repo.git").write_text(f"{url} {base}\n")
     (d / "test.patch").write_text(row["test_patch"])
     (d / "f2p.txt").write_text("\n".join(f2p) + "\n")
+    # provenance for the report (aggregate.py reads this — no dataset access needed at report time):
+    # the SWE-bench Verified difficulty tier (human est. time-to-fix) + repo/version.
+    (d / "meta.json").write_text(json.dumps({
+        "instance_id": iid, "repo": repo, "version": str(row.get("version", "")),
+        "difficulty": row.get("difficulty", ""),
+    }, indent=2) + "\n")
 
     # setup/verify run in the WORK dir but their aux files (test.patch, f2p.txt) live next to the
     # script in the task dir. Resolve that dir at RUNTIME from $BASH_SOURCE — never bake an absolute

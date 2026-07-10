@@ -71,6 +71,16 @@ def task_source(name, tasks_dir="tasks"):
     return "swe-bench" if "swebench" in name.lower() else "invented"
 
 
+def task_meta(name, tasks_dir="tasks"):
+    """Per-task provenance written by make_swebench_task.py (repo, version, SWE-bench difficulty tier).
+    Empty dict if absent — the report degrades gracefully."""
+    try:
+        with open(os.path.join(tasks_dir, name, "meta.json")) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def _pred_key(harness, model, prompt, run):
     """Reconstruct make_predictions.py's model_name_or_path for one run, so a SWE task's pass/fail
     can be looked up in resolved.json (the official Modal Docker grade)."""
@@ -937,6 +947,24 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     chips_html = "".join(f'<div class="chip"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for k, v in chips)
     gen = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    # --- benchmark tasks: repo + SWE-bench Verified difficulty tier (from each task's meta.json) ---
+    tasks_html = ""
+    _tasks = sorted({r["task"] for r in crows}) if crows else []
+    if _tasks:
+        _tier = {"<15 min fix": 0, "15 min - 1 hour": 1, "1-4 hours": 2, ">4 hours": 3}
+        trows = [(t, task_meta(t).get("repo", ""), task_meta(t).get("difficulty", "")) for t in _tasks]
+        trows.sort(key=lambda r: (_tier.get(r[2], 9), r[1], r[0]))
+        tbody = [f"<tr><td>{esc(_tshort(t))}</td><td>{esc(repo or '—')}</td>"
+                 f"<td>{esc(diff or '—')}</td></tr>" for t, repo, diff in trows]
+        nrepos = len({r[1] for r in trows if r[1]})
+        ntiers = len({r[2] for r in trows if r[2]})
+        tasks_html = ("<h2>Benchmark tasks</h2>"
+                      f"<p class=note>A curated cross-section of <b>SWE-bench Verified</b> — {len(trows)} real "
+                      f"GitHub issues across {nrepos} repos and {ntiers} difficulty tiers (SWE-bench's own "
+                      "human-estimated time-to-fix). Chosen to span repos and difficulty — not a random "
+                      "sample, so read the resolved-rate as a cross-section, not a full-Verified score.</p>"
+                      + tbl([("Task", 0), ("Repo", 0), ("Difficulty", 0)], tbody))
+
     # --- "How this benchmark works": plain-English method + an SVG of the generate→grade pipeline ---
     swe_tasks = {r["task"] for r in crows if "swebench" in r["task"].lower()} if crows else set()
     nswe = len(swe_tasks) or ntask
@@ -1009,6 +1037,7 @@ where self-hosting gets cheap.</p>"""
 <p class="sub">{esc(results_dir)} · generated {gen}</p>
 <div class="chips">{chips_html}</div>
 {method_html}
+{tasks_html}
 <h2>Reasoning / Arm Rollup</h2>
 <p class="note">One row per arm, pooled across prompt versions (success = range over v1–v3). Costs are
 passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually
