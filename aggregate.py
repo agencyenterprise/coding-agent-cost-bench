@@ -586,26 +586,6 @@ def concurrency_scenarios(sole, avg, peak, packing, packed):
     return out
 
 
-def family_rollup(rows):
-    """One row per reasoning arm — GLM broken out by default / high / no-think (NOT pooled), each API
-    model separate — pooled passes/runs per arm. The headline per-variant success comparison."""
-    groups, order = {}, []
-    for r in rows:
-        label = _arm_label(r["harness"], r["model"])
-        if label not in groups:
-            groups[label] = []
-            order.append(label)
-        groups[label].append(r)
-    out = []
-    for label in order:
-        g = groups[label]
-        runs = sum(int(r["runs"]) for r in g)
-        passes = sum(int(r["passes"]) for r in g)
-        out.append({"family": label, "runs": runs, "passes": passes,
-                    "success_rate": round(passes / runs, 3) if runs else ""})
-    return out
-
-
 def arm_rollup(rows, genivs=None):
     """Collapse the per-(arm, prompt) summary rows into one row per arm (harness+model), pooling
     across prompt versions. Success is a min–max range over the versions; costs are passes-weighted
@@ -738,15 +718,6 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     arm_tbl = tbl([("Arm", 0), ("Success", 0), ("Out Tok", 1), ("GPU-s/run", 1),
                    ("Peak conc", 1), ("$/task sole", 1), ("$/task packed", 1)], arm_body)
 
-    # ---- success by model family (GLM all variants vs API models) ----
-    fam = family_rollup(rows)
-    def _fam_row(x):
-        rate_label = f"{x['success_rate']:.1%}" if x['success_rate'] != '' else '·'
-        return (f"<tr><td><b>{esc(x['family'])}</b></td><td class='num'>{x['passes']}</td>"
-                f"<td class='num'>{x['runs']}</td>"
-                f"<td>{sbar(x['success_rate'], rate_label)}</td></tr>")
-    fam_body = [_fam_row(x) for x in fam]
-    fam_tbl = tbl([("Model / arm", 0), ("Passed", 1), ("Total", 1), ("Success", 0)], fam_body)
 
     # ---- cost per completed task (per harness/model/prompt) ----
     def _cost_row(r):
@@ -1094,8 +1065,6 @@ thrash. <b>Peak conc</b> is the most generation requests running at one instant;
 sustained average over the run{f' (overall peak this run: {overall_peak})' if overall_peak else ''}.</p>
 {arm_tbl}
 
-<h2>Success by Model</h2>
-{fam_tbl}
 
 <h2>Cost per Completed Task</h2>
 <p class="note">$/task <b>sole</b> = one task alone on the GPU (its own generation time × rate).
