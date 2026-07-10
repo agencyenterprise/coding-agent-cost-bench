@@ -792,7 +792,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             f"<td class='num'>{pk if pk != '' else '·'}</td>"
             f"<td class='num'>{usd(a['cost_sole_per_task'])}</td>"
             f"<td class='num'>{usd(a['cost_packed_per_task'])}</td></tr>")
-    arm_tbl = tbl([("Arm", 0), ("Success", 0), ("Out Tok", 1), ("GPU-s/run", 1),
+    arm_tbl = tbl([("Setup", 0), ("Success", 0), ("Out Tok", 1), ("GPU-s/run", 1),
                    ("Peak conc", 1), ("$/task sole", 1), ("$/task packed", 1)], arm_body)
 
 
@@ -841,7 +841,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             "<b>Sole</b> and <b>Packed</b> costs are measured; middle rows project ideal linear packing "
             "(<code>sole ÷ N</code>). Measured packed is usually higher than projected at the same avg "
             "because failures, idle gaps between steps, and contention burn GPU time without delivering passes.</p>"
-            + tbl([("Arm", 0), ("Scenario", 0), ("Concurrent tasks", 1), ("$/task", 1), ("Basis", 0)],
+            + tbl([("Setup", 0), ("Scenario", 0), ("Concurrent tasks", 1), ("$/task", 1), ("Basis", 0)],
                   conc_body))
 
     # ---- efficiency ----
@@ -918,11 +918,11 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 f"<td class='num'>{e['tools']/rn:.1f}</td></tr>")
         perf_html = ("<h2>Cost spread &amp; throughput</h2>"
                      "<p class=note>The spread of per-run cost (median, p90, std-dev) tells you how "
-                     "<i>reliable</i> an arm's cost is, not just the average. Tok/s is output tokens per "
+                     "<i>reliable</i> a setup's cost is, not just the average. Tok/s is output tokens per "
                      "generation second, and the steps and tools per run show why: fewer turns cost less. "
                      "(We can't split reasoning from answer tokens in the logs, so total output in the rollup "
                      "above is the stand-in.)</p>"
-                     + tbl([("Arm", 0), ("Median $", 1), ("p90 $", 1), ("Std-dev $", 1),
+                     + tbl([("Setup", 0), ("Median $", 1), ("p90 $", 1), ("Std-dev $", 1),
                             ("Tok/s", 1), ("Steps/run", 1), ("Tools/run", 1)], perf_body))
 
     # ---- #3 per-task × arm pass-rate matrix (from `detailed`) ----
@@ -952,8 +952,8 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 bg = "var(--best)" if r == 1 else ("rgba(220,38,38,.16)" if r == 0 else "rgba(217,119,6,.16)")
                 tds.append(f"<td class='num' style='background:{bg}'>{p}/{tot}</td>")
             mbody.append("<tr>" + "".join(tds) + "</tr>")
-        matrix_html = ("<h2>Per-task × arm pass matrix</h2>"
-                       "<p class=note>Where each arm actually passes or fails (pooled across runs). "
+        matrix_html = ("<h2>Per-task × setup pass matrix</h2>"
+                       "<p class=note>Where each setup actually passes or fails (pooled across runs). "
                        "Green means all pass, red means all fail, amber means partial. This is where GLM's "
                        "capability gap versus Opus shows up.</p>"
                        + tbl(head, mbody))
@@ -1002,14 +1002,14 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 f"<td class='num'>{usd(cost) if cost is not None else '·'}</td>"
                 f"<td class='num'>{(str(round(dur))+'s') if dur is not None else '·'}</td></tr>")
         pertask_html = ("<h2>Per-task cost &amp; result</h2>"
-                        "<p class=note>Every task, with its arms grouped underneath, and whether each passed. "
+                        "<p class=note>Every task, with its setups grouped underneath, and whether each passed. "
                         "<b>Billed $</b> is your real number: the actual endpoint bill split across calls by "
                         "concurrency, so a task only carries the seconds it was truly generating and parallel "
                         "tasks share the seconds they overlapped (Opus is per-token, so its billed = its API cost). "
                         "<b>$/task sole</b> is the modeled cost if that task had the GPU entirely to itself — the "
                         "ceiling you'd pay with zero batching. A blank means unknown, usually a run that timed out "
                         "before it could report.</p>"
-                        + tbl([("Task", 0), ("Arm", 0), ("Passed", 1), ("Billed $", 1),
+                        + tbl([("Task", 0), ("Setup", 0), ("Passed", 1), ("Billed $", 1),
                                ("$/task sole", 1), ("Avg time", 1)], ptbody))
 
     # ---- #4 break-even concurrency vs Opus (derived from measured sole cost) ----
@@ -1034,19 +1034,17 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 f"<td>{verdict}</td></tr>")
         be_html = ("<h2>Break-even concurrency vs Opus</h2>"
                    f"<p class=note>Opus is billed per token, so its price is flat at ${opus_flat:.3f}/task. A GLM "
-                   "arm matches that once it runs about (GLM sole ÷ Opus) tasks in parallel. Heads-up: this "
+                   "setup matches that once it runs about (GLM sole ÷ Opus) tasks in parallel. Heads-up: this "
                    "assumes <i>ideal</i> packing, so the real break-even sits higher once idle time and "
                    "contention eat in.</p>"
-                   + tbl([("Arm", 0), ("GLM $/task (alone)", 1), ("Opus flat $", 1),
+                   + tbl([("Setup", 0), ("GLM $/task (alone)", 1), ("Opus flat $", 1),
                           ("Break-even conc.", 1), ("Peak this run", 1), ("Status", 0)], be_body))
 
     ntask = len({r["task"] for r in crows}) if crows else 0
     best_packed = min((a["cost_packed_per_task"] for a in sh), default="")
-    n_harness = len({r["harness"] for r in rows})
-    n_model = len({r["model"].split("/")[-1] for r in rows})
-    n_runs = sum(int(r["runs"]) for r in rows)
-    chips = [("Harnesses", str(n_harness)), ("Models", str(n_model)),
-             ("Tasks", str(ntask)), ("Runs", str(n_runs))]
+    n_setups = len(rows)                                  # one row per setup (harness + model + reasoning)
+    n_runs = sum(int(r["runs"]) for r in rows)            # total individual runs = setups × tasks
+    chips = [("Setups", str(n_setups)), ("Tasks", str(ntask))]
     if billing.get("cost"):
         chips.append(("Actual AEP bill (run window)", f"${billing['cost']:.2f}"))
     if best_packed != "":
@@ -1088,9 +1086,10 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 
     # --- glossary: plain-English definitions of every term used in the tables above ---
     _terms = [
-        ("Arm", "One agent setup: a harness, a model, and a reasoning setting (for example “GLM high” or "
-                "“Opus · Claude Code”)."),
-        ("Arm rollup", "One row per arm, pooling all of that arm's runs into a single summary."),
+        ("Setup", "One thing under test: a harness, a model, and a reasoning setting (for example “GLM high” "
+                  "or “Opus · Claude Code”). Each setup solves every task once."),
+        ("Setup rollup", "One row per setup, pooling all of that setup's runs into a single summary."),
+        ("Run", "One setup solving one task, once. This benchmark = setups × tasks runs in total."),
         ("Resolved / pass", "The fix worked. In the project's Docker image, every FAIL_TO_PASS test passes and "
                             "every PASS_TO_PASS test still passes."),
         ("FAIL_TO_PASS", "The bug's tests. They have to go from failing to passing; that's what proves the fix."),
@@ -1156,8 +1155,9 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 <p class="note">We measure one thing: <b>what it actually costs to finish a coding task</b>. Not tokens,
 not leaderboard scores. A task only counts when the project's own tests go from failing to passing.
 Every model gets the same {nswe} real GitHub issues (from SWE-bench Verified{_proj}, ranging from
-15-minute fixes to multi-hour ones) and the same harness. The only thing we change is the model and how
-it's configured.</p>
+15-minute fixes to multi-hour ones). The only thing we change is the model and how it's configured.
+Each <b>setup</b> — a harness + model + reasoning effort — solves all {ntask} tasks once, so this run is
+{n_setups} setups × {ntask} tasks = {n_runs} runs in all.</p>
 <div class="tw" style="padding:16px 10px">
 <svg viewBox="0 0 960 200" role="img" aria-label="Pipeline: generate locally, then grade in the cloud"
      style="width:100%;height:auto;max-width:960px;display:block;margin:auto">
@@ -1227,8 +1227,8 @@ wait if you need a true first-request latency budget.</p>"""
 <div class="chips">{chips_html}</div>
 {method_html}
 {tasks_html}
-<h2>Reasoning / Arm Rollup</h2>
-<p class="note">One row per arm; success shows the range across runs, and costs are passes-weighted. The
+<h2>Reasoning / Setup rollup</h2>
+<p class="note">One row per setup; success shows the range across runs, and costs are passes-weighted. The
 cheapest packed cost per completed task is highlighted, and it's usually <b>high reasoning</b>, which is
 decisive and takes the fewest turns. <b>Default</b> tends to over-think and <b>no thinking</b> tends to
 thrash. <b>Peak conc</b> is the most generation requests running at one instant; <b>avg conc</b> is the
