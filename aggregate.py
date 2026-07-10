@@ -695,7 +695,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     import html as _h
     from datetime import datetime
     esc = lambda x: _h.escape(str(x))
-    usd = lambda v: f"${v:.3f}" if v not in ("", None) else "—"
+    usd = lambda v: f"${v:.3f}" if v not in ("", None) else "·"
 
     def packed(r):
         if is_self_hosted(r["model"]):
@@ -705,7 +705,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 
     def rng(a):
         if a["success_min"] == "":
-            return "—"
+            return "·"
         lo, hi = a["success_min"], a["success_max"]
         return f"{lo:.0%}" if lo == hi else f"{lo:.0%}–{hi:.0%}"
 
@@ -725,14 +725,14 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     arm_body = []
     for a in arms:
         cls = ' class="best"' if a["arm"] == best else ""
-        gps = f'{a["gpu_s_per_run"]:.0f}s' if a["gpu_s_per_run"] != "" else "—"
+        gps = f'{a["gpu_s_per_run"]:.0f}s' if a["gpu_s_per_run"] != "" else "·"
         pk = a.get("peak_concurrency", "")
         passes_label = f"<span class=mut>{a['passes']}/{a['runs']}</span>"
         arm_body.append(
             f"<tr{cls}><td><b>{esc(a['arm'])}</b></td>"
             f"<td>{sbar(a['success_pooled'], rng(a), passes_label)}</td>"
             f"<td class='num'>{a['avg_tokens_out']:,}</td><td class='num'>{gps}</td>"
-            f"<td class='num'>{pk if pk != '' else '—'}</td>"
+            f"<td class='num'>{pk if pk != '' else '·'}</td>"
             f"<td class='num'>{usd(a['cost_sole_per_task'])}</td>"
             f"<td class='num'>{usd(a['cost_packed_per_task'])}</td></tr>")
     arm_tbl = tbl([("Arm", 0), ("Success", 0), ("Out Tok", 1), ("GPU-s/run", 1),
@@ -741,7 +741,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     # ---- success by model family (GLM all variants vs API models) ----
     fam = family_rollup(rows)
     def _fam_row(x):
-        rate_label = f"{x['success_rate']:.1%}" if x['success_rate'] != '' else '—'
+        rate_label = f"{x['success_rate']:.1%}" if x['success_rate'] != '' else '·'
         return (f"<tr><td><b>{esc(x['family'])}</b></td><td class='num'>{x['passes']}</td>"
                 f"<td class='num'>{x['runs']}</td>"
                 f"<td>{sbar(x['success_rate'], rate_label)}</td></tr>")
@@ -757,7 +757,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             f"<td>{sbar(r['success_rate'], rate_label, passes_label)}</td>"
             f"<td class='num'>{usd(r['cost_per_successful_task'])}</td>"
             f"<td class='num'>{usd(packed(r))}</td>"
-            f"<td class='num'>{(str(round(r['avg_duration_s']))+'s') if r['avg_duration_s']!='' else '—'}</td>")
+            f"<td class='num'>{(str(round(r['avg_duration_s']))+'s') if r['avg_duration_s']!='' else '·'}</td>")
     cost_body = [_cost_row(r) for r in rows]
     cost_tbl = tbl([("Harness", 0), ("Model", 0), ("Success", 0),
                     ("$/task sole", 1), ("$/task packed", 1), ("Avg time", 1)],
@@ -801,7 +801,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     glm = next((k for k in order if is_self_hosted(k[1])), None)
     glm_out = eff[glm]["out"] if glm else 0
     def _eff_row(k):
-        ratio_label = f"{eff[k]['out']/glm_out:.2f}×" if (glm and glm_out) else '—'
+        ratio_label = f"{eff[k]['out']/glm_out:.2f}×" if (glm and glm_out) else '·'
         return (
             f"<tr><td>{esc(harness_disp(k[0]))}</td><td>{esc(_mname(k[1]))}</td>"
             f"<td class='num'>{eff[k]['steps']:,}</td><td class='num'>{eff[k]['tools']:,}</td>"
@@ -862,17 +862,18 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             rn = a["runs"] or 1
             perf_body.append(
                 f"<tr><td><b>{esc(a['arm'])}</b></td>"
-                f"<td class='num'>{usd(med) if med is not None else '—'}</td>"
-                f"<td class='num'>{usd(p90) if p90 is not None else '—'}</td>"
+                f"<td class='num'>{usd(med) if med is not None else '·'}</td>"
+                f"<td class='num'>{usd(p90) if p90 is not None else '·'}</td>"
                 f"<td class='num'>{('$%.3f' % sd)}</td>"
-                f"<td class='num'>{('%.0f' % tps) if tps else '—'}</td>"
+                f"<td class='num'>{('%.0f' % tps) if tps else '·'}</td>"
                 f"<td class='num'>{e['steps']/rn:.1f}</td>"
                 f"<td class='num'>{e['tools']/rn:.1f}</td></tr>")
         perf_html = ("<h2>Cost spread &amp; throughput</h2>"
-                     "<p class=note>Per-run cost distribution (median / p90 / std-dev) shows how <i>reliable</i> "
-                     "each arm's cost is, not just the mean. Tok/s = output tokens ÷ generation seconds; "
-                     "steps &amp; tools per run show <i>why</i> — fewer turns = cheaper. (Reasoning-vs-answer token "
-                     "split isn't in the logs; total output in the rollup above is the proxy.)</p>"
+                     "<p class=note>The spread of per-run cost (median, p90, std-dev) tells you how "
+                     "<i>reliable</i> an arm's cost is, not just the average. Tok/s is output tokens per "
+                     "generation second, and the steps and tools per run show why: fewer turns cost less. "
+                     "(We can't split reasoning from answer tokens in the logs, so total output in the rollup "
+                     "above is the stand-in.)</p>"
                      + tbl([("Arm", 0), ("Median $", 1), ("p90 $", 1), ("Std-dev $", 1),
                             ("Tok/s", 1), ("Steps/run", 1), ("Tools/run", 1)], perf_body))
 
@@ -926,12 +927,13 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 f"<td class='num'>{usd(a['cost_sole_per_task'])}</td>"
                 f"<td class='num'>{usd(opus_flat)}</td>"
                 f"<td class='num'>{nstar:.1f}×</td>"
-                f"<td class='num'>{pk if pk != '' else '—'}</td>"
+                f"<td class='num'>{pk if pk != '' else '·'}</td>"
                 f"<td>{verdict}</td></tr>")
         be_html = ("<h2>Break-even concurrency vs Opus</h2>"
-                   f"<p class=note>Opus is per-token (flat ${opus_flat:.3f}/task). A GLM arm matches it once it runs "
-                   "≈ (GLM sole ÷ Opus) tasks in parallel. ⚠️ Assumes <i>ideal</i> linear packing — real "
-                   "break-even is higher once you account for idle time and contention.</p>"
+                   f"<p class=note>Opus is billed per token, so its price is flat at ${opus_flat:.3f}/task. A GLM "
+                   "arm matches that once it runs about (GLM sole ÷ Opus) tasks in parallel. Heads-up: this "
+                   "assumes <i>ideal</i> packing, so the real break-even sits higher once idle time and "
+                   "contention eat in.</p>"
                    + tbl([("Arm", 0), ("GLM $/task (alone)", 1), ("Opus flat $", 1),
                           ("Break-even conc.", 1), ("Peak this run", 1), ("Status", 0)], be_body))
 
@@ -954,26 +956,31 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 
     # --- glossary: plain-English definitions of every term used in the tables above ---
     _terms = [
-        ("Arm", "One agent configuration = harness + model + reasoning setting (e.g. “GLM high”, “Opus · Claude Code”)."),
+        ("Arm", "One agent setup: a harness, a model, and a reasoning setting (for example “GLM high” or "
+                "“Opus · Claude Code”)."),
         ("Arm rollup", "One row per arm, pooling all of that arm's runs into a single summary."),
-        ("Resolved / pass", "The fix works: in the instance's Docker image, every FAIL_TO_PASS test passes AND every "
-                            "PASS_TO_PASS test still passes."),
-        ("FAIL_TO_PASS", "The bug's tests — must go from failing to passing (that's the fix)."),
-        ("PASS_TO_PASS", "Tests that already passed — must stay passing (a regression guard)."),
-        ("$/task sole", "Cost of one task run alone on the GPU: its own generation seconds × the hourly rate."),
-        ("$/task packed", "Cost when the endpoint serves many tasks at once: union of all generation time ÷ tasks. "
-                          "Lower than sole because idle gaps overlap."),
-        ("Median $", "The middle per-run cost — half the runs cost less, half more (robust to outliers)."),
-        ("p90 $", "90th-percentile per-run cost — 9 of 10 runs cost this or less (the near-worst case)."),
-        ("Std-dev $", "How spread out per-run costs are around the mean. Low = predictable; high = swings a lot."),
+        ("Resolved / pass", "The fix worked. In the project's Docker image, every FAIL_TO_PASS test passes and "
+                            "every PASS_TO_PASS test still passes."),
+        ("FAIL_TO_PASS", "The bug's tests. They have to go from failing to passing; that's what proves the fix."),
+        ("PASS_TO_PASS", "Tests that already passed. They have to stay passing, so a fix can't quietly break "
+                         "something else."),
+        ("$/task sole", "What one task costs running alone on the GPU: its own generation seconds times the "
+                        "hourly rate."),
+        ("$/task packed", "What a task costs when the endpoint runs many at once: the combined generation time "
+                          "divided by the number of tasks. Lower than sole because the idle gaps overlap."),
+        ("Median $", "The middle per-run cost. Half the runs cost less, half cost more. Ignores outliers."),
+        ("p90 $", "The 90th-percentile per-run cost: 9 out of 10 runs cost this much or less. Close to the worst case."),
+        ("Std-dev $", "How much the per-run cost moves around the average. Low means predictable, high means it "
+                      "swings a lot."),
         ("Tok/s", "Output tokens generated per second of GPU time."),
         ("GPU-s / run", "Seconds of GPU generation time per run (self-hosted models only)."),
-        ("Peak concurrency", "Most generation requests in flight at any single instant during the run."),
-        ("Avg concurrency / packing factor", "Time-weighted average number of tasks generating at once — roughly how "
-                                             "much cheaper “packed” is than “sole”."),
-        ("Break-even concurrency", "How many tasks GLM must run in parallel for its packed $/task to match Opus's "
+        ("Peak concurrency", "The most generation requests in flight at any single moment during the run."),
+        ("Avg concurrency / packing factor", "The time-weighted average number of tasks generating at once. Roughly "
+                                             "how much cheaper packed is than sole."),
+        ("Break-even concurrency", "How many tasks GLM has to run in parallel for its packed $/task to match Opus's "
                                    "flat per-token price."),
-        ("Difficulty", "SWE-bench Verified's human estimate of time-to-fix (<15 min … >4 hours)."),
+        ("Difficulty", "SWE-bench Verified's own estimate of how long a fix takes, from under 15 minutes to over "
+                       "4 hours."),
     ]
     glossary_html = ("<h2>Glossary</h2><p class=note>What the columns and terms above mean.</p>"
                      + tbl([("Term", 0), ("Meaning", 0)],
@@ -986,15 +993,15 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         _tier = {"<15 min fix": 0, "15 min - 1 hour": 1, "1-4 hours": 2, ">4 hours": 3}
         trows = [(t, task_meta(t).get("repo", ""), task_meta(t).get("difficulty", "")) for t in _tasks]
         trows.sort(key=lambda r: (_tier.get(r[2], 9), r[1], r[0]))
-        tbody = [f"<tr><td>{esc(_tshort(t))}</td><td>{esc(repo or '—')}</td>"
-                 f"<td>{esc(diff or '—')}</td></tr>" for t, repo, diff in trows]
+        tbody = [f"<tr><td>{esc(_tshort(t))}</td><td>{esc(repo or '·')}</td>"
+                 f"<td>{esc(diff or '·')}</td></tr>" for t, repo, diff in trows]
         nrepos = len({r[1] for r in trows if r[1]})
         ntiers = len({r[2] for r in trows if r[2]})
         tasks_html = ("<h2>Benchmark tasks</h2>"
-                      f"<p class=note>A curated cross-section of <b>SWE-bench Verified</b> — {len(trows)} real "
-                      f"GitHub issues across {nrepos} repos and {ntiers} difficulty tiers (SWE-bench's own "
-                      "human-estimated time-to-fix). Chosen to span repos and difficulty — not a random "
-                      "sample, so read the resolved-rate as a cross-section, not a full-Verified score.</p>"
+                      f"<p class=note>A hand-picked slice of <b>SWE-bench Verified</b>: {len(trows)} real GitHub "
+                      f"issues across {nrepos} repos and {ntiers} difficulty tiers (using SWE-bench's own estimate of "
+                      "time-to-fix). We picked them to span repos and difficulty, so it isn't a random sample. Read "
+                      "the resolved-rate as a cross-section, not a full SWE-bench Verified score.</p>"
                       + tbl([("Task", 0), ("Repo", 0), ("Difficulty", 0)], tbody))
 
     # --- "How this benchmark works": plain-English method + an SVG of the generate→grade pipeline ---
@@ -1005,16 +1012,17 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     _box = "fill='var(--card)' stroke='var(--border)' rx='12'"
     method_html = f"""
 <h2>How this benchmark works</h2>
-<p class="note">We measure one thing: <b>what it costs to actually finish a coding task</b> — not tokens,
-not leaderboard scores. A task counts only when the project's own tests flip from failing to passing.
-Every model runs the same {nswe} real GitHub issues (SWE-bench Verified{_proj}, from 15-minute fixes to
-multi-hour ones) through the same harness; the only things we change are the model and its settings.</p>
+<p class="note">We measure one thing: <b>what it actually costs to finish a coding task</b>. Not tokens,
+not leaderboard scores. A task only counts when the project's own tests go from failing to passing.
+Every model gets the same {nswe} real GitHub issues (from SWE-bench Verified{_proj}, ranging from
+15-minute fixes to multi-hour ones) and the same harness. The only thing we change is the model and how
+it's configured.</p>
 <div class="tw" style="padding:16px 10px">
 <svg viewBox="0 0 960 200" role="img" aria-label="Pipeline: generate locally, then grade in the cloud"
      style="width:100%;height:auto;max-width:960px;display:block;margin:auto">
   <defs><marker id="arw" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
     <path d="M0,0 L7.5,3 L0,6 Z" fill="var(--muted)"/></marker></defs>
-  <text x="6" y="26" font-size="12" fill="var(--muted)">Two phases: <tspan fill="var(--fg)" font-weight="600">generate locally</tspan>, then <tspan fill="var(--fg)" font-weight="600">grade in the cloud</tspan> — the same split the official SWE-bench uses.</text>
+  <text x="6" y="26" font-size="12" fill="var(--muted)">Two phases: <tspan fill="var(--fg)" font-weight="600">generate locally</tspan>, then <tspan fill="var(--fg)" font-weight="600">grade in the cloud</tspan> (the same split the official SWE-bench uses).</text>
   <rect x="6" y="54" width="150" height="92" {_box}/>
   <text x="81" y="84" text-anchor="middle" font-size="14" font-weight="700" fill="var(--fg)">Tasks</text>
   <text x="81" y="105" text-anchor="middle" font-size="11" fill="var(--muted)">{nswe} real issues</text>
@@ -1043,34 +1051,35 @@ multi-hour ones) through the same harness; the only things we change are the mod
   <line x1="728" y1="100" x2="744" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
 </svg>
 </div>
-<p class="note"><b>1 · Generate</b>: <code>bench.sh</code> hands each agent the bug report and
-the code; it writes a fix. We record the seconds the model spent generating — that time × the GPU's
-hourly rate is the cost. <b>2 · Harvest</b>: <code>make_predictions.py</code> pulls each attempt's change
-(a git diff). <b>3 · Grade</b> (cloud): <code>swe_eval_modal.py</code> runs each fix inside that project's
-official SWE-bench Docker image — the exact old Python and dependencies it needs — and runs the project's
-real test suite. A fix passes only if every target test <i>and</i> every already-passing test still
-passes. <b>4 · Report</b>: <code>aggregate.py</code> divides cost by the fixes that actually worked.</p>
-<p class="note"><b>Why two machines?</b> Writing the fix needs the model (fast, local); grading a
-years-old project needs its exact environment, which only lives in that project's container — so grading
-runs in the cloud. It is the same method the official SWE-bench uses, so our pass/fail matches the
-published standard. Each task also ships a known-good <i>gold</i> fix, and we confirm the grader marks it
-passing before trusting the task.</p>
-<p class="note"><b>What we vary:</b> reasoning effort (default / high / off) — nothing else is changed
-between models. <b>Cost basis:</b>
-self-hosted GLM = GPU-seconds × hourly rate; Claude = tokens × list price. <b>&ldquo;sole&rdquo;</b> = one
-task at a time on the endpoint; <b>&ldquo;packed&rdquo;</b> = the endpoint shared by concurrent tasks,
-where self-hosting gets cheap.</p>
-<p class="note"><b>Cold start &amp; scale-down:</b> the Modal endpoint <b>scales to zero when idle</b>, so
-you pay GPU time <i>only while it's actually serving</i> — no charge for idle hours (unlike a always-on
-box). The trade-off is a <b>cold start</b>: the first request after it has scaled down spins the 8×B200
-back up (a few minutes; the very first boot also downloads the ~700&nbsp;GB weights). So cold-start
-<i>latency</i> is a real cost for bursty, low-traffic use, while sustained/packed use amortizes it away.
-The $/task figures here count <b>generation time only</b> — they exclude cold-start wait, which you'd
-add for a true first-request latency budget.</p>"""
+<p class="note"><b>1 · Generate.</b> <code>bench.sh</code> hands each agent the bug report and the code,
+and it writes a fix. We track how many seconds the model spends generating; that time, at the GPU's
+hourly rate, is the cost. <b>2 · Harvest.</b> <code>make_predictions.py</code> pulls each attempt's
+change (a git diff). <b>3 · Grade (in the cloud).</b> <code>swe_eval_modal.py</code> runs each fix inside
+that project's official SWE-bench Docker image, which has the exact old Python and dependencies it needs,
+then runs the project's real test suite. A fix passes only if every target test <i>and</i> every
+already-passing test still pass. <b>4 · Report.</b> <code>aggregate.py</code> divides the cost by the
+fixes that actually worked.</p>
+<p class="note"><b>Why two machines?</b> Writing the fix needs the model, which is fast and runs on your
+laptop. Grading a years-old project needs its exact environment, and that only lives in the project's
+container, so grading runs in the cloud. It's the same approach the official SWE-bench uses, so our
+pass/fail matches the published standard. Every task also ships a known-good <i>gold</i> fix, and we
+check that the grader marks it as passing before we trust the task.</p>
+<p class="note"><b>What we change:</b> the reasoning effort (default, high, off). Nothing else differs
+between models. <b>How cost is counted:</b> for self-hosted GLM it's GPU-seconds times the hourly rate;
+for Claude it's tokens times list price. <b>&ldquo;Sole&rdquo;</b> means one task at a time on the
+endpoint. <b>&ldquo;Packed&rdquo;</b> means the endpoint is shared by many tasks at once, which is where
+self-hosting gets cheap.</p>
+<p class="note"><b>Cold start and scale-down.</b> The Modal endpoint <b>scales to zero when idle</b>, so
+you only pay for GPU time while it's actually serving. There's no charge for idle hours, unlike an
+always-on box. The trade-off is a <b>cold start</b>: the first request after it has scaled down has to
+spin the 8×B200 back up, which takes a few minutes (the very first boot also downloads the ~700&nbsp;GB
+weights). So that cold-start <i>latency</i> is a real cost if your usage is bursty, and it spreads out
+once the endpoint stays busy. The $/task numbers here count generation time only; add the cold-start
+wait if you need a true first-request latency budget.</p>"""
 
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Coding Agent Cost Bench — {esc(os.path.basename(os.path.normpath(results_dir)))}</title>
+<title>Coding Agent Cost Bench: {esc(os.path.basename(os.path.normpath(results_dir)))}</title>
 <style>{_HTML_CSS}</style></head><body><div class="wrap">
 <h1>Coding Agent Cost Bench</h1>
 <p class="sub">{esc(results_dir)} · generated {gen}</p>
