@@ -978,6 +978,15 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             if du is not None:
                 e["dur"].append(du)
         order_pt.sort(key=lambda k: (_tshort(k[0]), _arm_label(k[1], k[2])))
+        # cheapest billed setup that actually passed, per task — highlighted green in the Billed $ column
+        cheapest_billed = {}
+        for k in order_pt:
+            e = agg[k]
+            b = statistics.mean(e["billed"]) if e["billed"] else None
+            if e["passes"] > 0 and b is not None:
+                cur = cheapest_billed.get(k[0])
+                if cur is None or b < cur[1]:
+                    cheapest_billed[k[0]] = (k, b)
         ptbody = []
         last_task = None
         for k in order_pt:
@@ -988,6 +997,8 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             dur = statistics.mean(e["dur"]) if e["dur"] else None
             bg = ("var(--best)" if e["passes"] == e["runs"]
                   else ("rgba(220,38,38,.16)" if e["passes"] == 0 else "rgba(217,119,6,.16)"))
+            win = cheapest_billed.get(task)
+            billed_bg = "var(--best)" if (win and win[0] == k) else ""       # cheapest passing bill
             tname = _tshort(task)
             new_group = tname != last_task
             # show the task name only on its first row, and rule off the top of each new group
@@ -998,7 +1009,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             ptbody.append(
                 f"{tr}<td>{task_cell}</td><td>{esc(_arm_label(h, m))}</td>"
                 f"<td class='num' style='background:{bg}'>{e['passes']}/{e['runs']}</td>"
-                f"<td class='num'>{usd(billed) if billed is not None else '·'}</td>"
+                f"<td class='num' style='background:{billed_bg}'>{usd(billed) if billed is not None else '·'}</td>"
                 f"<td class='num'>{usd(cost) if cost is not None else '·'}</td>"
                 f"<td class='num'>{(str(round(dur))+'s') if dur is not None else '·'}</td></tr>")
         pertask_html = ("<h2>Per-task cost &amp; result</h2>"
@@ -1008,7 +1019,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                         "tasks share the seconds they overlapped (Opus is per-token, so its billed = its API cost). "
                         "<b>$/task sole</b> is the modeled cost if that task had the GPU entirely to itself — the "
                         "ceiling you'd pay with zero batching. A blank means unknown, usually a run that timed out "
-                        "before it could report.</p>"
+                        "before it could report. The cheapest setup that passed is highlighted green per task.</p>"
                         + tbl([("Task", 0), ("Setup", 0), ("Passed", 1), ("Billed $", 1),
                                ("$/task sole", 1), ("Avg time", 1)], ptbody))
 
