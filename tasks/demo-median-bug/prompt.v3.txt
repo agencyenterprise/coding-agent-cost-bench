@@ -1,3 +1,0 @@
-The tests in test_mathutils.py are failing. Fix the implementation in mathutils.py so that all tests pass. Do not modify the tests.
-
-Fresh clone, no virtualenv: create `.venv` at the repo root and `.venv/bin/pip install pytest`. Confirm with `.venv/bin/python -m pytest test_mathutils.py` (exit 0) before finishing.

@@ -82,13 +82,11 @@ not clever wording. Present on all tasks (for the kanban build, the operational 
 
 ## Coverage
 
-All six demo tasks carry `v1`, `v2`, and `v3`:
+Both demo tasks carry `v1`, `v2`, and `v3`:
 
 | Task | v1 (`prompt.v1.txt`) | v2 (`prompt.v2.txt`) | v3 (`prompt.v3.txt`) |
 |---|---|---|---|
-| `demo-median-bug`, `demo-click-parser`, `demo-slugify-lowercase` | terse "fix the failing tests" | shaped template | terse + env/verify cmd |
 | `demo-swebench-psf__requests-6028`, `-pylint-dev__pylint-8898` | raw dataset issue (verbatim) | issue + template scaffolding | raw issue + env/verify cmd |
-| `demo-kanban-orchestration` | plain build request | shaped build spec (Task / Success criteria / Scope) | terse + create-next-app + build/test/API checks |
 
 New SWE-bench tasks get all three automatically: `make_swebench_task.py` writes `prompt.v1.txt` (raw
 statement), `prompt.v2.txt` (shaped), and `prompt.v3.txt` (raw issue + operational bits) side by side.

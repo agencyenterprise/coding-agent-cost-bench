@@ -1,3 +1,0 @@
-The test suite test.py is failing — slugify() is producing wrong-case output. Fix the implementation in slugify/slugify.py so that all tests pass. Do not modify the tests.
-
-Fresh clone, no virtualenv: create `.venv` at the repo root and `.venv/bin/pip install -e . pytest`. Confirm with `.venv/bin/python -m pytest test.py` (exit 0) before finishing.

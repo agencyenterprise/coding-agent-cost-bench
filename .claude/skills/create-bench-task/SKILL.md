@@ -7,7 +7,7 @@ description: Create a new task for the coding-agent cost benchmark in this repo 
 
 Guide the user through adding one task to this benchmark, then delegate the build+validation
 to the `task-smith` agent, then optionally run it. Read `README.md` and an existing task
-(`tasks/demo-click-parser`) first if you need the current conventions.
+(`tasks/demo-swebench-psf__requests-6028`) first if you need the current conventions.
 
 ## 1. Ask the right questions (only what's still unknown)
 Use `AskUserQuestion`. Cover:

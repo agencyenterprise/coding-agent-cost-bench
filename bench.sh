@@ -38,7 +38,7 @@ Usage: ./bench.sh [options]
   -m, --models "a,b"    comma/space list of harness:model [$MODELS_STR]
       --model H:REF     add one harness:model (repeatable), e.g. --model claude:anthropic/claude-opus-4-8
   -t, --tasks DIR       tasks directory                   [$TASKS_DIR]
-      --task NAME       run ONLY this task (dir name under --tasks), e.g. --task demo-kanban-orchestration
+      --task NAME       run ONLY this task (dir name under --tasks), e.g. --task demo-swebench-psf__requests-6028
       --prompts LIST    per-task prompt files to run (comma/space)     [$PROMPTS_STR]
       --prompt FILE     alias for --prompts with one file; pass "prompt.v1.txt prompt.v2.txt prompt.v3.txt" for the full sweep
   -j, --jobs N          max task×run jobs in parallel WITHIN a group; groups (harness,model) run one at a time [$JOBS]

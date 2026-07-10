@@ -56,7 +56,7 @@ Common flags:
 | `--model H:REF` | add one entry (**repeatable**) | — |
 | `-j, --jobs N` | max task×run jobs **in parallel within a group** | 30 |
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
-| `--task NAME` | run **only** this task (dir name), e.g. `--task demo-kanban-orchestration` | all |
+| `--task NAME` | run **only** this task (dir name), e.g. `--task demo-swebench-psf__requests-6028` | all |
 | `--prompts LIST` | restrict to these per-task prompt files (comma/space) | **all `prompt*.txt`** |
 | `--delete-repo` | discard the mutated repo | keep |
 
