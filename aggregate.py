@@ -236,6 +236,36 @@ def union_seconds(intervals):
     return total
 
 
+def attribute_cost(owned_intervals, rate_per_sec):
+    """Split an endpoint bill across the calls that ran on it, by who was busy when.
+
+    owned_intervals: [(start, end, owner), ...] absolute-epoch generation windows, each tagged with
+    the run (owner) that produced it. rate_per_sec: $/second the endpoint cost while it was up.
+
+    Every instant costs `rate_per_sec`, and that instant's cost is split EQUALLY among the calls
+    active right then. So a call running alone for 10s at $1/s costs $10; two calls sharing the same
+    10s cost $5 each ($10 total, not $20); the sum over owners always equals rate x union(windows) —
+    the wall-clock bill for the endpoint being up, never double-counted for parallelism.
+
+    Returns {owner: dollars}. Uses a sweep line over the interval endpoints (exact, not per-second)."""
+    ivs = [(s, e, o) for (s, e, o) in owned_intervals if e > s]
+    out = defaultdict(float)
+    if not ivs:
+        return out
+    pts = sorted({s for s, _e, _o in ivs} | {e for _s, e, _o in ivs})
+    for a, b in zip(pts, pts[1:]):
+        dur = b - a
+        if dur <= 0:
+            continue
+        active = [o for (s, e, o) in ivs if s < b and e > a]   # owners overlapping the slice [a, b)
+        if not active:
+            continue                                            # gap: endpoint idle, nobody billed
+        share = dur * rate_per_sec / len(active)
+        for o in active:
+            out[o] += share
+    return out
+
+
 def task_complexity(task_stat):
     """Empirical, RELATIVE complexity per (task, prompt version) from observed effort pooled across
     all runs/models of that pair: mean steps, tool calls, output tokens, and duration — each min-max
@@ -342,7 +372,21 @@ def main():
         except Exception:
             resolved_map = {}
 
+    # Actual endpoint bill (billing.py -> billing.json). If present, per-call dollars are attributed
+    # from the REAL $/second Modal billed over the window; otherwise fall back to the modeled --rate.
+    billing = {}
+    _bp = os.path.join(RESULTS_DIR, "billing.json")
+    if os.path.exists(_bp):
+        try:
+            billing = json.load(open(_bp))
+        except Exception:
+            billing = {}
+    billed_rate_per_sec = None
+    if billing.get("effective_hourly"):
+        billed_rate_per_sec = billing["effective_hourly"] / 3600.0   # real $/s the endpoint cost
+
     detailed = []
+    owned_ivs = []                  # (start, end, owner-key) generation windows, for bill attribution
     # arm = (harness, model, prompt-version): the prompt version is a first-class sweep dimension,
     # so v1 vs v2 of the SAME (harness, model) are separate rows and never pooled together.
     intervals = defaultdict(list)   # arm -> [(start, end), ...] run intervals (uptime)
@@ -378,7 +422,10 @@ def main():
                 tin, tout, ccost = load_usage(row.get("outdir", ""))
                 pm = log_stats(row.get("outdir", ""))  # work/efficiency metrics from opencode log
                 if is_self_hosted(m):
-                    genivs[key] += gen_intervals(row.get("outdir", ""))   # absolute gen windows to union
+                    _ivs = gen_intervals(row.get("outdir", ""))
+                    genivs[key] += _ivs                                   # absolute gen windows to union
+                    owner = (row["task"], h, m, pv, row.get("run"))       # tag each window with its run
+                    owned_ivs += [(s_i, e_i, owner) for (s_i, e_i) in _ivs]
                 cs = pm["call_s"]
                 basis = "gpu_calls" if is_self_hosted(m) else "api_ccusage"
             for k in eff[key]:
@@ -401,10 +448,26 @@ def main():
                 "call_s": round(cs, 2),
                 "tokens_in": tin, "tokens_out": tout,
                 "cost_usd": run_cost,
+                "billed_usd": "",       # actual bill attributed to this run (filled below), self-hosted only
                 "cost_basis": basis,
             })
     if not detailed:
         sys.exit("manifest has no rows")
+
+    # Attribute the ACTUAL endpoint bill across GLM runs by concurrency: each second the endpoint was
+    # up is split among the calls busy then, so parallel calls share it (see attribute_cost). Rate is
+    # the real $/s from billing.json when present, else the modeled --rate. The sum over runs equals
+    # rate x union(all gen windows) = the wall-clock bill for the endpoint being up.
+    attr_rate = billed_rate_per_sec if billed_rate_per_sec is not None else GPU_HOURLY_USD / 3600.0
+    attributed = attribute_cost(owned_ivs, attr_rate)
+    for d in detailed:
+        if is_self_hosted(d["model"]):
+            o = (d["task"], d["harness"], d["model"], d["prompt"], d["run"])
+            if o in attributed:
+                d["billed_usd"] = round(attributed[o], 4)
+        else:
+            d["billed_usd"] = d["cost_usd"]         # API model: billed = per-token cost, no shared endpoint
+    billed_total = round(sum(attributed.values()), 4)       # = attributed active portion of the AEP bill
 
     with open(os.path.join(RESULTS_DIR, "results_detailed.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(detailed[0].keys()))
@@ -902,14 +965,16 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         for d in detailed:
             k = (d["task"], d["harness"], d["model"])
             if k not in agg:
-                agg[k] = {"runs": 0, "passes": 0, "cost": [], "dur": []}
+                agg[k] = {"runs": 0, "passes": 0, "cost": [], "billed": [], "dur": []}
                 order_pt.append(k)
             e = agg[k]
             e["runs"] += 1
             e["passes"] += 1 if d["status"] == "pass" else 0
-            c, du = _f(d.get("cost_usd")), _f(d.get("duration_s"))
+            c, du, b = _f(d.get("cost_usd")), _f(d.get("duration_s")), _f(d.get("billed_usd"))
             if c is not None:
                 e["cost"].append(c)
+            if b is not None:
+                e["billed"].append(b)
             if du is not None:
                 e["dur"].append(du)
         order_pt.sort(key=lambda k: (_tshort(k[0]), _arm_label(k[1], k[2])))
@@ -919,6 +984,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             task, h, m = k
             e = agg[k]
             cost = statistics.mean(e["cost"]) if e["cost"] else None
+            billed = statistics.mean(e["billed"]) if e["billed"] else None
             dur = statistics.mean(e["dur"]) if e["dur"] else None
             bg = ("var(--best)" if e["passes"] == e["runs"]
                   else ("rgba(220,38,38,.16)" if e["passes"] == 0 else "rgba(217,119,6,.16)"))
@@ -932,13 +998,19 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             ptbody.append(
                 f"{tr}<td>{task_cell}</td><td>{esc(_arm_label(h, m))}</td>"
                 f"<td class='num' style='background:{bg}'>{e['passes']}/{e['runs']}</td>"
+                f"<td class='num'>{usd(billed) if billed is not None else '·'}</td>"
                 f"<td class='num'>{usd(cost) if cost is not None else '·'}</td>"
                 f"<td class='num'>{(str(round(dur))+'s') if dur is not None else '·'}</td></tr>")
         pertask_html = ("<h2>Per-task cost &amp; result</h2>"
-                        "<p class=note>Every task, with its arms grouped underneath: whether each passed and what "
-                        "it cost (sole, one task at a time). A blank $/task means the cost is unknown, usually a "
-                        "run that timed out before it could report.</p>"
-                        + tbl([("Task", 0), ("Arm", 0), ("Passed", 1), ("$/task", 1), ("Avg time", 1)], ptbody))
+                        "<p class=note>Every task, with its arms grouped underneath, and whether each passed. "
+                        "<b>Billed $</b> is your real number: the actual endpoint bill split across calls by "
+                        "concurrency, so a task only carries the seconds it was truly generating and parallel "
+                        "tasks share the seconds they overlapped (Opus is per-token, so its billed = its API cost). "
+                        "<b>$/task sole</b> is the modeled cost if that task had the GPU entirely to itself — the "
+                        "ceiling you'd pay with zero batching. A blank means unknown, usually a run that timed out "
+                        "before it could report.</p>"
+                        + tbl([("Task", 0), ("Arm", 0), ("Passed", 1), ("Billed $", 1),
+                               ("$/task sole", 1), ("Avg time", 1)], ptbody))
 
     # ---- #4 break-even concurrency vs Opus (derived from measured sole cost) ----
     be_html = ""
@@ -996,18 +1068,23 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         _eh = billing.get("effective_hourly")
         _ws = (billing.get("window_start") or "")[:16].replace("T", " ")
         _we = (billing.get("window_end") or "")[:16].replace("T", " ")
+        _active = round(sum(_f(d.get("billed_usd")) or 0 for d in (detailed or [])
+                            if is_self_hosted(d.get("model", ""))), 2)   # attributed to GLM calls
+        _idle = round(max(0.0, billing["cost"] - _active), 2)            # warm-but-not-generating remainder
         billing_html = (
             "<h2>Actual endpoint bill (ground truth)</h2>"
-            f"<p class=note>The per-task costs below are <i>modeled</i> (generation seconds × rate). This is the "
-            f"real number for comparison: what Modal actually billed for the <code>{esc(billing.get('app',''))}</code> "
-            f"app while this run was in flight, pulled straight from the billing API. Only that one app is counted "
-            f"(grading and other workspace apps are excluded), and only the run's own hours "
+            f"<p class=note>What Modal actually billed for the <code>{esc(billing.get('app',''))}</code> endpoint "
+            f"while this run was in flight, straight from the billing API. Only that one app is counted (grading "
+            f"and other workspace apps are excluded), over the run's own window "
             f"(<b>{esc(_ws)}</b> to <b>{esc(_we)}</b> UTC), with the first and last hour prorated by how much of "
-            f"the hour the run actually spanned.</p>"
+            f"the hour the run spanned.</p>"
             f"<p class=note><b>${billing['cost']:.2f}</b> billed over <b>{_wh:.2f} h</b>"
-            + (f" (≈ <b>${_eh:.2f}/hr</b> effective)." if _eh else ".")
-            + " That covers the endpoint staying warm end-to-end, so it folds in idle time between tasks and the "
-              "cold-start / scale-down tails the modeled per-task figures don't try to capture.</p>")
+            + (f" (≈ <b>${_eh:.2f}/hr</b> while up)." if _eh else ".")
+            + " That splits into <b>${:.2f} spent actively generating</b> — attributed to individual calls in the "
+              "<i>Billed $</i> column below, each second shared among whatever was running at that moment — and "
+              "<b>${:.2f} warm but not generating</b> (gaps between steps, local tool time, and the cold-start / "
+              "scale-down edges). You pay for the endpoint being up, not per request, so the warm slice is the "
+              "price of holding the GPUs ready.</p>".format(_active, _idle))
 
     # --- glossary: plain-English definitions of every term used in the tables above ---
     _terms = [
@@ -1019,8 +1096,17 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         ("FAIL_TO_PASS", "The bug's tests. They have to go from failing to passing; that's what proves the fix."),
         ("PASS_TO_PASS", "Tests that already passed. They have to stay passing, so a fix can't quietly break "
                          "something else."),
+        ("Billed $", "The real money. Your actual endpoint bill split across calls by concurrency: each second "
+                     "the endpoint was up is shared among whatever calls were generating at that moment, so a "
+                     "task carries only its own generation time and parallel tasks split the seconds they "
+                     "overlapped. Summed over all calls it equals the active part of the Modal bill. For an API "
+                     "model (Opus) it's just the per-token cost."),
+        ("Actively generating vs warm", "Of the endpoint bill, the part spent while some call was generating "
+                                        "(split into the Billed $ column) versus the part where the endpoint was "
+                                        "up but idle — between-step gaps, local tool time, and the cold-start / "
+                                        "scale-down edges. You pay for the GPUs being held, not per request."),
         ("$/task sole", "What one task costs running alone on the GPU: its own generation seconds times the "
-                        "hourly rate."),
+                        "hourly rate. A modeled ceiling with zero batching, not what you were billed."),
         ("$/task packed", "What a task costs when the endpoint runs many at once: the combined generation time "
                           "divided by the number of tasks. Lower than sole because the idle gaps overlap."),
         ("Median $", "The middle per-run cost. Half the runs cost less, half cost more. Ignores outliers."),
