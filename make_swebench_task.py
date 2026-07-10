@@ -12,8 +12,8 @@ Usage (run from the repo root):
 Then run it like any other task:
     ./bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8"
 
-Emits prompt.v1/v2/v3.txt, setup.sh, repo.git, test.patch, f2p.txt. Graded on Modal (grade_swe.sh) —
-no host verify.sh.
+Emits prompt.v1/v2/v3.txt, repo.git, test.patch, f2p.txt, meta.json. Graded on Modal (grade_swe.sh);
+the test patch is applied ONLY at grade time (tests hidden during generation) — no setup.sh, no verify.sh.
 
 Caveats (see SWEBENCH.md):
 - Each instance needs its repo's own deps; heavy scientific repos (numpy/scipy) may be slow/flaky.
@@ -83,18 +83,11 @@ def main() -> None:
         "difficulty": row.get("difficulty", ""),
     }, indent=2) + "\n")
 
-    # setup/verify run in the WORK dir but their aux files (test.patch, f2p.txt) live next to the
-    # script in the task dir. Resolve that dir at RUNTIME from $BASH_SOURCE — never bake an absolute
-    # path (these are committed demo tasks and must be portable across machines).
-    here = 'here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
-    (d / "setup.sh").write_text(
-        "#!/usr/bin/env bash\n"
-        "# apply the SWE-bench test patch (adds/updates the failing tests)\n"
-        "set -euo pipefail\n"
-        + here
-        + 'git apply "$here/test.patch"\n'
-        'echo "applied SWE-bench test patch"\n'
-    )
+    # NO setup.sh: we deliberately do NOT apply the test patch during generation. The agent works from
+    # the ISSUE alone, on the repo at base_commit — the FAIL_TO_PASS tests are HIDDEN (as in real
+    # SWE-bench), so the model can't read the answer key. The test patch is applied only at grade time,
+    # inside the instance's Docker image (swe_eval_modal.py runs the dataset's eval_script). test.patch
+    # stays in the task dir as the SWE marker + reference, but nothing applies it locally.
     # No host verify.sh: SWE tasks are graded on Modal via the instance's official Docker image
     # (grade_swe.sh -> swe_eval_modal.py -> resolved.json), which reads FAIL_TO_PASS from the dataset.
     # Still sanity-check the ids — the grader keys on them, so malformed ids => the task can't score.
@@ -139,7 +132,6 @@ def main() -> None:
         f"pytest`. Make the failing tests pass, then confirm with `.venv/bin/python -m pytest {suite}` "
         "(exit 0) before finishing.\n"
     )
-    (d / "setup.sh").chmod(0o755)
 
     print(f"wrote {d}  (repo {repo} @ {base[:10]}, {len(f2p)} FAIL_TO_PASS tests)")
     print("run:  ./bench.sh --runs 1")

@@ -1059,7 +1059,14 @@ passing before trusting the task.</p>
 between models. <b>Cost basis:</b>
 self-hosted GLM = GPU-seconds × hourly rate; Claude = tokens × list price. <b>&ldquo;sole&rdquo;</b> = one
 task at a time on the endpoint; <b>&ldquo;packed&rdquo;</b> = the endpoint shared by concurrent tasks,
-where self-hosting gets cheap.</p>"""
+where self-hosting gets cheap.</p>
+<p class="note"><b>Cold start &amp; scale-down:</b> the Modal endpoint <b>scales to zero when idle</b>, so
+you pay GPU time <i>only while it's actually serving</i> — no charge for idle hours (unlike a always-on
+box). The trade-off is a <b>cold start</b>: the first request after it has scaled down spins the 8×B200
+back up (a few minutes; the very first boot also downloads the ~700&nbsp;GB weights). So cold-start
+<i>latency</i> is a real cost for bursty, low-traffic use, while sustained/packed use amortizes it away.
+The $/task figures here count <b>generation time only</b> — they exclude cold-start wait, which you'd
+add for a true first-request latency budget.</p>"""
 
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

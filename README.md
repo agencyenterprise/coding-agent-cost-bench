@@ -168,13 +168,14 @@ It writes `tasks/demo-swebench-<id>/`:
 | File | Purpose |
 |---|---|
 | `prompt.v1/v2/v3.txt` | issue verbatim (`v1`), shaped template (`v2`), control (`v3`) — see [PROMPTS.md](PROMPTS.md) |
-| `setup.sh` | applies the dataset test patch (introduces the failing tests) before the agent runs |
-| `test.patch`, `f2p.txt` | the dataset's test patch + FAIL_TO_PASS ids (reference) |
+| `test.patch`, `f2p.txt` | the dataset's test patch + FAIL_TO_PASS ids (marker/reference; applied only at grade time) |
 | `repo.git` | `<url> <base_commit>` — cloned fresh per run |
+| `meta.json` | repo / version / difficulty (for the report) |
 
-Grading is on Modal (`--swe-grade` / `grade_swe.sh`) — there is **no host `verify.sh`**. The runner
-makes a fresh isolated copy of the repo per run, runs `setup.sh`, runs the agent, and saves the
-agent's diff as `model.patch` for the Modal grader.
+**Tests are hidden during generation** (real SWE-bench style) — there is no `setup.sh`, so the agent
+works from the issue alone on the repo at `base_commit`; the test patch is applied only at grade time.
+Grading is on Modal (`--swe-grade` / `grade_swe.sh`) — **no host `verify.sh`**. The runner makes a
+fresh isolated copy of the repo per run, runs the agent, and saves its diff as `model.patch` for the grader.
 
 Only `tasks/demo-*` are committed; other tasks stay local (gitignored). Keep verification
 **objective and offline** (pytest, `dbt parse`, a compiled-SQL diff). For a *publishable*

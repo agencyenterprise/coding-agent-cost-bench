@@ -33,11 +33,14 @@ Under the hood (`--swe-grade` chains these):
 
 ## What a generated task contains
 - `repo.git` — the instance's repo pinned to its `base_commit`
-- `setup.sh` — applies the dataset's **test patch** (introduces the failing tests) during generation
-- `test.patch`, `f2p.txt` — the dataset's test patch + FAIL_TO_PASS ids (reference; grading reads them from the dataset)
+- `test.patch`, `f2p.txt` — the dataset's test patch + FAIL_TO_PASS ids (reference/marker; the grader reads them from the dataset)
 - `prompt.v1/v2/v3.txt` — the issue verbatim (v1), shaped template (v2), control (v3) — see PROMPTS.md
+- `meta.json` — repo / version / difficulty tier (for the report)
 
-There is **no `verify.sh`** — SWE tasks are graded on Modal, never on the host.
+**Tests are hidden during generation** (real SWE-bench style): there is no `setup.sh` and the test
+patch is **not** applied locally — the agent works from the issue alone, on the repo at `base_commit`.
+The test patch is applied only at grade time, inside the instance's Docker image. And there is **no
+`verify.sh`** — grading is on Modal, never on the host.
 
 ## Validate a new instance before trusting it
 Confirm the grader resolves the instance's **gold** patch on Modal (proves the image exists and the
