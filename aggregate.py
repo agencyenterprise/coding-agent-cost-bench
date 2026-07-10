@@ -708,21 +708,26 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 
     # ---- success by model family (GLM all variants vs API models) ----
     fam = family_rollup(rows)
-    fam_body = [f"<tr><td><b>{esc(x['family'])}</b></td><td class='num'>{x['passes']}</td>"
+    def _fam_row(x):
+        rate_label = f"{x['success_rate']:.1%}" if x['success_rate'] != '' else '—'
+        return (f"<tr><td><b>{esc(x['family'])}</b></td><td class='num'>{x['passes']}</td>"
                 f"<td class='num'>{x['runs']}</td>"
-                f"<td>{sbar(x['success_rate'], f'{x['success_rate']:.1%}' if x['success_rate']!='' else '—')}</td></tr>"
-                for x in fam]
+                f"<td>{sbar(x['success_rate'], rate_label)}</td></tr>")
+    fam_body = [_fam_row(x) for x in fam]
     fam_tbl = tbl([("Model / arm", 0), ("Passed", 1), ("Total", 1), ("Success", 0)], fam_body)
 
     # ---- cost per completed task (per harness/model/prompt) ----
-    cost_body = [
-        f"<td>{esc(harness_disp(r['harness']))}</td><td>{esc(_mname(r['model']))}</td>"
-        f"<td>{esc(r['prompt'])}</td>"
-        f"<td>{sbar(r['success_rate'], f'{r['success_rate']:.0%}', f'<span class=mut>{r['passes']}/{r['runs']}</span>')}</td>"
-        f"<td class='num'>{usd(r['cost_per_successful_task'])}</td>"
-        f"<td class='num'>{usd(packed(r))}</td>"
-        f"<td class='num'>{(str(round(r['avg_duration_s']))+'s') if r['avg_duration_s']!='' else '—'}</td>"
-        for r in rows]
+    def _cost_row(r):
+        rate_label = f"{r['success_rate']:.0%}"
+        passes_label = f"<span class=mut>{r['passes']}/{r['runs']}</span>"
+        return (
+            f"<td>{esc(harness_disp(r['harness']))}</td><td>{esc(_mname(r['model']))}</td>"
+            f"<td>{esc(r['prompt'])}</td>"
+            f"<td>{sbar(r['success_rate'], rate_label, passes_label)}</td>"
+            f"<td class='num'>{usd(r['cost_per_successful_task'])}</td>"
+            f"<td class='num'>{usd(packed(r))}</td>"
+            f"<td class='num'>{(str(round(r['avg_duration_s']))+'s') if r['avg_duration_s']!='' else '—'}</td>")
+    cost_body = [_cost_row(r) for r in rows]
     cost_tbl = tbl([("Harness", 0), ("Model", 0), ("Prompt", 0), ("Success", 0),
                     ("$/task sole", 1), ("$/task packed", 1), ("Avg time", 1)],
                    [f"<tr>{c}</tr>" for c in cost_body])
@@ -764,12 +769,14 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     order = [(r["harness"], r["model"], r["prompt"]) for r in rows]
     glm = next((k for k in order if is_self_hosted(k[1])), None)
     glm_out = eff[glm]["out"] if glm else 0
-    eff_body = [
-        f"<tr><td>{esc(harness_disp(k[0]))}</td><td>{esc(_mname(k[1]))}</td><td>{esc(k[2])}</td>"
-        f"<td class='num'>{eff[k]['steps']:,}</td><td class='num'>{eff[k]['tools']:,}</td>"
-        f"<td class='num'>{eff[k]['out']:,}</td>"
-        f"<td class='num'>{(f'{eff[k]['out']/glm_out:.2f}×') if (glm and glm_out) else '—'}</td></tr>"
-        for k in order]
+    def _eff_row(k):
+        ratio_label = f"{eff[k]['out']/glm_out:.2f}×" if (glm and glm_out) else '—'
+        return (
+            f"<tr><td>{esc(harness_disp(k[0]))}</td><td>{esc(_mname(k[1]))}</td><td>{esc(k[2])}</td>"
+            f"<td class='num'>{eff[k]['steps']:,}</td><td class='num'>{eff[k]['tools']:,}</td>"
+            f"<td class='num'>{eff[k]['out']:,}</td>"
+            f"<td class='num'>{ratio_label}</td></tr>")
+    eff_body = [_eff_row(k) for k in order]
     eff_tbl = tbl([("Harness", 0), ("Model", 0), ("Prompt", 0), ("Steps", 1), ("Tools", 1),
                    ("Output Tok", 1), ("vs GLM", 1)], eff_body)
 
