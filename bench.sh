@@ -279,8 +279,14 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
   done
   dur="$(python3 -c "print(f'{$end - $start:.2f}')")"
 
+  # SWE-bench tasks (they carry a test.patch) are graded on Modal via the official per-instance Docker
+  # image (grade_swe.sh -> resolved.json); host verify.sh is redundant there — and its per-run
+  # `pip install` wastes disk/time and fails anyway on old-Python repos. So skip it for SWE tasks and
+  # let resolved.json set the real pass/fail at aggregate time. Non-SWE tasks still use verify.sh.
   status="n/a"
-  if [ -f "$task_abs/verify.sh" ]; then
+  if [ -f "$task_abs/test.patch" ]; then
+    : # graded on Modal (resolved.json) — see grade_swe.sh / swe_eval_modal.py
+  elif [ -f "$task_abs/verify.sh" ]; then
     ( cd "$work" && PATH="$agent_path" bash "$task_abs/verify.sh" ) > "$outdir/verify.log" 2>&1 \
       && status="pass" || status="fail"
   fi
