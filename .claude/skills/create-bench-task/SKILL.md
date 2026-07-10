@@ -1,87 +1,54 @@
 ---
 name: create-bench-task
-description: Create a new task for the coding-agent cost benchmark in this repo (glm-review). Asks the right questions, builds the tasks/<name>/ files, validates the fail→pass loop, and optionally runs it. Use when the user wants to add/create a benchmark task, add a repo to the benchmark, or "make a new task".
+description: Add a task to the coding-agent cost benchmark in this repo (glm-review). Tasks are real SWE-bench Verified instances, graded on Modal (no host verify.sh). Use when the user wants to add/create a benchmark task or add a SWE-bench instance.
 ---
 
-# Create a benchmark task
+# Add a benchmark task
 
-Guide the user through adding one task to this benchmark, then delegate the build+validation
-to the `task-smith` agent, then optionally run it. Read `README.md` and an existing task
-(`tasks/demo-swebench-psf__requests-6028`) first if you need the current conventions.
+The benchmark is **SWE-bench Verified** instances: generated locally, then **graded on Modal** in each
+instance's official Docker image. Adding a task = materialize an instance and confirm it grades. There
+is **no host `verify.sh`** and no invented-bug injection. Read `SWEBENCH.md` for the full picture.
 
-## 1. Ask the right questions (only what's still unknown)
-Use `AskUserQuestion`. Cover:
-- **Source** — one of:
-  - *Public remote repo* (`repo.git`, pinned tag/SHA) — best for a publishable/shareable task → name `demo-*`.
-  - *Local/private repo* (`repo.path`) — internal signal only → NOT `demo-*` (stays git-ignored).
-  - *Self-contained* (`repo/`) — you ship a tiny buggy snippet + its tests.
-  - *SWE-bench Verified instance* — if so, don't hand-build; run `python3 make_swebench_task.py <instance_id>` instead and stop.
-- **If a repo:** the URL (or path) and the **exact ref** (tag/SHA) to pin.
-- **Task kind:** injected bug (recommended — clean fail→pass) vs an existing failing test vs a small feature.
-- **Verification:** how success is checked, and confirm it runs **offline** (pytest / `dbt parse` / lint). If they don't know, let `task-smith` discover a well-tested pure function.
-- **Name:** default `demo-<repo>-<short>`; confirm `demo-` if it should be committed.
+## 1. Pick an instance
+Ask which instance (or criteria: repo, difficulty, Python era). **Any Verified instance works** — the
+Modal grader supplies the exact environment, so old-Python / django / sympy / pytest / scientific repos
+are all fine. To browse candidates, read the cached Verified parquet (path is in `make_swebench_task.py`)
+and filter by `repo` and `difficulty` (`<15 min fix` … `>4 hours`) for a good spread.
 
-If the user already gave enough (e.g. "add `pallets/flask` @ 3.0.0, break url_for"), skip
-straight to step 2.
-
-## 2. Delegate the build + validation
-Spawn the **`task-smith`** agent with: the source (URL/path/ref or "self-contained"), the
-task name, the kind, and any verification hint. It will find the injection point, write
-`tasks/<name>/{prompt.v1.txt,prompt.v2.txt,verify.sh,setup.sh,repo.git|repo.path|repo/}`, and
-**validate the fail→pass loop** in a temp dir before returning. Relay its report (bug location,
-verify command, `N failed → M passed`).
-
-If `task-smith` reports it couldn't find a reliable offline injection point, tell the user
-and suggest an alternative repo or a self-contained task — don't ship an unvalidated task.
-
-## 3. Offer to run it
-Ask if they want a smoke run now:
+## 2. Materialize it
 ```bash
-source .env
-./bench.sh --runs 1 --model opencode:modal/zai-org/GLM-5.2-FP8 \
-  # (or scope to the new task by temporarily pointing --tasks at a dir with just it)
+python3 make_swebench_task.py <instance_id>      # e.g. psf__requests-6028
 ```
-To run only the new task, its dir can be isolated, or run the full set and read its rows
-in `results/results_detailed.csv`.
+Writes `tasks/demo-swebench-<id>/`: `prompt.v1/v2/v3.txt`, `setup.sh`, `repo.git`, `test.patch`,
+`f2p.txt`. No `verify.sh` — grading is on Modal.
 
-## Prompt versions (emit BOTH — see PROMPTS.md)
-Every task ships two prompt files; the bench runs both and reports the `v1 → v2` delta.
-
-**`prompt.v1.txt` (v1 — baseline).** The terse, unstructured ask a developer would actually type.
-For invented tasks: a couple of sentences (symptom + "make the tests pass"). For SWE-bench-style
-tasks: the **raw report verbatim, nothing added** (no venv hint, no scope rules).
-
-**`prompt.v2.txt` (v2 — shaped uniform template).** The SAME structure for every task, so phrasing
-isn't a confound. `task-smith` must emit exactly these sections:
+## 3. Validate it grades (gold patch resolves on Modal)
+The equivalent of the old fail→pass check, done in the correct environment: confirm the instance's
+image exists and its **gold** patch resolves.
+```bash
+img="swebench/sweb.eval.x86_64.$(python3 -c "print('<id>'.replace('__','_1776_'))")"
+docker manifest inspect "$img:latest" >/dev/null && echo "image ok"
+# write a one-line predictions.jsonl whose model_patch is the dataset `patch`, then:
+python3 swe_eval_modal.py --predictions gold.jsonl     # expect RESOLVED
 ```
-## Task
-<one short paragraph: what's broken, observed vs expected. For SWE-bench-style tasks, embed the raw
-report verbatim under "Reported issue (verbatim):" as a > blockquote.>
+If the image is missing or the gold patch doesn't resolve, pick a different instance.
 
-## Success criteria
-- `<suite command>` exits 0 with all tests passing.   # a FILE/dir-level pytest command, NOT the exact
-- Do not modify any test files.                        # failing node ids — verify.sh stays the hidden grader
-
-## Scope
-- Make the smallest change that fully fixes the issue.
-- If the same defect appears in more than one place, fix every occurrence.
-- Do not refactor, reformat, modernize, upgrade dependencies, or fix unrelated issues.
-
-## Environment
-- Fresh clone, no virtualenv. Create `.venv` at the repo root.
-- Install only what is required to run the tests (e.g. `.venv/bin/pip install -e . pytest`). Do not install anything else.
-
-## Before finishing
-- Run the Success criteria command. If anything fails, keep working.
-- Confirm your diff contains only changes required by the fix.
+## 4. Run it
+```bash
+./run_auto_endpoint.sh --runs 3 --task demo-swebench-<id> --swe-grade
 ```
-Anti-overwork (minimal change, install only what's needed) and anti-underwork (fix every occurrence,
-run the suite) are deliberate. `verify.sh` runs the exact grader tests; the v2 suite command is
-broader so it doesn't hand the agent the failing node ids. Both versions run by default (restrict
-with `--prompts prompt.v1.txt`). `make_swebench_task.py` already emits both files.
+Generates the patches, grades on Modal (`resolved.json`), and updates the report.
+
+## Prompt versions (make_swebench_task.py emits all three — see PROMPTS.md)
+- **`prompt.v1.txt`** — the raw GitHub issue, verbatim (nothing added).
+- **`prompt.v2.txt`** — shaped uniform template: issue blockquote + a FILE-level suite command +
+  scope / environment / checklist (same structure for every task, so phrasing isn't a confound).
+- **`prompt.v3.txt`** — control: v1's terse phrasing + only v2's operational bits (env + verify command).
+
+The default matrix runs `prompt.v2.txt`; pass `--prompts "prompt.v1.txt prompt.v2.txt prompt.v3.txt"`
+for the full sweep.
 
 ## Guardrails
-- Never commit secrets; public tasks use `repo.git` with `{env:...}`-free content only.
-- Only `demo-*` tasks are git-tracked — respect the naming for shareable ones.
-- A task without a **validated, offline** `verify.sh` is not done. If it can't be validated,
-  say so rather than shipping noise into the benchmark.
+- Only `demo-*` tasks are git-tracked.
+- A task isn't done until its **gold patch resolves on Modal** — never ship an instance you haven't
+  confirmed grades.
