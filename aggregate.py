@@ -937,6 +937,70 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     chips_html = "".join(f'<div class="chip"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for k, v in chips)
     gen = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+    # --- "How this benchmark works": plain-English method + an SVG of the generate→grade pipeline ---
+    swe_tasks = {r["task"] for r in crows if "swebench" in r["task"].lower()} if crows else set()
+    nswe = len(swe_tasks) or ntask
+    nrepo = len({t.split("demo-swebench-", 1)[-1].rsplit("-", 1)[0] for t in swe_tasks})
+    _proj = f", across {nrepo} projects" if nrepo else ""
+    _box = "fill='var(--card)' stroke='var(--border)' rx='12'"
+    method_html = f"""
+<h2>How this benchmark works</h2>
+<p class="note">We measure one thing: <b>what it costs to actually finish a coding task</b> — not tokens,
+not leaderboard scores. A task counts only when the project's own tests flip from failing to passing.
+Every model runs the same {nswe} real GitHub issues (SWE-bench Verified{_proj}, from 15-minute fixes to
+multi-hour ones) through the same harness; the only things we change are the model and its settings.</p>
+<div class="tw" style="padding:16px 10px">
+<svg viewBox="0 0 960 200" role="img" aria-label="Pipeline: generate locally, then grade in the cloud"
+     style="width:100%;height:auto;max-width:960px;display:block;margin:auto">
+  <defs><marker id="arw" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
+    <path d="M0,0 L7.5,3 L0,6 Z" fill="var(--muted)"/></marker></defs>
+  <text x="6" y="26" font-size="12" fill="var(--muted)">Two phases: <tspan fill="var(--fg)" font-weight="600">generate locally</tspan>, then <tspan fill="var(--fg)" font-weight="600">grade in the cloud</tspan> — the same split the official SWE-bench uses.</text>
+  <rect x="6" y="54" width="150" height="92" {_box}/>
+  <text x="81" y="84" text-anchor="middle" font-size="14" font-weight="700" fill="var(--fg)">Tasks</text>
+  <text x="81" y="105" text-anchor="middle" font-size="11" fill="var(--muted)">{nswe} real issues</text>
+  <text x="81" y="121" text-anchor="middle" font-size="11" fill="var(--muted)">SWE-bench Verified</text>
+  <rect x="176" y="54" width="170" height="92" {_box}/>
+  <text x="190" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">1 · </tspan>Generate</text>
+  <text x="190" y="105" font-size="11" fill="var(--muted)">bench.sh · local</text>
+  <text x="190" y="121" font-size="11" fill="var(--muted)">agent writes a fix</text>
+  <text x="261" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">records GPU-seconds → cost</text>
+  <rect x="366" y="54" width="170" height="92" {_box}/>
+  <text x="380" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">2 · </tspan>Harvest</text>
+  <text x="380" y="105" font-size="11" fill="var(--muted)">make_predictions</text>
+  <text x="380" y="121" font-size="11" fill="var(--muted)">collect the diffs</text>
+  <rect x="556" y="54" width="170" height="92" {_box}/>
+  <text x="570" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">3 · </tspan>Grade</text>
+  <text x="570" y="105" font-size="11" fill="var(--muted)">Modal · x86 Docker</text>
+  <text x="570" y="121" font-size="11" fill="var(--muted)">run project tests</text>
+  <text x="641" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">official pass / fail</text>
+  <rect x="746" y="54" width="170" height="92" {_box}/>
+  <text x="760" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">4 · </tspan>Report</text>
+  <text x="760" y="105" font-size="11" fill="var(--muted)">aggregate</text>
+  <text x="760" y="121" font-size="11" fill="var(--muted)">cost ÷ passes</text>
+  <line x1="158" y1="100" x2="174" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="348" y1="100" x2="364" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="538" y1="100" x2="554" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="728" y1="100" x2="744" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
+</svg>
+</div>
+<p class="note"><b>1 · Generate</b>: <code>bench.sh</code> hands each agent the bug report and
+the code; it writes a fix. We record the seconds the model spent generating — that time × the GPU's
+hourly rate is the cost. <b>2 · Harvest</b>: <code>make_predictions.py</code> pulls each attempt's change
+(a git diff). <b>3 · Grade</b> (cloud): <code>swe_eval_modal.py</code> runs each fix inside that project's
+official SWE-bench Docker image — the exact old Python and dependencies it needs — and runs the project's
+real test suite. A fix passes only if every target test <i>and</i> every already-passing test still
+passes. <b>4 · Report</b>: <code>aggregate.py</code> divides cost by the fixes that actually worked.</p>
+<p class="note"><b>Why two machines?</b> Writing the fix needs the model (fast, local); grading a
+years-old project needs its exact environment, which only lives in that project's container — so grading
+runs in the cloud. It is the same method the official SWE-bench uses, so our pass/fail matches the
+published standard. Each task also ships a known-good <i>gold</i> fix, and we confirm the grader marks it
+passing before trusting the task.</p>
+<p class="note"><b>What we vary:</b> reasoning effort (default / high / off) and prompt wording
+(v1 baseline · v2 shaped · v3 control) — nothing else is changed between models. <b>Cost basis:</b>
+self-hosted GLM = GPU-seconds × hourly rate; Claude = tokens × list price. <b>&ldquo;sole&rdquo;</b> = one
+task at a time on the endpoint; <b>&ldquo;packed&rdquo;</b> = the endpoint shared by concurrent tasks,
+where self-hosting gets cheap.</p>"""
+
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Coding Agent Cost Bench — {esc(os.path.basename(os.path.normpath(results_dir)))}</title>
@@ -944,7 +1008,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 <h1>Coding Agent Cost Bench</h1>
 <p class="sub">{esc(results_dir)} · generated {gen}</p>
 <div class="chips">{chips_html}</div>
-
+{method_html}
 <h2>Reasoning / Arm Rollup</h2>
 <p class="note">One row per arm, pooled across prompt versions (success = range over v1–v3). Costs are
 passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually
