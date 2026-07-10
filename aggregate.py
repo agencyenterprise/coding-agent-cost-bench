@@ -500,7 +500,7 @@ def _mname(model):
     Harness is shown in its own column, so it's not folded in here."""
     prov, last = model.split("/")[0], model.split("/")[-1]
     name = {"claude-opus-4-8": "Claude Opus 4.8"}.get(last, last.replace("-FP8", " FP8"))
-    tag = {"modal": " (max reasoning)", "modal-nothink": " (no thinking)",
+    tag = {"modal": " (default)", "modal-nothink": " (no thinking)",
            "modal-high": " (high reasoning)"}.get(prov, "")
     return name + tag
 
@@ -1087,16 +1087,14 @@ wait if you need a true first-request latency budget.</p>"""
 {method_html}
 {tasks_html}
 <h2>Reasoning / Arm Rollup</h2>
-<p class="note">One row per arm (success = range across runs). Costs are
-passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually
-<b>high reasoning</b> &mdash; decisive, fewest turns &mdash; while <b>max reasoning</b> over-thinks and
-<b>no thinking</b> thrashes. <b>Peak conc</b> = max simultaneous generation requests at one instant;
-<b>avg conc</b> = sustained mean over the run{f' (overall peak this run: {overall_peak})' if overall_peak else ''}.</p>
+<p class="note">One row per arm; success shows the range across runs, and costs are passes-weighted. The
+cheapest packed cost per completed task is highlighted, and it's usually <b>high reasoning</b>, which is
+decisive and takes the fewest turns. <b>Default</b> tends to over-think and <b>no thinking</b> tends to
+thrash. <b>Peak conc</b> is the most generation requests running at one instant; <b>avg conc</b> is the
+sustained average over the run{f' (overall peak this run: {overall_peak})' if overall_peak else ''}.</p>
 {arm_tbl}
 
 <h2>Success by Model</h2>
-<p class="note">GLM-5.2 broken out by reasoning tier (max / high / no thinking), with each API model separate.
-The headline per-variant success comparison.</p>
 {fam_tbl}
 
 <h2>Cost per Completed Task</h2>
