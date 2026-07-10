@@ -94,7 +94,13 @@ def transcript(outdir):
 
 
 def diff(outdir):
-    repo = os.path.join(outdir, "final_repo")
+    mp = os.path.join(outdir, "model.patch")   # bench.sh saves the diff directly (disk-cheap)
+    if os.path.exists(mp):
+        try:
+            return open(mp).read()[:6000]
+        except Exception:
+            return ""
+    repo = os.path.join(outdir, "final_repo")  # fallback: older full-repo layout
     if not os.path.isdir(os.path.join(repo, ".git")):
         return ""
     try:

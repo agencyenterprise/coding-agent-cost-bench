@@ -36,13 +36,18 @@ def resolve_outdir(results_dir, outdir):
     return os.path.join(results_dir, os.path.basename(outdir.rstrip("/")))
 
 
-def model_patch(repo):
-    """The agent's fix = `git diff HEAD` in final_repo (bench.sh committed a post-setup baseline that
-    already has the test patch applied, so this diff is the fix only — exactly what SWE-bench wants)."""
-    if not os.path.isdir(os.path.join(repo, ".git")):
-        return ""
-    r = subprocess.run(["git", "-C", repo, "diff", "HEAD"], capture_output=True, text=True)
-    return r.stdout
+def model_patch(outdir):
+    """The agent's fix. bench.sh saves it as model.patch (a `git diff HEAD` against the post-setup
+    baseline, which already has the test patch — so this is the fix only, exactly what SWE-bench wants).
+    Falls back to diffing a full final_repo/ if that older layout is present. Returns None if neither
+    exists (run skipped)."""
+    mp = os.path.join(outdir, "model.patch")
+    if os.path.exists(mp):
+        return open(mp).read()
+    repo = os.path.join(outdir, "final_repo")
+    if os.path.isdir(os.path.join(repo, ".git")):
+        return subprocess.run(["git", "-C", repo, "diff", "HEAD"], capture_output=True, text=True).stdout
+    return None
 
 
 def _safe(s):
@@ -66,11 +71,10 @@ def main():
             task = row.get("task", "")
             if "swebench" not in task.lower():
                 continue
-            repo = os.path.join(resolve_outdir(a.results_dir, row.get("outdir", "")), "final_repo")
-            if not os.path.isdir(repo):
+            patch = model_patch(resolve_outdir(a.results_dir, row.get("outdir", "")))
+            if patch is None:
                 missing += 1
                 continue
-            patch = model_patch(repo)
             if not patch.strip():
                 empty += 1
             mnp = f"{row['harness']}__{_safe(row['model'])}__{row['prompt']}__run{row['run']}"
@@ -91,7 +95,7 @@ def main():
     if empty:
         print(f"  ⚠️ {empty} prediction(s) had an EMPTY patch (agent made no diff) — will score unresolved")
     if missing:
-        print(f"  ⚠️ {missing} run(s) had no final_repo/ (run with KEEP_REPO=1 / default) — skipped")
+        print(f"  ⚠️ {missing} run(s) had no model.patch / final_repo (need KEEP_REPO=1 / default) — skipped")
 
 
 if __name__ == "__main__":

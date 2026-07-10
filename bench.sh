@@ -291,7 +291,17 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
   esac
   _manifest_append "$task_name,$harness,$model,$pv,$run,$outdir,$start,$end,$dur,$status"
   _log "    done ($status, ${dur}s)"
-  [ "$KEEP_REPO" = "1" ] && { mkdir -p "$outdir/final_repo"; cp -R "$work/." "$outdir/final_repo/"; }
+  # Keep the agent's change for grading/judging. For a git repo, save only the DIFF (KB): copying the
+  # whole checked-out tree per run is GBs for big projects (django/astropy) and fills the disk. Only
+  # non-git tasks copy the tree (there the tree IS the artifact). make_predictions.py / judge.py read
+  # model.patch first, then fall back to a final_repo/ diff.
+  if [ "$KEEP_REPO" = "1" ]; then
+    if git -C "$work" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      git -C "$work" -c core.fileMode=false diff HEAD > "$outdir/model.patch" 2>/dev/null || true
+    else
+      mkdir -p "$outdir/final_repo"; cp -R "$work/." "$outdir/final_repo/"
+    fi
+  fi
   rm -rf "$work" "$state_dir"
 }
 
