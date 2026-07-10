@@ -25,8 +25,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import modal
 import pyarrow.parquet as pq
+from swebench import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.test_spec import make_test_spec
-from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 
 START, END = ">>>>> Start Test Output", ">>>>> End Test Output"
 

@@ -64,5 +64,5 @@ mkdir -p "$RDIR"
 echo ">>> App benchmark  (${NGPUS}x${GPU} @ \$${RATE}/hr, endpoint: $MODAL_ENDPOINT)  ->  $RDIR"
 ./bench.sh --results-dir "$RDIR" --rate "$RATE" "$@"
 [ -n "$JUDGE" ] && python3 judge.py --judge "$JUDGE" --results-dir "$RDIR" --rate "$RATE"
-[ -n "$SWE_GRADE" ] && ./grade_swe.sh --results-dir "$RDIR"
+[ -n "$SWE_GRADE" ] && ./grade_swe.sh --results-dir "$RDIR" --billing-app glm-5-2-app-benchmark
 echo ">>> App done -> $RDIR/  (compare tiers by their cost_per_successful_task)"

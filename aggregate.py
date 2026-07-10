@@ -684,6 +684,13 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     esc = lambda x: _h.escape(str(x))
     usd = lambda v: f"${v:.3f}" if v not in ("", None) else "·"
 
+    billing = {}                                     # actual Modal bill for the endpoint over the run window
+    try:
+        with open(os.path.join(results_dir, "billing.json")) as _bf:
+            billing = json.load(_bf)
+    except Exception:
+        pass
+
     def packed(r):
         if is_self_hosted(r["model"]):
             w, p = _f(r.get("gpu_wall_cost_usd")), r.get("passes")
@@ -968,6 +975,8 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     n_runs = sum(int(r["runs"]) for r in rows)
     chips = [("Harnesses", str(n_harness)), ("Models", str(n_model)),
              ("Tasks", str(ntask)), ("Runs", str(n_runs))]
+    if billing.get("cost"):
+        chips.append(("Actual AEP bill (run window)", f"${billing['cost']:.2f}"))
     if best_packed != "":
         chips.append(("Best $/task packed", usd(best_packed)))
     if overall_peak:
@@ -980,6 +989,25 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             chips.append(("Avg concurrency", f"{avg_overall}×"))
     chips_html = "".join(f'<div class="chip"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for k, v in chips)
     gen = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    billing_html = ""
+    if billing.get("cost"):
+        _wh = billing.get("window_hours") or 0
+        _eh = billing.get("effective_hourly")
+        _ws = (billing.get("window_start") or "")[:16].replace("T", " ")
+        _we = (billing.get("window_end") or "")[:16].replace("T", " ")
+        billing_html = (
+            "<h2>Actual endpoint bill (ground truth)</h2>"
+            f"<p class=note>The per-task costs below are <i>modeled</i> (generation seconds × rate). This is the "
+            f"real number for comparison: what Modal actually billed for the <code>{esc(billing.get('app',''))}</code> "
+            f"app while this run was in flight, pulled straight from the billing API. Only that one app is counted "
+            f"(grading and other workspace apps are excluded), and only the run's own hours "
+            f"(<b>{esc(_ws)}</b> to <b>{esc(_we)}</b> UTC), with the first and last hour prorated by how much of "
+            f"the hour the run actually spanned.</p>"
+            f"<p class=note><b>${billing['cost']:.2f}</b> billed over <b>{_wh:.2f} h</b>"
+            + (f" (≈ <b>${_eh:.2f}/hr</b> effective)." if _eh else ".")
+            + " That covers the endpoint staying warm end-to-end, so it folds in idle time between tasks and the "
+              "cold-start / scale-down tails the modeled per-task figures don't try to capture.</p>")
 
     # --- glossary: plain-English definitions of every term used in the tables above ---
     _terms = [
@@ -1121,6 +1149,7 @@ thrash. <b>Peak conc</b> is the most generation requests running at one instant;
 sustained average over the run{f' (overall peak this run: {overall_peak})' if overall_peak else ''}.</p>
 {arm_tbl}
 
+{billing_html}
 
 <h2>Cost per Completed Task</h2>
 <p class="note">$/task <b>sole</b> = one task alone on the GPU (its own generation time × rate).

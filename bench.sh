@@ -24,7 +24,7 @@ ONLY_TASK=""               # run just one task (its dir name under $TASKS_DIR); 
 PROMPTS_STR="prompt.v2.txt"  # per-task prompt files to run (comma/space); default = v2 (shaped) only.
                              #   --prompts "prompt.v1.txt prompt.v2.txt prompt.v3.txt"  runs the full sweep
 RUNS=3
-TIMEOUT_SECS=500
+TIMEOUT_SECS=600
 RETRIES=2
 RUN_DELAY=2
 JOBS=30

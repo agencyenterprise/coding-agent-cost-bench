@@ -16,9 +16,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-RDIR=""; PASS=()
+RDIR=""; BILLING_APP="ep-Modal-Auto-Endpoints"; PASS=()
 while [ $# -gt 0 ]; do case "$1" in
   --results-dir) RDIR="$2"; shift 2;;
+  --billing-app) BILLING_APP="$2"; shift 2;;   # 'description' to sum for the actual bill (App: glm-5-2-app-benchmark)
   -h|--help) sed -n '2,18p' "$0"; exit 0;;
   *) PASS+=("$1"); shift;;
 esac; done
@@ -39,13 +40,17 @@ PY="$VENV/bin/python"
 "$PY" -c 'import modal' 2>/dev/null || { echo "modal not importable in $VENV" >&2; exit 1; }
 [ -f "$HOME/.modal.toml" ] || { echo "Modal not authenticated — run 'modal setup' first." >&2; exit 1; }
 
-echo ">>> [1/3] harvest agent patches from $RDIR"
+echo ">>> [1/4] harvest agent patches from $RDIR"
 "$PY" make_predictions.py --results-dir "$RDIR"
 
-echo ">>> [2/3] grade on Modal (x86 per-instance images)"
+echo ">>> [2/4] grade on Modal (x86 per-instance images)"
 "$PY" swe_eval_modal.py --predictions "$RDIR/predictions.jsonl" ${PASS[@]+"${PASS[@]}"}
 
-echo ">>> [3/3] re-aggregate with the official grades"
+echo ">>> [3/4] pull the actual endpoint bill for the run window ($BILLING_APP)"
+"$PY" billing.py --results-dir "$RDIR" --app "$BILLING_APP" \
+  || echo "    (billing pull failed — report will just skip the ground-truth line)" >&2
+
+echo ">>> [4/4] re-aggregate with the official grades"
 "$PY" aggregate.py --results-dir "$RDIR" --no-open
 
 echo ">>> done — SWE pass/fail in $RDIR/report.html now comes from the Modal Docker grader"

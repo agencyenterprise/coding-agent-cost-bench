@@ -29,7 +29,10 @@ Under the hood (`--swe-grade` chains these):
 1. `make_predictions.py` — harvest each attempt's `model.patch` (the agent's `git diff`) → `predictions.jsonl`.
 2. `swe_eval_modal.py` — run each patch in the instance's Modal image, run the project's tests, grade
    with SWE-bench's own parser → `resolved.json`.
-3. `aggregate.py` — use `resolved.json` for the SWE pass/fail in the report.
+3. `billing.py` — pull the actual Modal bill for the endpoint app over the run's wall-clock window
+   (AEP by default; the App via `--billing-app glm-5-2-app-benchmark`) → `billing.json`. This is the
+   ground-truth spend, separate from the modeled per-task costs.
+4. `aggregate.py` — use `resolved.json` for the SWE pass/fail and show `billing.json` as the actual bill.
 
 ## What a generated task contains
 - `repo.git` — the instance's repo pinned to its `base_commit`
