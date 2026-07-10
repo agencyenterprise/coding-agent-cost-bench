@@ -152,25 +152,29 @@ break-even table shows the concurrency needed to beat Claude.
 - `results/complexity.csv` — per task: **empirical complexity 0–10** (relative, from observed effort
   pooled across all models: steps, tool calls, output tokens, duration), `pass_rate`, and the raw
   averages. `report.md` merges this with an independent blind **LLM difficulty 1–5** per task.
-- `results/<task>__<prompt>__<harness>_<model>__runN/` — `output.log` (transcript), `verify.log`, `usage.json`,
-  `final_repo/` (the agent's edited code). `./clean.sh` wipes `results/`.
+- `results/<task>__<prompt>__<harness>_<model>__runN/` — `output.log` (transcript), `usage.json`, and
+  `model.patch` (the agent's diff, used for grading). `./clean.sh` wipes `results/`.
 
 ---
 
 ## Add a task
-Easiest: run the **`/create-bench-task`** skill in Claude Code — it asks the right questions,
-delegates to the `task-smith` agent to build + **validate** the fail→pass loop, and can run it.
+The benchmark uses **SWE-bench Verified** instances, graded on Modal (see [SWEBENCH.md](SWEBENCH.md)).
+Add one with:
+```bash
+python3 make_swebench_task.py psf__requests-6028   # any Verified instance id
+```
+It writes `tasks/demo-swebench-<id>/`:
 
-Manually, a task is a dir under `tasks/<name>/`. The runner makes a fresh isolated copy of the
-code per run, optionally runs `setup.sh`, runs the agent, then `verify.sh` (exit 0 = pass):
+| File | Purpose |
+|---|---|
+| `prompt.v1/v2/v3.txt` | issue verbatim (`v1`), shaped template (`v2`), control (`v3`) — see [PROMPTS.md](PROMPTS.md) |
+| `setup.sh` | applies the dataset test patch (introduces the failing tests) before the agent runs |
+| `test.patch`, `f2p.txt` | the dataset's test patch + FAIL_TO_PASS ids (reference) |
+| `repo.git` | `<url> <base_commit>` — cloned fresh per run |
 
-| File | Required | Purpose |
-|---|---|---|
-| `prompt.v1.txt` | ✅ | baseline instruction handed to the agent (version `v1`) |
-| `prompt.v2.txt` | optional | shaped variant (version `v2`); add more as `prompt.<x>.txt` — see [PROMPTS.md](PROMPTS.md) |
-| `verify.sh` | ✅ | exit `0` = success; runs in the work-dir root |
-| `setup.sh` | optional | runs before the agent (e.g. inject a bug); gets `$TASK_REPO_SRC` |
-| `repo/` **or** `repo.path` **or** `repo.git` | one | self-contained code / local git repo / `<url> [ref]` remote |
+Grading is on Modal (`--swe-grade` / `grade_swe.sh`) — there is **no host `verify.sh`**. The runner
+makes a fresh isolated copy of the repo per run, runs `setup.sh`, runs the agent, and saves the
+agent's diff as `model.patch` for the Modal grader.
 
 Only `tasks/demo-*` are committed; other tasks stay local (gitignored). Keep verification
 **objective and offline** (pytest, `dbt parse`, a compiled-SQL diff). For a *publishable*

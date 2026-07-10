@@ -12,7 +12,8 @@ Usage (run from the repo root):
 Then run it like any other task:
     ./bench.sh --runs 1 --models "modal/zai-org/GLM-5.2-FP8"
 
-Emits prompt.v1/v2/v3.txt, setup.sh, verify.sh (self-sufficient grader), repo.git, test.patch, f2p.txt.
+Emits prompt.v1/v2/v3.txt, setup.sh, repo.git, test.patch, f2p.txt. Graded on Modal (grade_swe.sh) —
+no host verify.sh.
 
 Caveats (see SWEBENCH.md):
 - Each instance needs its repo's own deps; heavy scientific repos (numpy/scipy) may be slow/flaky.
@@ -88,41 +89,19 @@ def main() -> None:
         + 'git apply "$here/test.patch"\n'
         'echo "applied SWE-bench test patch"\n'
     )
-    # verify: the FAIL_TO_PASS tests must pass. Read node ids from f2p.txt one-per-line into an
-    # array (space-safe: some ids contain spaces, e.g. pytest params like `[a: int]`), so a naive
-    # space-join doesn't split them into broken args.
-    (d / "verify.sh").write_text(
-        "#!/usr/bin/env bash\n"
-        "# run the SWE-bench FAIL_TO_PASS tests (node ids from f2p.txt, space-safe)\n"
-        "set -e\n"
-        + here
-        + 'root="$(pwd)"; py="$root/.venv/bin/python"\n'
-        "# Self-sufficient grader: use the agent's .venv only if it has pytest; else provision a\n"
-        "# throwaway grader venv, editable-installing the repo so the agent's fix is under test. A\n"
-        "# MODERN pytest runs on Python 3.14; only repos whose package IS pytest need Python <=3.11\n"
-        "# (run those via ./run_on_docker.sh).\n"
-        'if ! { [ -x "$py" ] && "$py" -c \'import pytest\'; } >/dev/null 2>&1; then\n'
-        '  gv="$(mktemp -d)/venv"; python3 -m venv "$gv" >/dev/null 2>&1; py="$gv/bin/python"\n'
-        '  "$py" -m pip install -q -e . pytest >/dev/null 2>&1\n'
-        "fi\n"
-        "tests=()\n"
-        'while IFS= read -r t; do [ -n "$t" ] && tests+=("$t"); done < "$here/f2p.txt"\n'
-        "# -o addopts= : drop the repo's pytest config so pytest collects ONLY the target test file\n"
-        "# (many repos force whole-tree collection via addopts/testpaths, and an unrelated test file\n"
-        "# that doesn't import on this Python would abort the whole run). -p no:cacheprovider: no writes.\n"
-        '"$py" -m pytest "${tests[@]}" -q -o addopts= -p no:cacheprovider\n'
-    )
+    # No host verify.sh: SWE tasks are graded on Modal via the instance's official Docker image
+    # (grade_swe.sh -> swe_eval_modal.py -> resolved.json), which reads FAIL_TO_PASS from the dataset.
+    # Still sanity-check the ids — the grader keys on them, so malformed ids => the task can't score.
     bad = [x for x in f2p if "::" not in x or " " in x or x.count("[") != x.count("]")]
     if bad:
         print(f"WARNING: {len(bad)}/{len(f2p)} FAIL_TO_PASS ids for {iid} look malformed "
               f"(not a pytest node id, or a space / unbalanced brackets from dataset mangling) — "
-              f"e.g. {bad[0]!r}. verify.sh likely can't resolve them, so the task may never pass. "
-              "Pick a different instance.")
+              f"e.g. {bad[0]!r}. The Modal grader may never resolve them; pick a different instance.")
     # Two prompt versions (see PROMPTS.md). v1 = prompt.v1.txt = the ORIGINAL problem statement,
     # verbatim, nothing added — the raw GitHub issue a developer would see. v2 = prompt.v2.txt =
     # our shaped uniform template (verbatim issue block + FILE-level suite command + explicit
-    # scope/env/checklist). The hidden grader (verify.sh) runs the exact FAIL_TO_PASS node ids
-    # from f2p.txt either way, so the prompt is the only thing that changes between v1 and v2.
+    # scope/env/checklist). The Modal grader runs the exact FAIL_TO_PASS tests either way, so the
+    # prompt is the only thing that changes across versions.
     statement = row["problem_statement"].strip()
     (d / "prompt.v1.txt").write_text(statement + "\n")       # v1: original, unmodified
     issue = "\n".join(("> " + ln) if ln.strip() else ">" for ln in statement.splitlines())
@@ -154,8 +133,7 @@ def main() -> None:
         f"pytest`. Make the failing tests pass, then confirm with `.venv/bin/python -m pytest {suite}` "
         "(exit 0) before finishing.\n"
     )
-    for f in ("setup.sh", "verify.sh"):
-        (d / f).chmod(0o755)
+    (d / "setup.sh").chmod(0o755)
 
     print(f"wrote {d}  (repo {repo} @ {base[:10]}, {len(f2p)} FAIL_TO_PASS tests)")
     print("run:  ./bench.sh --runs 1")
