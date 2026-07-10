@@ -695,9 +695,10 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         cls = ' class="best"' if a["arm"] == best else ""
         gps = f'{a["gpu_s_per_run"]:.0f}s' if a["gpu_s_per_run"] != "" else "—"
         pk = a.get("peak_concurrency", "")
+        passes_label = f"<span class=mut>{a['passes']}/{a['runs']}</span>"
         arm_body.append(
             f"<tr{cls}><td><b>{esc(a['arm'])}</b></td>"
-            f"<td>{sbar(a['success_pooled'], rng(a), f'<span class=mut>{a['passes']}/{a['runs']}</span>')}</td>"
+            f"<td>{sbar(a['success_pooled'], rng(a), passes_label)}</td>"
             f"<td class='num'>{a['avg_tokens_out']:,}</td><td class='num'>{gps}</td>"
             f"<td class='num'>{pk if pk != '' else '—'}</td>"
             f"<td class='num'>{usd(a['cost_sole_per_task'])}</td>"
