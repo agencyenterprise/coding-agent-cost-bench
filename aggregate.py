@@ -754,13 +754,12 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
         passes_label = f"<span class=mut>{r['passes']}/{r['runs']}</span>"
         return (
             f"<td>{esc(harness_disp(r['harness']))}</td><td>{esc(_mname(r['model']))}</td>"
-            f"<td>{esc(r['prompt'])}</td>"
             f"<td>{sbar(r['success_rate'], rate_label, passes_label)}</td>"
             f"<td class='num'>{usd(r['cost_per_successful_task'])}</td>"
             f"<td class='num'>{usd(packed(r))}</td>"
             f"<td class='num'>{(str(round(r['avg_duration_s']))+'s') if r['avg_duration_s']!='' else '—'}</td>")
     cost_body = [_cost_row(r) for r in rows]
-    cost_tbl = tbl([("Harness", 0), ("Model", 0), ("Prompt", 0), ("Success", 0),
+    cost_tbl = tbl([("Harness", 0), ("Model", 0), ("Success", 0),
                     ("$/task sole", 1), ("$/task packed", 1), ("Avg time", 1)],
                    [f"<tr>{c}</tr>" for c in cost_body])
 
@@ -804,25 +803,31 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     def _eff_row(k):
         ratio_label = f"{eff[k]['out']/glm_out:.2f}×" if (glm and glm_out) else '—'
         return (
-            f"<tr><td>{esc(harness_disp(k[0]))}</td><td>{esc(_mname(k[1]))}</td><td>{esc(k[2])}</td>"
+            f"<tr><td>{esc(harness_disp(k[0]))}</td><td>{esc(_mname(k[1]))}</td>"
             f"<td class='num'>{eff[k]['steps']:,}</td><td class='num'>{eff[k]['tools']:,}</td>"
             f"<td class='num'>{eff[k]['out']:,}</td>"
             f"<td class='num'>{ratio_label}</td></tr>")
     eff_body = [_eff_row(k) for k in order]
-    eff_tbl = tbl([("Harness", 0), ("Model", 0), ("Prompt", 0), ("Steps", 1), ("Tools", 1),
+    eff_tbl = tbl([("Harness", 0), ("Model", 0), ("Steps", 1), ("Tools", 1),
                    ("Output Tok", 1), ("vs GLM", 1)], eff_body)
 
     # ---- task difficulty ----
     diff_html = ""
     if crows:
-        diff_body = [
-            f"<tr><td>{esc(_tshort(r['task']))}</td><td>{esc(r['prompt'])}</td><td>{esc(r['source'])}</td>"
-            f"<td class='num'>{esc(r['complexity'])}</td><td class='num'>{r['pass_rate']:.0%}</td>"
-            f"<td class='num'>{usd(r.get('avg_api_cost_usd'))}</td>"
-            f"<td class='num'>{r['avg_steps']:.0f}</td></tr>" for r in crows]
-        diff_html = ("<h2>Task Difficulty</h2><p class=note>Per (task, prompt version). "
-                     "Source: swe-bench = real dataset issue embedded verbatim; invented = task + prompt we wrote.</p>"
-                     + tbl([("Task", 0), ("Prompt", 0), ("Source", 0), ("Diff", 1), ("Pass", 1),
+        # one row per task (pool the per-prompt complexity rows so no prompt dimension shows)
+        seen_t = set(); diff_body = []
+        for r in crows:
+            if r["task"] in seen_t:
+                continue
+            seen_t.add(r["task"])
+            diff_body.append(
+                f"<tr><td>{esc(_tshort(r['task']))}</td><td>{esc(r['source'])}</td>"
+                f"<td class='num'>{esc(r['complexity'])}</td><td class='num'>{r['pass_rate']:.0%}</td>"
+                f"<td class='num'>{usd(r.get('avg_api_cost_usd'))}</td>"
+                f"<td class='num'>{r['avg_steps']:.0f}</td></tr>")
+        diff_html = ("<h2>Task Difficulty</h2><p class=note>Empirical difficulty per task from observed "
+                     "effort (steps/tools/tokens). Source: swe-bench = real dataset issue embedded verbatim.</p>"
+                     + tbl([("Task", 0), ("Source", 0), ("Diff", 1), ("Pass", 1),
                             ("API $", 1), ("Avg steps", 1)], diff_body))
 
     # ---- #1 cost spread + #2 throughput (per arm, from per-run `detailed`) ----
@@ -899,7 +904,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 tds.append(f"<td class='num' style='background:{bg}'>{p}/{tot}</td>")
             mbody.append("<tr>" + "".join(tds) + "</tr>")
         matrix_html = ("<h2>Per-task × arm pass matrix</h2>"
-                       "<p class=note>Where each arm actually passes or fails (pooled across prompt versions + runs). "
+                       "<p class=note>Where each arm actually passes or fails (pooled across runs). "
                        "Green = all pass, red = all fail, amber = partial. This is where GLM's capability gap vs Opus shows.</p>"
                        + tbl(head, mbody))
 
@@ -933,7 +938,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     ntask = len({r["task"] for r in crows}) if crows else 0
     best_packed = min((a["cost_packed_per_task"] for a in sh), default="")
     chips = [("GPU rate", f"${GPU_HOURLY_USD:.2f}/hr"), ("Arms", str(len(arms))),
-             ("Tasks", str(ntask)), ("Prompt versions", str(len({r["prompt"] for r in rows})))]
+             ("Tasks", str(ntask))]
     if best_packed != "":
         chips.append(("Best $/task packed", usd(best_packed)))
     if overall_peak:
@@ -946,6 +951,33 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
             chips.append(("Avg concurrency", f"{avg_overall}×"))
     chips_html = "".join(f'<div class="chip"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for k, v in chips)
     gen = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    # --- glossary: plain-English definitions of every term used in the tables above ---
+    _terms = [
+        ("Arm", "One agent configuration = harness + model + reasoning setting (e.g. “GLM high”, “Opus · Claude Code”)."),
+        ("Arm rollup", "One row per arm, pooling all of that arm's runs into a single summary."),
+        ("Resolved / pass", "The fix works: in the instance's Docker image, every FAIL_TO_PASS test passes AND every "
+                            "PASS_TO_PASS test still passes."),
+        ("FAIL_TO_PASS", "The bug's tests — must go from failing to passing (that's the fix)."),
+        ("PASS_TO_PASS", "Tests that already passed — must stay passing (a regression guard)."),
+        ("$/task sole", "Cost of one task run alone on the GPU: its own generation seconds × the hourly rate."),
+        ("$/task packed", "Cost when the endpoint serves many tasks at once: union of all generation time ÷ tasks. "
+                          "Lower than sole because idle gaps overlap."),
+        ("Median $", "The middle per-run cost — half the runs cost less, half more (robust to outliers)."),
+        ("p90 $", "90th-percentile per-run cost — 9 of 10 runs cost this or less (the near-worst case)."),
+        ("Std-dev $", "How spread out per-run costs are around the mean. Low = predictable; high = swings a lot."),
+        ("Tok/s", "Output tokens generated per second of GPU time."),
+        ("GPU-s / run", "Seconds of GPU generation time per run (self-hosted models only)."),
+        ("Peak concurrency", "Most generation requests in flight at any single instant during the run."),
+        ("Avg concurrency / packing factor", "Time-weighted average number of tasks generating at once — roughly how "
+                                             "much cheaper “packed” is than “sole”."),
+        ("Break-even concurrency", "How many tasks GLM must run in parallel for its packed $/task to match Opus's "
+                                   "flat per-token price."),
+        ("Difficulty", "SWE-bench Verified's human estimate of time-to-fix (<15 min … >4 hours)."),
+    ]
+    glossary_html = ("<h2>Glossary</h2><p class=note>What the columns and terms above mean.</p>"
+                     + tbl([("Term", 0), ("Meaning", 0)],
+                           [f"<tr><td><b>{esc(t)}</b></td><td>{esc(d)}</td></tr>" for t, d in _terms]))
 
     # --- benchmark tasks: repo + SWE-bench Verified difficulty tier (from each task's meta.json) ---
     tasks_html = ""
@@ -1023,8 +1055,8 @@ years-old project needs its exact environment, which only lives in that project'
 runs in the cloud. It is the same method the official SWE-bench uses, so our pass/fail matches the
 published standard. Each task also ships a known-good <i>gold</i> fix, and we confirm the grader marks it
 passing before trusting the task.</p>
-<p class="note"><b>What we vary:</b> reasoning effort (default / high / off) and prompt wording
-(v1 baseline · v2 shaped · v3 control) — nothing else is changed between models. <b>Cost basis:</b>
+<p class="note"><b>What we vary:</b> reasoning effort (default / high / off) — nothing else is changed
+between models. <b>Cost basis:</b>
 self-hosted GLM = GPU-seconds × hourly rate; Claude = tokens × list price. <b>&ldquo;sole&rdquo;</b> = one
 task at a time on the endpoint; <b>&ldquo;packed&rdquo;</b> = the endpoint shared by concurrent tasks,
 where self-hosting gets cheap.</p>"""
@@ -1039,7 +1071,7 @@ where self-hosting gets cheap.</p>"""
 {method_html}
 {tasks_html}
 <h2>Reasoning / Arm Rollup</h2>
-<p class="note">One row per arm, pooled across prompt versions (success = range over v1–v3). Costs are
+<p class="note">One row per arm (success = range across runs). Costs are
 passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually
 <b>high reasoning</b> &mdash; decisive, fewest turns &mdash; while <b>max reasoning</b> over-thinks and
 <b>no thinking</b> thrashes. <b>Peak conc</b> = max simultaneous generation requests at one instant;
@@ -1067,6 +1099,7 @@ the concurrency lever; API models are per-token, so the columns match for them.<
 {be_html}
 {matrix_html}
 {diff_html}
+{glossary_html}
 <footer>Self-contained report written by aggregate.py. Numbers mirror summary.csv / arms.csv / complexity.csv.</footer>
 </div></body></html>"""
     path = os.path.join(results_dir, "report.html")

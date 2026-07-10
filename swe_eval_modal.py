@@ -20,6 +20,8 @@ import collections
 import glob
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import modal
 import pyarrow.parquet as pq
@@ -65,7 +67,7 @@ def grade(repo, output, f2p, p2p):
     return resolved, summary
 
 
-def run_one(app, image, eval_script, patch, repo, f2p, p2p):
+def _eval_once(app, image, eval_script, patch, repo, f2p, p2p):
     sb = modal.Sandbox.create(app=app, image=image, cpu=4.0, memory=8192, timeout=1800)
     try:
         b64p = base64.b64encode(patch.encode()).decode()
@@ -75,13 +77,26 @@ def run_one(app, image, eval_script, patch, repo, f2p, p2p):
         ap = sb.exec("bash", "-lc",
                      "cd /testbed && (git apply -v /tmp/model.patch || git apply --3way /tmp/model.patch "
                      "|| patch -p1 -i /tmp/model.patch) 2>&1")
-        apply_out = ap.stdout.read(); ap.wait()
+        ap.stdout.read(); ap.wait()
         ev = sb.exec("bash", "-lc", "bash /tmp/eval.sh 2>&1")
         output = ev.stdout.read(); ev.wait()
     finally:
         sb.terminate()
-    resolved, summary = grade(repo, output, f2p, p2p)
-    return resolved, summary, apply_out
+    if START not in output:   # the eval never emitted its markers -> it didn't really run (infra flake)
+        raise RuntimeError("no test-output markers — eval did not run")
+    return grade(repo, output, f2p, p2p)
+
+
+def run_one(app, image, eval_script, patch, repo, f2p, p2p, retries=2):
+    """Grade one patch in a fresh Sandbox. Retries ONLY on infra/exec errors (a sandbox that dies, or
+    an eval that produced no test output) — never on a legitimate 'unresolved' (tests ran and failed)."""
+    last = None
+    for _ in range(retries + 1):
+        try:
+            return _eval_once(app, image, eval_script, patch, repo, f2p, p2p)
+        except Exception as e:  # noqa: BLE001 — transient Modal/sandbox/network failure; retry
+            last = e
+    raise last
 
 
 def main():
@@ -92,6 +107,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="max predictions per instance (0 = all)")
     ap.add_argument("--status-host", default="", help="only predictions whose host status matches (e.g. pass)")
     ap.add_argument("--app", default="swe-bench-eval")
+    ap.add_argument("--workers", type=int, default=8, help="concurrent Modal sandboxes [%(default)s]")
     a = ap.parse_args()
     out = a.out or os.path.join(os.path.dirname(a.predictions) or ".", "resolved.json")
 
@@ -106,31 +122,51 @@ def main():
 
     inst_rows = load_instances()
     app = modal.App.lookup(a.app, create_if_missing=True)
-    results = {}
-    for iid, plist in by_inst.items():
-        if a.limit:
-            plist = plist[:a.limit]
+
+    # per-instance spec + image (built once, reused across that instance's predictions/threads)
+    spec = {}
+    for iid in by_inst:
         row = inst_rows[iid]
         ts = make_test_spec(row)
-        f2p, p2p = as_list(row["FAIL_TO_PASS"]), as_list(row["PASS_TO_PASS"])
-        image = modal.Image.from_registry(dockerhub(ts.instance_image_key))
-        print(f"=== {iid}: {len(plist)} prediction(s) -> {dockerhub(ts.instance_image_key)}")
-        for p in plist:
-            mnp, patch = p["model_name_or_path"], p.get("model_patch", "")
-            # the same model_name_or_path recurs for every instance, so key by instance::mnp
-            rkey = f"{iid}::{mnp}"
-            if not patch.strip():
-                results[rkey] = {"instance_id": iid, "model_name_or_path": mnp, "resolved": False, "note": "empty patch"}
-                print(f"  {mnp}: empty patch -> unresolved")
-                continue
+        spec[iid] = (ts, modal.Image.from_registry(dockerhub(ts.instance_image_key)),
+                     as_list(row["FAIL_TO_PASS"]), as_list(row["PASS_TO_PASS"]), row["repo"])
+
+    # flatten to independent jobs, then grade them concurrently (each is its own Modal Sandbox)
+    jobs = []
+    for iid, plist in by_inst.items():
+        for p in (plist[:a.limit] if a.limit else plist):
+            jobs.append((iid, p))
+
+    results, done, lock = {}, [0], threading.Lock()
+
+    def work(job):
+        iid, p = job
+        ts, image, f2p, p2p, repo = spec[iid]
+        mnp, patch = p["model_name_or_path"], p.get("model_patch", "")
+        rkey = f"{iid}::{mnp}"                 # mnp recurs per instance, so key by instance::mnp
+        if not patch.strip():
+            res = {"instance_id": iid, "model_name_or_path": mnp, "resolved": False, "note": "empty patch"}
+        else:
             try:
-                resolved, summary, _ = run_one(app, image, ts.eval_script, patch, row["repo"], f2p, p2p)
-                results[rkey] = {"instance_id": iid, "model_name_or_path": mnp, "resolved": resolved, **summary}
-                print(f"  {mnp}: {'RESOLVED' if resolved else 'unresolved'} "
-                      f"(f2p {summary['f2p_pass']}/{summary['f2p_total']}, p2p {summary['p2p_pass']}/{summary['p2p_total']})")
-            except Exception as e:
-                results[rkey] = {"instance_id": iid, "model_name_or_path": mnp, "resolved": False, "error": str(e)[:200]}
-                print(f"  {mnp}: ERROR {e}")
+                resolved, summary = run_one(app, image, ts.eval_script, patch, repo, f2p, p2p, retries=2)
+                res = {"instance_id": iid, "model_name_or_path": mnp, "resolved": resolved, **summary}
+            except Exception as e:  # noqa: BLE001
+                res = {"instance_id": iid, "model_name_or_path": mnp, "resolved": False, "error": str(e)[:200]}
+        with lock:
+            results[rkey] = res
+            done[0] += 1
+            if "error" in res:
+                tag = f"ERROR {res['error']}"
+            elif res.get("note"):
+                tag = res["note"]
+            else:
+                tag = (("RESOLVED" if res["resolved"] else "unresolved")
+                       + f" (f2p {res['f2p_pass']}/{res['f2p_total']}, p2p {res['p2p_pass']}/{res['p2p_total']})")
+            print(f"  [{done[0]}/{len(jobs)}] {iid} {mnp}: {tag}")
+
+    print(f"grading {len(jobs)} prediction(s) across {len(by_inst)} instance(s), {a.workers} concurrent...")
+    with ThreadPoolExecutor(max_workers=a.workers) as ex:
+        list(ex.map(work, jobs))
 
     json.dump(results, open(out, "w"), indent=2)
     n = sum(1 for r in results.values() if r.get("resolved"))
