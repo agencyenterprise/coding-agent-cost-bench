@@ -416,6 +416,14 @@ def main():
             w = csv.DictWriter(f, fieldnames=list(crows[0].keys()))
             w.writeheader()
             w.writerows(crows)
+    arows = arm_rollup(rows)
+    if arows:
+        with open(os.path.join(RESULTS_DIR, "arms.csv"), "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(arows[0].keys()))
+            w.writeheader()
+            w.writerows(arows)
+    if rows:
+        _html_report(RESULTS_DIR, rows, arows, eff, crows)
     _print_report(RESULTS_DIR, rows, eff, crows, intervals)
 
 
@@ -431,6 +439,217 @@ def _mname(model):
 def _tshort(t):
     t = t.replace("demo-swebench-", "").replace("demo-", "")
     return t.split("__")[-1] if "__" in t else t
+
+
+def _arm_label(harness, model):
+    """Concise arm name for the rollup: default / high / no-think for the GLM reasoning tiers,
+    'deepclaude' for that harness, and '<model> · <harness>' for API models."""
+    prov = model.split("/")[0]
+    if is_self_hosted(model):
+        reason = {"modal": "default", "modal-high": "high", "modal-nothink": "no-think"}.get(prov, prov)
+        if harness == "deepclaude":
+            return "deepclaude" if reason == "default" else f"deepclaude ({reason})"
+        return reason
+    return f"{_mname(model)} · {harness_disp(harness)}"
+
+
+def arm_rollup(rows):
+    """Collapse the per-(arm, prompt) summary rows into one row per arm (harness+model), pooling
+    across prompt versions. Success is a min–max range over the versions; costs are passes-weighted
+    so they match the per-prompt 'Cost per Completed Task' table. Ordering follows `rows`."""
+    groups, order = {}, []
+    for r in rows:
+        k = (r["harness"], r["model"])
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append(r)
+    out = []
+    for (harness, model) in order:
+        g = groups[(harness, model)]
+        sh = is_self_hosted(model)
+        runs = sum(int(r["runs"]) for r in g)
+        passes = sum(int(r["passes"]) for r in g)
+        srates = [float(r["success_rate"]) for r in g if r.get("success_rate") not in ("", None)]
+        gpu_s = sum(_f(r.get("call_s")) or 0 for r in g)                          # Σ generation seconds
+        out_tok = sum((_f(r.get("avg_tokens_out")) or 0) * int(r["runs"]) for r in g)
+        sole_num = sum((_f(r.get("cost_per_successful_task")) or 0) * int(r["passes"]) for r in g)
+        wall_total = sum(_f(r.get("gpu_wall_cost_usd")) or 0 for r in g)          # packed = wall ÷ passes
+        sole = round(sole_num / passes, 4) if passes else ""
+        out.append({
+            "arm": _arm_label(harness, model), "harness": harness, "model": model,
+            "runs": runs, "passes": passes,
+            "success_min": round(min(srates), 3) if srates else "",
+            "success_max": round(max(srates), 3) if srates else "",
+            "success_pooled": round(passes / runs, 3) if runs else "",
+            "avg_tokens_out": round(out_tok / runs) if runs else 0,
+            "gpu_s_per_run": round(gpu_s / runs, 1) if (sh and gpu_s and runs) else "",
+            "cost_sole_per_task": sole,
+            # API models are per-token (concurrency-invariant), so packed == sole for them.
+            "cost_packed_per_task": (round(wall_total / passes, 4) if (sh and passes) else sole),
+        })
+    return out
+
+
+_HTML_CSS = """
+:root{--bg:#f6f7f9;--fg:#16181d;--muted:#6b7280;--card:#fff;--border:#e5e7eb;--head:#f9fafb;
+ --accent:#4f46e5;--good:#16a34a;--bar:#22c55e;--best:#ecfdf5;--best-br:#34d399;
+ --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1014;--fg:#e6e8ec;--muted:#9aa1ad;--card:#161a21;
+ --border:#282d38;--head:#1b2028;--accent:#8b93f8;--good:#34d399;--bar:#22c55e;--best:#0d2a1e;--best-br:#15803d}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+ font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.wrap{max-width:1060px;margin:0 auto;padding:34px 20px 90px}
+h1{font-size:25px;margin:0 0 3px;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 22px;font-size:13.5px}
+.chips{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 10px}
+.chip{background:var(--card);border:1px solid var(--border);border-radius:11px;padding:9px 15px;min-width:96px}
+.chip b{display:block;font-size:19px;font-family:var(--mono)}
+.chip span{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+h2{font-size:15px;margin:34px 0 5px;letter-spacing:.01em}
+.note{color:var(--muted);font-size:12.5px;margin:2px 0 13px;max-width:760px}
+.tw{overflow-x:auto;border:1px solid var(--border);border-radius:13px;background:var(--card)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{padding:9px 15px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+thead th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600;background:var(--head)}
+tbody tr:last-child td{border-bottom:none}
+td.num,th.num{text-align:right;font-family:var(--mono)}
+tr.best{background:var(--best)}tr.best td:first-child{box-shadow:inset 3px 0 0 var(--best-br)}
+.bar{background:var(--border);border-radius:5px;height:7px;width:104px;display:inline-block;vertical-align:middle;overflow:hidden}
+.bar>i{display:block;height:100%;background:var(--bar);border-radius:5px}
+.pill{font-family:var(--mono);font-size:12.5px;margin-left:8px}
+.mut{color:var(--muted);font-size:12px;margin-left:6px}
+.tag{font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:1px 6px}
+footer{color:var(--muted);font-size:12px;margin-top:44px}
+a{color:var(--accent)}
+"""
+
+
+def _html_report(results_dir, rows, arms, eff, crows):
+    """Write a self-contained report.html (inline CSS, light/dark aware) next to the CSVs."""
+    import html as _h
+    from datetime import datetime
+    esc = lambda x: _h.escape(str(x))
+    usd = lambda v: f"${v:.3f}" if v not in ("", None) else "—"
+
+    def packed(r):
+        if is_self_hosted(r["model"]):
+            w, p = _f(r.get("gpu_wall_cost_usd")), r.get("passes")
+            return w / p if (w and p) else ""
+        return r.get("cost_per_successful_task")
+
+    def rng(a):
+        if a["success_min"] == "":
+            return "—"
+        lo, hi = a["success_min"], a["success_max"]
+        return f"{lo:.0%}" if lo == hi else f"{lo:.0%}–{hi:.0%}"
+
+    def sbar(frac, label, extra=""):
+        f = 0 if frac in ("", None) else float(frac)
+        return (f'<span class="bar"><i style="width:{f*100:.0f}%"></i></span>'
+                f'<span class="pill">{esc(label)}</span>{extra}')
+
+    def tbl(headers, body):  # headers: list of (text, is_num); body: list of row-html strings
+        hh = "".join(f'<th class="num">{esc(t)}</th>' if n else f"<th>{esc(t)}</th>" for t, n in headers)
+        return (f'<div class="tw"><table><thead><tr>{hh}</tr></thead><tbody>'
+                + "".join(body) + "</tbody></table></div>")
+
+    # ---- headline arm rollup (best = cheapest packed among self-hosted) ----
+    sh = [a for a in arms if is_self_hosted(a["model"]) and a["cost_packed_per_task"] != ""]
+    best = min(sh, key=lambda a: a["cost_packed_per_task"])["arm"] if sh else None
+    arm_body = []
+    for a in arms:
+        cls = ' class="best"' if a["arm"] == best else ""
+        gps = f'{a["gpu_s_per_run"]:.0f}s' if a["gpu_s_per_run"] != "" else "—"
+        arm_body.append(
+            f"<tr{cls}><td><b>{esc(a['arm'])}</b></td>"
+            f"<td>{sbar(a['success_pooled'], rng(a), f'<span class=mut>{a['passes']}/{a['runs']}</span>')}</td>"
+            f"<td class='num'>{a['avg_tokens_out']:,}</td><td class='num'>{gps}</td>"
+            f"<td class='num'>{usd(a['cost_sole_per_task'])}</td>"
+            f"<td class='num'>{usd(a['cost_packed_per_task'])}</td></tr>")
+    arm_tbl = tbl([("Arm", 0), ("Success", 0), ("Out Tok", 1), ("GPU-s/run", 1),
+                   ("$/task sole", 1), ("$/task packed", 1)], arm_body)
+
+    # ---- cost per completed task (per harness/model/prompt) ----
+    cost_body = [
+        f"<td>{esc(harness_disp(r['harness']))}</td><td>{esc(_mname(r['model']))}</td>"
+        f"<td>{esc(r['prompt'])}</td>"
+        f"<td>{sbar(r['success_rate'], f'{r['success_rate']:.0%}', f'<span class=mut>{r['passes']}/{r['runs']}</span>')}</td>"
+        f"<td class='num'>{usd(r['cost_per_successful_task'])}</td>"
+        f"<td class='num'>{usd(packed(r))}</td>"
+        f"<td class='num'>{(str(round(r['avg_duration_s']))+'s') if r['avg_duration_s']!='' else '—'}</td>"
+        for r in rows]
+    cost_tbl = tbl([("Harness", 0), ("Model", 0), ("Prompt", 0), ("Success", 0),
+                    ("$/task sole", 1), ("$/task packed", 1), ("Avg time", 1)],
+                   [f"<tr>{c}</tr>" for c in cost_body])
+
+    # ---- efficiency ----
+    order = [(r["harness"], r["model"], r["prompt"]) for r in rows]
+    glm = next((k for k in order if is_self_hosted(k[1])), None)
+    glm_out = eff[glm]["out"] if glm else 0
+    eff_body = [
+        f"<tr><td>{esc(harness_disp(k[0]))}</td><td>{esc(_mname(k[1]))}</td><td>{esc(k[2])}</td>"
+        f"<td class='num'>{eff[k]['steps']:,}</td><td class='num'>{eff[k]['tools']:,}</td>"
+        f"<td class='num'>{eff[k]['out']:,}</td>"
+        f"<td class='num'>{(f'{eff[k]['out']/glm_out:.2f}×') if (glm and glm_out) else '—'}</td></tr>"
+        for k in order]
+    eff_tbl = tbl([("Harness", 0), ("Model", 0), ("Prompt", 0), ("Steps", 1), ("Tools", 1),
+                   ("Output Tok", 1), ("vs GLM", 1)], eff_body)
+
+    # ---- task difficulty ----
+    diff_html = ""
+    if crows:
+        diff_body = [
+            f"<tr><td>{esc(_tshort(r['task']))}</td><td>{esc(r['prompt'])}</td><td>{esc(r['source'])}</td>"
+            f"<td class='num'>{esc(r['complexity'])}</td><td class='num'>{r['pass_rate']:.0%}</td>"
+            f"<td class='num'>{usd(r.get('avg_api_cost_usd'))}</td>"
+            f"<td class='num'>{r['avg_steps']:.0f}</td></tr>" for r in crows]
+        diff_html = ("<h2>Task Difficulty</h2><p class=note>Per (task, prompt version). "
+                     "Source: swe-bench = real dataset issue embedded verbatim; invented = task + prompt we wrote.</p>"
+                     + tbl([("Task", 0), ("Prompt", 0), ("Source", 0), ("Diff", 1), ("Pass", 1),
+                            ("API $", 1), ("Avg steps", 1)], diff_body))
+
+    ntask = len({r["task"] for r in crows}) if crows else 0
+    best_packed = min((a["cost_packed_per_task"] for a in sh), default="")
+    chips = [("GPU rate", f"${GPU_HOURLY_USD:.2f}/hr"), ("Arms", str(len(arms))),
+             ("Tasks", str(ntask)), ("Prompt versions", str(len({r["prompt"] for r in rows})))]
+    if best_packed != "":
+        chips.append(("Best $/task packed", usd(best_packed)))
+    chips_html = "".join(f'<div class="chip"><b>{esc(v)}</b><span>{esc(k)}</span></div>' for k, v in chips)
+    gen = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coding Agent Cost Bench — {esc(os.path.basename(os.path.normpath(results_dir)))}</title>
+<style>{_HTML_CSS}</style></head><body><div class="wrap">
+<h1>Coding Agent Cost Bench</h1>
+<p class="sub">{esc(results_dir)} · generated {gen}</p>
+<div class="chips">{chips_html}</div>
+
+<h2>Reasoning / Arm Rollup</h2>
+<p class="note">One row per arm, pooled across prompt versions (success = range over v1–v3). Costs are
+passes-weighted. Sweet spot (cheapest packed → completed task) is highlighted; usually <b>high</b>
+&mdash; decisive, fewest turns &mdash; while <b>default</b> over-thinks and <b>no-think</b> thrashes.</p>
+{arm_tbl}
+
+<h2>Cost per Completed Task</h2>
+<p class="note">$/task <b>sole</b> = one task alone on the GPU (its own generation time × rate).
+$/task <b>packed</b> = endpoint filled with concurrent tasks (union of generation ÷ tasks). The gap is
+the concurrency lever; API models are per-token, so the columns match for them.</p>
+{cost_tbl}
+
+<h2>Efficiency</h2>
+<p class="note">Steps, tool calls, and output tokens per arm; “vs GLM” compares output volume to the GLM baseline.</p>
+{eff_tbl}
+
+{diff_html}
+<footer>Self-contained report written by aggregate.py. Numbers mirror summary.csv / arms.csv / complexity.csv.</footer>
+</div></body></html>"""
+    path = os.path.join(results_dir, "report.html")
+    with open(path, "w") as f:
+        f.write(doc)
+    return path
 
 
 def _print_report(results_dir, rows, eff, crows, intervals):
@@ -450,8 +669,10 @@ def _print_report(results_dir, rows, eff, crows, intervals):
 
     rule("─"); print(" Coding Agent Cost Bench"); rule("─")
     print("\n✓ Results written:")
+    print(f"    {results_dir}/report.html   ← open in a browser")
     print(f"    {results_dir}/results_detailed.csv")
     print(f"    {results_dir}/summary.csv")
+    print(f"    {results_dir}/arms.csv")
     print("\nGPU pricing")
     print(f"  GLM endpoint: ${GPU_HOURLY_USD:.2f}/hr (charged only while generating)")
 
@@ -478,6 +699,24 @@ def _print_report(results_dir, rows, eff, crows, intervals):
     print("  The gap between them is the concurrency lever. API models are per-token (concurrency-")
     print("  invariant), so both columns match for Claude/GPT/Gemini.")
     print("  Prompt = task prompt version (v1 baseline / v2 shaped / v3 control; see PROMPTS.md).")
+
+    arms = arm_rollup(rows)
+    if arms:
+        def _rng(a):
+            if a["success_min"] == "":
+                return "—"
+            lo, hi = a["success_min"], a["success_max"]
+            return f"{lo:.0%}" if lo == hi else f"{lo:.0%}–{hi:.0%}"
+        section("Reasoning / Arm Rollup")
+        print("  (one row per arm, pooled across prompt versions; success = range over v1–v3)\n")
+        table(["Arm", "Success", "Out Tok", "GPU-s/run", "$/task sole", "$/task packed"],
+              [[a["arm"], f"{a['passes']}/{a['runs']} ({_rng(a)})", f"{a['avg_tokens_out']:,}",
+                f"{a['gpu_s_per_run']:.0f}s" if a["gpu_s_per_run"] != "" else "—",
+                usd(a["cost_sole_per_task"]), usd(a["cost_packed_per_task"])] for a in arms])
+        print("\n  Out Tok = mean output tokens/run; GPU-s/run = generation seconds/run (self-hosted only).")
+        print("  Costs are passes-weighted, so they match the per-prompt table above. The usual sweet")
+        print("  spot is 'high': decisive → fewest turns → cheapest per completed task, while 'default'")
+        print("  over-thinks (most output) and 'no-think' thrashes (more turns than high).")
 
     st = [r for r in rows if is_self_hosted(r["model"]) and r["cost_per_successful_task"] != "" and r["passes"]]
     if st:

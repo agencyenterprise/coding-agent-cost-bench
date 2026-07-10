@@ -20,7 +20,8 @@ set -euo pipefail
 #                 translates Anthropic /v1/messages -> OpenAI /v1/chat/completions (the "deepclaude" trick).
 #                 Use a modal*/ ref so its $ is GPU-billed (wall-clock), not priced as an Anthropic model.
 # All modal* GLM arms (max / high / off) run concurrently on the one endpoint; Opus/Claude-Code after.
-MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:modal-high/zai-org/GLM-5.2-FP8,opencode:modal-nothink/zai-org/GLM-5.2-FP8,deepclaude:modal/zai-org/GLM-5.2-FP8,deepclaude:modal-high/zai-org/GLM-5.2-FP8,deepclaude:modal-nothink/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
+# removed for now: deepclaude:modal/zai-org/GLM-5.2-FP8,deepclaude:modal-high/zai-org/GLM-5.2-FP8,deepclaude:modal-nothink/zai-org/GLM-5.2-FP8
+MODELS_STR="opencode:modal/zai-org/GLM-5.2-FP8,opencode:modal-high/zai-org/GLM-5.2-FP8,opencode:modal-nothink/zai-org/GLM-5.2-FP8,opencode:anthropic/claude-opus-4-8,claude:anthropic/claude-opus-4-8"
 TASKS_DIR="./tasks"
 ONLY_TASK=""               # run just one task (its dir name under $TASKS_DIR); empty = all
 PROMPTS_STR=""             # restrict to these per-task prompt files (comma/space); empty = ALL prompt*.txt
@@ -281,7 +282,12 @@ _dc_claim() {   # blocks until a pool slot is free, prints the claimed port
 _dc_release() { rmdir "$RESULTS_DIR/.dc_lock_$1" 2>/dev/null || true; }   # port
 
 $CCUSAGE --help >/dev/null 2>&1 || true   # pre-install ccusage once so per-run usage.json is clean JSON
-TO="$(command -v timeout || command -v gtimeout || true)"   # macOS: brew install coreutils
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"   # macOS: brew install coreutils
+# Prefer an explicit helper over `${TO:+$TO ${TIMEOUT_SECS}s}` — that word-split form is fragile
+# under set -u / accidental TO overwrite (can turn argv[0] into a model ref like anthropic/…).
+run_with_timeout() {
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "${TIMEOUT_SECS}s" "$@"; else "$@"; fi
+}
 now() { python3 -c 'import time; print(time.time())'; }
 MANIFEST="$RESULTS_DIR/manifest.csv"
 echo "task,harness,model,prompt,run,outdir,start,end,duration_s,status" > "$MANIFEST"
@@ -374,13 +380,13 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
     start="$(now)"
     case "$harness" in
       claude)   # real-world harness: Claude Code's own CLI (Anthropic models only)
-        ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
+        ( cd "$work" && PATH="$agent_path" run_with_timeout \
             claude -p "$prompt" --model "$(model_id "$model")" --output-format stream-json \
             --verbose --dangerously-skip-permissions > "$outdir/output.log" 2>&1 ) || true ;;
       deepclaude)   # Claude Code's loop, brain swapped to GLM on Modal via the LiteLLM proxy (deepclaude trick).
                     # Same env vars deepclaude.sh sets; model name = the LiteLLM model_name (== model_id of the ref).
                     # ANTHROPIC_API_KEY is dropped so the SDK uses ANTHROPIC_AUTH_TOKEN against our proxy, not Anthropic.
-        ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
+        ( cd "$work" && PATH="$agent_path" run_with_timeout \
             env -u ANTHROPIC_API_KEY \
               ANTHROPIC_BASE_URL="http://127.0.0.1:$dc_port" \
               ANTHROPIC_AUTH_TOKEN="$DEEPCLAUDE_MASTER_KEY" \
@@ -391,7 +397,7 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
               claude -p "$prompt" --output-format stream-json \
               --verbose --dangerously-skip-permissions > "$outdir/output.log" 2>&1 ) || true ;;
       *)        # opencode
-        ( cd "$work" && PATH="$agent_path" ${TO:+$TO ${TIMEOUT_SECS}s} \
+        ( cd "$work" && PATH="$agent_path" run_with_timeout \
             opencode run "$prompt" -m "$model" --format json --auto > "$outdir/output.log" 2>&1 ) || true ;;
     esac
     end="$(now)"
@@ -467,6 +473,7 @@ run_group() {
   done
   [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}" 2>/dev/null || true   # finish this group before the next
   if [ "$harness" = "deepclaude" ]; then _dc_stop_pool; fi
+  return 0
 }
 
 # Warm the GLM endpoint up front: a cold / scaled-to-zero 8xB200 returns 503 for a while, and

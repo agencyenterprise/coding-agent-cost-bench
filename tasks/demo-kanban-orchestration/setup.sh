@@ -28,8 +28,12 @@ npx --yes create-next-app@latest kanban-app \
   --no-src-dir \
   --import-alias "@/*"
 
-# Move everything (including dotfiles) up to the workspace root
-cp -r kanban-app/. .
+# Move everything (including dotfiles) up to the workspace root.
+# MUST preserve symlinks: macOS `cp -r` dereferences them, which turns
+# node_modules/.bin/next (symlink -> ../next/dist/bin/next) into a plain file
+# copy. That file then does require("../server/require-hook") relative to .bin/
+# and dies with MODULE_NOT_FOUND. `cp -a` keeps the links intact.
+cp -a kanban-app/. .
 rm -rf kanban-app
 
 # Install mandatory runtime deps (stack constraints from the task)
