@@ -81,9 +81,7 @@ if [ -z "$env_key" ]; then
   echo "    export MODAL_KEY=\"$server_ids\"  ;  export MODAL_SECRET=\"ws-...\"" >&2
   exit 1
 elif [ "$env_key" = "$server_ids" ]; then
-  echo "MODAL_KEY matches the server token ($server_ids) — allowing env '$ENV_NAME'..."
-  modal workspace proxy-tokens allow "$server_ids" "$ENV_NAME" 2>/dev/null \
-    || echo "  (allow skipped/failed — fine if RBAC is off)"
+  modal workspace proxy-tokens allow "$server_ids" "$ENV_NAME" >/dev/null 2>&1 || true   # matches .env, allow quietly
 else
   echo "MISMATCH: $ENV_FILE has '$env_key' but the server token is '$server_ids'." >&2
   echo "use the value that token was created with, or delete it and recreate:" >&2
@@ -93,7 +91,7 @@ fi
 
 # 3. endpoint — create only if missing (idempotent), reusing the weights volume
 if modal endpoint list --json 2>/dev/null | grep -qi "$NAME"; then
-  echo "auto-endpoint matching '$NAME' already exists — skipping create."
+  :   # already exists — reuse silently
 else
   echo "creating auto-endpoint '$NAME' for $MODEL (reusing volume '$VOLUME')..."
   modal endpoint create \
@@ -148,11 +146,8 @@ echo "endpoint '$NAME' is up (status=$status)."
 # it's the same URL as before (name unchanged). Confirm MODAL_ENDPOINT is set.
 cur="$(grep -E '^[[:space:]]*export[[:space:]]+MODAL_ENDPOINT=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^[^=]*=//; s/^["'\'']//; s/["'\'']$//')"
 if [ -n "$cur" ]; then
-  echo "MODAL_ENDPOINT is set: $cur"
-  echo "verify it serves the new endpoint (first call cold-starts the 8×B200):"
-  echo "  source .env && curl -H \"Modal-Key: \$MODAL_KEY\" -H \"Modal-Secret: \$MODAL_SECRET\" $cur/models"
+  echo "MODAL_ENDPOINT: $cur"
 else
-  echo "set MODAL_ENDPOINT in $ENV_FILE — copy the URL from the dashboard:"
-  echo "  https://modal.com/endpoints/ (open '$NAME') → use <url>/v1"
+  echo "set MODAL_ENDPOINT in $ENV_FILE — copy the URL from the dashboard:" >&2
+  echo "  https://modal.com/endpoints/ (open '$NAME') → use <url>/v1" >&2
 fi
-echo "then: source .env && ./bench.sh"

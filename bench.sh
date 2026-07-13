@@ -372,7 +372,7 @@ _fmt_sz() { [ "$1" -ge 1048576 ] && printf '%dM' $(($1 / 1048576)) || { [ "$1" -
 
 run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
   local pids=() starts=() setls=() tsks=() outs=() qi=0 total="${#QUEUE[@]}" run_start now el i t
-  local np ns nl nt no h m tn ta pf run done_n log sz quiet mt warn pvv safe
+  local np ns nl nt no h m tn ta pf run done_n log sz quiet mt warn pvv safe sig last_sig="" last_draw=0
   run_start="$(date +%s)"
   while [ "$qi" -lt "$total" ] || [ "${#pids[@]}" -gt 0 ]; do
     np=(); ns=(); nl=(); nt=(); no=()         # reap finished workers, keeping the 5 arrays aligned
@@ -391,8 +391,11 @@ run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
       pids+=($!); starts+=("$(date +%s)"); setls+=("$(setup_label "$h" "$m")"); tsks+=("$t")
       outs+=("$RESULTS_DIR/${tn}__${pvv}__${safe}__run${run}")
     done
-    if [ "$LIVE" = 1 ]; then                  # redraw the monitor in place
-      now="$(date +%s)"; done_n=$((qi - ${#pids[@]}))
+    # Redraw only when something actually changed (a job started/finished) or every 5s to refresh the
+    # clock — so the cold-start stretch where nothing moves doesn't spew a line per second.
+    now="$(date +%s)"; done_n=$((qi - ${#pids[@]})); sig="$done_n:${#pids[@]}"
+    if [ "$LIVE" = 1 ] && { [ "$sig" != "$last_sig" ] || [ $((now - last_draw)) -ge 5 ]; }; then
+      last_sig="$sig"; last_draw="$now"
       [ "$MON_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$MON_LINES" >&2
       printf 'bench  done %d/%d · running %d/%d · elapsed %s\n' \
         "$done_n" "$total" "${#pids[@]}" "$JOBS" "$(_fmt_el $((now - run_start)))" >&2
