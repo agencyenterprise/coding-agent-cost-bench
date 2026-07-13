@@ -352,27 +352,21 @@ setup_label() {   # harness model
   esac
 }
 
-# Live "not stuck?" monitor (TTY only). Redraws in place a boxed table of the IN-FLIGHT jobs. Both
-# harnesses stream NDJSON events to output.log as they work (opencode: step_start/tool_use/
-# step_finish/text; Claude: stream-json), so a job's real progress signal is its log GROWING. Columns:
-# setup, short task id, pid, elapsed, log size, and "quiet" = seconds since output.log last changed.
-# A job goes ⚠ once it's been quiet past STALL_SECS (likely stuck), separate from nearing the timeout.
-# The main loop owns the terminal; workers only write to bench.log, so nothing fights the redraw.
+# Live "not stuck?" monitor (TTY only). ONE compact status line, redrawn in place. Both harnesses
+# stream NDJSON events to output.log as they work (opencode: step_start/tool_use/step_finish/text;
+# Claude: stream-json), so a growing log is a job's real progress signal. The line always fits the
+# terminal (a full per-job table can't redraw cleanly once it's taller than the panel) and surfaces
+# the two jobs that matter: the OLDEST (closest to the timeout) and the QUIETEST (longest since its
+# output.log last grew) — flagged ⚠ with a pid to kill once it passes STALL_SECS, likely stuck.
 LIVE=0; [ -t 2 ] && LIVE=1
 MON_LINES=0
-STALL_SECS="${STALL_SECS:-120}"    # no output.log change in this long => flag as maybe stuck
-SW=13 TW=15 PW=7 EW=7 OW=6 IW=6    # column inner widths: setup, task, pid, elapsed, log, quiet
-_seg() { local n="$1" s=""; while [ "$n" -gt 0 ]; do s+="─"; n=$((n - 1)); done; printf '%s' "$s"; }
-_mrow() { printf '%s─┬─%s─┬─%s─┬─%s─┬─%s─┬─%s' "$(_seg $SW)" "$(_seg $TW)" "$(_seg $PW)" "$(_seg $EW)" "$(_seg $OW)" "$(_seg $IW)"; }
-MON_TOP="┌─$(_mrow)─┐"
-MON_MID="├─$(_mrow | tr '┬' '┼')─┤"
-MON_BOT="└─$(_mrow | tr '┬' '┴')─┘"
-_fmt_el() { [ "$1" -ge 60 ] && printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)) || printf '%ds' "$1"; }
-_fmt_sz() { [ "$1" -ge 1048576 ] && printf '%dM' $(($1 / 1048576)) || { [ "$1" -ge 1024 ] && printf '%dK' $(($1 / 1024)) || printf '%dB' "$1"; }; }
+STALL_SECS="${STALL_SECS:-120}"    # no output.log change in this long => flag the job as maybe stuck
+_fmt_el() { local s="$1"; [ "$s" -ge 60 ] && printf -v _R '%dm%02ds' $((s / 60)) $((s % 60)) || printf -v _R '%ds' "$s"; }
 
 run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
-  local pids=() starts=() setls=() tsks=() outs=() qi=0 total="${#QUEUE[@]}" run_start now el i t
-  local np ns nl nt no h m tn ta pf run done_n log sz quiet mt warn pvv safe sig last_sig="" last_draw=0
+  local pids=() starts=() setls=() tsks=() outs=() qi=0 total="${#QUEUE[@]}" run_start now i t
+  local np ns nl nt no h m tn ta pf run done_n pvv safe sig last_sig="" last_draw=0
+  local old_el old_t q_max q_t q_pid k el q mt line elogs etsk epids
   run_start="$(date +%s)"
   while [ "$qi" -lt "$total" ] || [ "${#pids[@]}" -gt 0 ]; do
     np=(); ns=(); nl=(); nt=(); no=()         # reap finished workers, keeping the 5 arrays aligned
@@ -391,35 +385,39 @@ run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
       pids+=($!); starts+=("$(date +%s)"); setls+=("$(setup_label "$h" "$m")"); tsks+=("$t")
       outs+=("$RESULTS_DIR/${tn}__${pvv}__${safe}__run${run}")
     done
-    # Redraw only when something actually changed (a job started/finished) or every 5s to refresh the
-    # clock — so the cold-start stretch where nothing moves doesn't spew a line per second.
+    # Redraw only on change (a job started/finished) or every 5s to refresh the clock, so the
+    # cold-start stretch where nothing moves stays quiet.
     now="$(date +%s)"; done_n=$((qi - ${#pids[@]})); sig="$done_n:${#pids[@]}"
     if [ "$LIVE" = 1 ] && { [ "$sig" != "$last_sig" ] || [ $((now - last_draw)) -ge 5 ]; }; then
       last_sig="$sig"; last_draw="$now"
-      [ "$MON_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$MON_LINES" >&2
-      printf 'bench  done %d/%d · running %d/%d · elapsed %s\n' \
-        "$done_n" "$total" "${#pids[@]}" "$JOBS" "$(_fmt_el $((now - run_start)))" >&2
-      if [ "${#pids[@]}" -gt 0 ]; then
-        printf '%s\n' "$MON_TOP" >&2
-        printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │ %${OW}s │ %${IW}s │\n" \
-          "setup" "task" "pid" "elapsed" "log" "quiet" >&2
-        printf '%s\n' "$MON_MID" >&2
-        for i in "${!pids[@]}"; do
-          el=$((now - starts[i]))
-          log="${outs[$i]}/output.log"; sz=0; quiet=$el   # no log yet => quiet since launch
-          if [ -f "$log" ]; then
-            sz="$(stat -f %z "$log" 2>/dev/null || echo 0)"
-            mt="$(stat -f %m "$log" 2>/dev/null || echo "$now")"; quiet=$((now - mt))
-          fi
-          warn=""; { [ "$quiet" -gt "$STALL_SECS" ] || [ "$el" -gt $((TIMEOUT_SECS * 4 / 5)) ]; } && warn=" ⚠"
-          printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │ %${OW}s │ %${IW}s │%s\n" \
-            "${setls[$i]}" "${tsks[$i]}" "${pids[$i]}" "$(_fmt_el "$el")" "$(_fmt_sz "$sz")" "$(_fmt_el "$quiet")" "$warn" >&2
-        done
-        printf '%s\n' "$MON_BOT" >&2
-        MON_LINES=$((4 + ${#pids[@]}))
-      else
-        MON_LINES=1
+      old_el=-1; old_t=""; q_max=-1; q_t=""; q_pid=""; elogs=(); etsk=(); epids=()
+      for i in "${!pids[@]}"; do
+        el=$((now - starts[i]))
+        [ "$el" -gt "$old_el" ] && { old_el=$el; old_t="${tsks[$i]}"; }
+        if [ -f "${outs[$i]}/output.log" ]; then
+          elogs+=("${outs[$i]}/output.log"); etsk+=("${tsks[$i]}"); epids+=("${pids[$i]}")
+        else                                   # no output yet => quiet since launch
+          [ "$el" -gt "$q_max" ] && { q_max=$el; q_t="${tsks[$i]}"; q_pid="${pids[$i]}"; }
+        fi
+      done
+      if [ "${#elogs[@]}" -gt 0 ]; then        # ONE batched stat for all logs (not one fork per job)
+        k=0
+        while IFS= read -r mt; do
+          q=$((now - mt)); [ "$q" -gt "$q_max" ] && { q_max=$q; q_t="${etsk[$k]}"; q_pid="${epids[$k]}"; }
+          k=$((k + 1))
+        done < <(stat -f %m "${elogs[@]}" 2>/dev/null)
       fi
+      _fmt_el $((now - run_start)); line="bench · done $done_n/$total · running ${#pids[@]}/$JOBS · $_R"
+      if [ "${#pids[@]}" -gt 0 ]; then
+        _fmt_el "$old_el"; line="$line · oldest $old_t $_R"
+        if [ "$q_max" -ge 0 ]; then
+          _fmt_el "$q_max"; line="$line · quietest $q_t $_R"
+          [ "$q_max" -gt "$STALL_SECS" ] && line="$line ⚠ pid $q_pid"
+        fi
+      fi
+      [ "$MON_LINES" -gt 0 ] && printf '\033[1A\033[2K\r' >&2   # one line: always fits, clean redraw
+      printf '%s\n' "$line" >&2
+      MON_LINES=1
     fi
     sleep 1
   done
