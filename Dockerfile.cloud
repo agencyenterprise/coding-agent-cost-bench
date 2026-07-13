@@ -1,0 +1,40 @@
+# Self-contained cloud image — build once, publish, then `docker pull && docker run` anywhere.
+# Bakes in everything `run_auto_endpoint.sh --swe-grade` needs (pip deps + SWE-bench_Verified
+# parquet) so nothing installs or downloads at container runtime.
+#
+#   docker build -f Dockerfile.cloud -t glm-bench-cloud .
+#   docker build -f Dockerfile.cloud --build-arg SKIP_SWE_PREFETCH=true -t glm-bench-cloud .  # faster iteration, no --swe-grade
+#   docker run --rm -e ANTHROPIC_API_KEY -e MODAL_ENDPOINT -e MODAL_KEY -e MODAL_SECRET \
+#     -e MODAL_TOKEN_ID -e MODAL_TOKEN_SECRET -e GEMINI_API_KEY -v "$PWD/results:/app/results" \
+#     glm-bench-cloud --runs 1 --swe-grade
+#
+# Creds come at RUNTIME (never baked): ANTHROPIC_API_KEY, MODAL_ENDPOINT/KEY/SECRET,
+# MODAL_TOKEN_ID/SECRET (account-level, non-interactive `modal setup` equivalent), GEMINI_API_KEY.
+FROM node:22-bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv python3-pip git curl ca-certificates coreutils sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm i -g opencode-ai@1.17.13 @anthropic-ai/claude-code@2.1.193
+
+RUN useradd -m -u 1001 bench
+WORKDIR /app
+COPY . /app
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt && \
+    chmod +x run_auto_endpoint.sh setup_auto_endpoint.sh grade_swe.sh bench.sh && \
+    chown -R bench:bench /app /home/bench
+
+USER bench
+RUN printf '{"hasCompletedOnboarding":true}\n' > /home/bench/.claude.json
+ENV OPENCODE_CONFIG=/app/opencode.jsonc NO_COLOR=1
+RUN npx -y ccusage --help >/dev/null 2>&1 || true
+
+# pre-fetch the SWE-bench_Verified parquet (public dataset) so grade_swe.sh's dataset lookups
+# never hit the network at runtime — skip with --build-arg SKIP_SWE_PREFETCH=true.
+ARG SKIP_SWE_PREFETCH=false
+RUN [ "$SKIP_SWE_PREFETCH" = "true" ] || \
+    python3 -c "from datasets import load_dataset; load_dataset('princeton-nlp/SWE-bench_Verified', split='test')"
+
+ENTRYPOINT ["./run_auto_endpoint.sh"]
+CMD ["--runs", "1", "--swe-grade"]

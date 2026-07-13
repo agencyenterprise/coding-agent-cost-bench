@@ -137,6 +137,24 @@ cp .env.example .env && $EDITOR .env     # creds (used at runtime, never baked i
 `results/` is mounted back to the host. See [Dockerfile](Dockerfile) — Claude Code runs headless via
 `ANTHROPIC_API_KEY`.
 
+## Publish a cloud image (download-and-run, no repo checkout)
+[Dockerfile.cloud](Dockerfile.cloud) is a separate, self-contained image for deploying to a cloud
+host: build once, push to a registry, then any host with Docker just pulls and runs it — no git
+clone, no local node/python/opencode/modal installs. Default command is
+`run_auto_endpoint.sh --runs 1 --swe-grade`.
+```bash
+# build + publish (once, from a machine with the repo)
+docker build -f Dockerfile.cloud -t <ecr-repo-uri>:<tag> .
+docker push <ecr-repo-uri>:<tag>
+
+# on the cloud host — only run_cloud.sh + .env, nothing else
+cp .env.example .env && $EDITOR .env     # + MODAL_TOKEN_ID/MODAL_TOKEN_SECRET (account-level, non-interactive `modal setup`)
+IMAGE=<ecr-repo-uri>:<tag> ./run_cloud.sh
+```
+Tag by git SHA or semver at push time — don't rely on `:latest` alone. On an EC2 host with an IAM
+role granting ECR pull access, `docker pull` needs no `docker login` at all. `results/` is mounted
+back to the host same as `run_on_docker.sh`.
+
 ---
 
 ## Cost model (the honest bit)

@@ -11,8 +11,9 @@
 #   ./grade_swe.sh --results-dir results/app-8xH200 --status-host pass   # extra args pass to swe_eval_modal.py
 #
 # Needs: Docker not required locally; a Python venv with swebench+pyarrow+modal (bootstrapped here,
-# cached under .cache/), and `modal setup` done once for auth. The SWE-bench_Verified parquet must be
-# in the HF cache (make_swebench_task.py populates it).
+# cached under .cache/), and Modal auth — either `modal setup` once, or MODAL_TOKEN_ID/
+# MODAL_TOKEN_SECRET in the environment. The SWE-bench_Verified parquet must be in the HF cache
+# (make_swebench_task.py populates it).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,7 +39,8 @@ PY="$VENV/bin/python"
 
 # fail early with a clear message if Modal isn't authed (else swe_eval_modal dies mid-run)
 "$PY" -c 'import modal' 2>/dev/null || { echo "modal not importable in $VENV" >&2; exit 1; }
-[ -f "$HOME/.modal.toml" ] || { echo "Modal not authenticated — run 'modal setup' first." >&2; exit 1; }
+[ -f "$HOME/.modal.toml" ] || { [ -n "${MODAL_TOKEN_ID:-}" ] && [ -n "${MODAL_TOKEN_SECRET:-}" ]; } || \
+  { echo "Modal not authenticated — run 'modal setup', or set MODAL_TOKEN_ID/MODAL_TOKEN_SECRET." >&2; exit 1; }
 
 echo ">>> [1/4] harvest agent patches from $RDIR"
 "$PY" make_predictions.py --results-dir "$RDIR"
