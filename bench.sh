@@ -352,37 +352,44 @@ setup_label() {   # harness model
   esac
 }
 
-# Live "not stuck?" monitor (TTY only). Redraws in place a boxed table of the IN-FLIGHT jobs: setup,
-# short task id, pid, and how long it's been running (a ⚠ once it nears the timeout). The main loop
-# owns the terminal; workers only write to bench.log, so nothing fights the redraw. Detailed per-run
-# numbers live in report.html, not here.
+# Live "not stuck?" monitor (TTY only). Redraws in place a boxed table of the IN-FLIGHT jobs. Both
+# harnesses stream NDJSON events to output.log as they work (opencode: step_start/tool_use/
+# step_finish/text; Claude: stream-json), so a job's real progress signal is its log GROWING. Columns:
+# setup, short task id, pid, elapsed, log size, and "quiet" = seconds since output.log last changed.
+# A job goes ⚠ once it's been quiet past STALL_SECS (likely stuck), separate from nearing the timeout.
+# The main loop owns the terminal; workers only write to bench.log, so nothing fights the redraw.
 LIVE=0; [ -t 2 ] && LIVE=1
 MON_LINES=0
-SW=13 TW=15 PW=7 EW=8    # column inner widths: setup, task, pid, elapsed
+STALL_SECS="${STALL_SECS:-120}"    # no output.log change in this long => flag as maybe stuck
+SW=13 TW=15 PW=7 EW=7 OW=6 IW=6    # column inner widths: setup, task, pid, elapsed, log, quiet
 _seg() { local n="$1" s=""; while [ "$n" -gt 0 ]; do s+="─"; n=$((n - 1)); done; printf '%s' "$s"; }
-MON_TOP="┌─$(_seg $SW)─┬─$(_seg $TW)─┬─$(_seg $PW)─┬─$(_seg $EW)─┐"
-MON_MID="├─$(_seg $SW)─┼─$(_seg $TW)─┼─$(_seg $PW)─┼─$(_seg $EW)─┤"
-MON_BOT="└─$(_seg $SW)─┴─$(_seg $TW)─┴─$(_seg $PW)─┴─$(_seg $EW)─┘"
+_mrow() { printf '%s─┬─%s─┬─%s─┬─%s─┬─%s─┬─%s' "$(_seg $SW)" "$(_seg $TW)" "$(_seg $PW)" "$(_seg $EW)" "$(_seg $OW)" "$(_seg $IW)"; }
+MON_TOP="┌─$(_mrow)─┐"
+MON_MID="├─$(_mrow | tr '┬' '┼')─┤"
+MON_BOT="└─$(_mrow | tr '┬' '┴')─┘"
 _fmt_el() { [ "$1" -ge 60 ] && printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)) || printf '%ds' "$1"; }
+_fmt_sz() { [ "$1" -ge 1048576 ] && printf '%dM' $(($1 / 1048576)) || { [ "$1" -ge 1024 ] && printf '%dK' $(($1 / 1024)) || printf '%dB' "$1"; }; }
 
 run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
-  local pids=() starts=() setls=() tsks=() qi=0 total="${#QUEUE[@]}" run_start now el warn i t
-  local np ns nl nt h m tn ta pf run done_n
+  local pids=() starts=() setls=() tsks=() outs=() qi=0 total="${#QUEUE[@]}" run_start now el i t
+  local np ns nl nt no h m tn ta pf run done_n log sz quiet mt warn pvv safe
   run_start="$(date +%s)"
   while [ "$qi" -lt "$total" ] || [ "${#pids[@]}" -gt 0 ]; do
-    np=(); ns=(); nl=(); nt=()                # reap finished workers, keeping the 4 arrays aligned
+    np=(); ns=(); nl=(); nt=(); no=()         # reap finished workers, keeping the 5 arrays aligned
     for i in "${!pids[@]}"; do
       if kill -0 "${pids[$i]}" 2>/dev/null; then
-        np+=("${pids[$i]}"); ns+=("${starts[$i]}"); nl+=("${setls[$i]}"); nt+=("${tsks[$i]}")
+        np+=("${pids[$i]}"); ns+=("${starts[$i]}"); nl+=("${setls[$i]}"); nt+=("${tsks[$i]}"); no+=("${outs[$i]}")
       fi
     done
-    pids=("${np[@]:-}"); starts=("${ns[@]:-}"); setls=("${nl[@]:-}"); tsks=("${nt[@]:-}")
-    [ -z "${pids[0]:-}" ] && { pids=(); starts=(); setls=(); tsks=(); }
+    pids=("${np[@]:-}"); starts=("${ns[@]:-}"); setls=("${nl[@]:-}"); tsks=("${nt[@]:-}"); outs=("${no[@]:-}")
+    [ -z "${pids[0]:-}" ] && { pids=(); starts=(); setls=(); tsks=(); outs=(); }
     while [ "${#pids[@]}" -lt "$JOBS" ] && [ "$qi" -lt "$total" ]; do   # fill every free slot
       IFS=$'\t' read -r h m tn ta pf run <<< "${QUEUE[$qi]}"; qi=$((qi + 1))
       run_one_job "$tn" "$ta" "$pf" "$h" "$m" "$run" &
       t="${tn#demo-swebench-}"; t="${t##*__}"     # astropy__astropy-13579 -> astropy-13579
+      pvv="$(plabel "$pf")"; safe="$(echo "${h}_${m}" | tr '/ :' '___')"   # mirror run_one_job's outdir
       pids+=($!); starts+=("$(date +%s)"); setls+=("$(setup_label "$h" "$m")"); tsks+=("$t")
+      outs+=("$RESULTS_DIR/${tn}__${pvv}__${safe}__run${run}")
     done
     if [ "$LIVE" = 1 ]; then                  # redraw the monitor in place
       now="$(date +%s)"; done_n=$((qi - ${#pids[@]}))
@@ -391,12 +398,19 @@ run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
         "$done_n" "$total" "${#pids[@]}" "$JOBS" "$(_fmt_el $((now - run_start)))" >&2
       if [ "${#pids[@]}" -gt 0 ]; then
         printf '%s\n' "$MON_TOP" >&2
-        printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │\n" "setup" "task" "pid" "elapsed" >&2
+        printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │ %${OW}s │ %${IW}s │\n" \
+          "setup" "task" "pid" "elapsed" "log" "quiet" >&2
         printf '%s\n' "$MON_MID" >&2
         for i in "${!pids[@]}"; do
-          el=$((now - starts[i])); warn=""; [ "$el" -gt $((TIMEOUT_SECS * 4 / 5)) ] && warn=" ⚠"
-          printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │%s\n" \
-            "${setls[$i]}" "${tsks[$i]}" "${pids[$i]}" "$(_fmt_el "$el")" "$warn" >&2
+          el=$((now - starts[i]))
+          log="${outs[$i]}/output.log"; sz=0; quiet=$el   # no log yet => quiet since launch
+          if [ -f "$log" ]; then
+            sz="$(stat -f %z "$log" 2>/dev/null || echo 0)"
+            mt="$(stat -f %m "$log" 2>/dev/null || echo "$now")"; quiet=$((now - mt))
+          fi
+          warn=""; { [ "$quiet" -gt "$STALL_SECS" ] || [ "$el" -gt $((TIMEOUT_SECS * 4 / 5)) ]; } && warn=" ⚠"
+          printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │ %${OW}s │ %${IW}s │%s\n" \
+            "${setls[$i]}" "${tsks[$i]}" "${pids[$i]}" "$(_fmt_el "$el")" "$(_fmt_sz "$sz")" "$(_fmt_el "$quiet")" "$warn" >&2
         done
         printf '%s\n' "$MON_BOT" >&2
         MON_LINES=$((4 + ${#pids[@]}))
