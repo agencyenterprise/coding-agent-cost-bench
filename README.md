@@ -54,7 +54,7 @@ Common flags:
 | `-r, --runs N` | repeats per (harness, model, task) | 1 |
 | `-m, --models "a,b"` | comma/space list of `harness:model` | the matrix above |
 | `--model H:REF` | add one entry (**repeatable**) | — |
-| `-j, --jobs N` | max task×run jobs **in parallel within a group** | 30 |
+| `-j, --jobs N` | total parallel worker slots, **kept full** (jobs drain in harness/model order) | 30 |
 | `-t, --tasks DIR` | tasks directory | `./tasks` |
 | `--task NAME` | run **only** this task (dir name), e.g. `--task demo-swebench-psf__requests-6028` | all |
 | `--prompts LIST` | restrict to these per-task prompt files (comma/space) | **all `prompt*.txt`** |
@@ -68,10 +68,14 @@ threaded into `summary.csv` + `report.md` + the complexity view), so versions of
 separate, comparable rows. See [PROMPTS.md](PROMPTS.md) for what each is, where it came from, and how
 `v3 − v1` vs `v2 − v3` decompose the gain. `--prompts prompt.v1.txt` restricts to just the baseline.
 
-**Parallelism is grouped.** Groups `(harness, model)` run **one at a time** so each arm's cost is
-clean (no cross-arm contention inflating its latency); within a group every task×run fires **in
-parallel** (up to `--jobs`), so each arm is measured at its own packing. The `modal*` arms are
-adjacent in the matrix, so the GLM endpoint stays warm across them — sequential costs no re-cold-start.
+**One global pool.** Every `(harness, model, task, prompt, run)` job goes into a single queue ordered
+by harness/model (all `modal*` GLM setups first, Claude last), and a pool of `--jobs` slots is kept
+**full**: the instant any job finishes, the next queued one launches, even across setups. So the GLM
+endpoint stays saturated end to end instead of idling at each group's slow tail. Dollars stay honest
+because `aggregate.py` attributes the real bill by **concurrency** (each GPU-second split among
+whoever was actually generating), and Claude runs on a different provider, so it never inflates GLM's
+`call_s` even when it overlaps the tail. A live table (`calls_s` / `tools_s` / `elapsed` per run,
+grouped by setup) redraws as jobs finish, with a final copy in the output.
 
 Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/summary.csv` +
 `results_detailed.csv`. Claude Code reports its own cost/usage/turns → those rows carry

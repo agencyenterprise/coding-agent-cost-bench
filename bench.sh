@@ -42,7 +42,7 @@ Usage: ./bench.sh [options]
       --task NAME       run ONLY this task (dir name under --tasks), e.g. --task demo-swebench-psf__requests-6028
       --prompts LIST    per-task prompt files to run (comma/space)     [$PROMPTS_STR]
       --prompt FILE     alias for --prompts with one file; pass "prompt.v1.txt prompt.v2.txt prompt.v3.txt" for the full sweep
-  -j, --jobs N          max task×run jobs in parallel WITHIN a group; groups (harness,model) run one at a time [$JOBS]
+  -j, --jobs N          total parallel worker slots, kept full; jobs drain in harness/model order (modal first) [$JOBS]
       --timeout SECS    kill a stuck agent                [$TIMEOUT_SECS]
       --retries N       retries on opencode server err    [$RETRIES]
       --delay SECS      pause between a group's runs       [$RUN_DELAY]
@@ -181,10 +181,25 @@ echo "task,harness,model,prompt,run,outdir,start,end,duration_s,status" > "$MANI
 
 _log() { echo "$*" >&2; }
 
+# Live run table (calls_s / tools_s / elapsed per run). Pool workers append rows here; the main
+# pool loop re-renders it in place via runtable.py. Per-worker chatter goes to bench.log so it
+# doesn't corrupt the in-place table.
+RUNTABLE="$RESULTS_DIR/runtable.tsv"; : > "$RUNTABLE"
+ORDER_FILE="$RESULTS_DIR/.setups.order"; : > "$ORDER_FILE"
+for i in "${!MREF[@]}"; do printf '%s\t%s\n' "${HARN[$i]}" "${MREF[$i]}" >> "$ORDER_FILE"; done
+BENCHLOG="$RESULTS_DIR/bench.log"; : > "$BENCHLOG"
+_jlog() { echo "$*" >> "$BENCHLOG"; }
+
 _manifest_append() {   # append one CSV line under a lock (safe with --jobs)
   local lock="$RESULTS_DIR/.manifest.lock"
   while ! mkdir "$lock" 2>/dev/null; do sleep 0.05; done
   echo "$1" >> "$MANIFEST"; rmdir "$lock"
+}
+
+_runtable_append() {   # append one TSV row (harness,model,task,start,end,calls_s) under a lock
+  local lock="$RESULTS_DIR/.runtable.lock"
+  while ! mkdir "$lock" 2>/dev/null; do sleep 0.02; done
+  echo "$1" >> "$RUNTABLE"; rmdir "$lock"
 }
 
 prepare_work() {   # populate $2 (work dir) from the task's source; echo external src path (or "")
@@ -238,7 +253,7 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
   prompt="$(cat "$task_abs/$prompt_file")"
   safe="$(echo "${harness}_${model}" | tr '/ :' '___')"
   outdir="$RESULTS_DIR/${task_name}__${pv}__${safe}__run${run}"; mkdir -p "$outdir"
-  _log ">>> $task_name | $pv | $harness | $model | run $run"
+  _jlog ">>> $task_name | $pv | $harness | $model | run $run"
 
   work="$(mktemp -d)"; state_dir="$(mktemp -d)"
   export XDG_DATA_HOME="$state_dir" XDG_STATE_HOME="$state_dir" XDG_CONFIG_HOME="$state_dir"
@@ -246,7 +261,7 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
 
   if [ -f "$task_abs/setup.sh" ]; then
     ( cd "$work" && TASK_REPO_SRC="$src" bash "$task_abs/setup.sh" ) > "$outdir/setup.log" 2>&1 \
-      || _log "    setup.sh failed (see $outdir/setup.log)"
+      || _jlog "    setup.sh failed (see $outdir/setup.log)"
   fi
 
   # snapshot the post-setup state so the agent's diff is isolable later (judge.py uses `git diff HEAD`)
@@ -274,7 +289,7 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
     perl -i -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$outdir/output.log" 2>/dev/null || true
     # Retry transient provider/server errors (opencode/Claude Code surface these in the log).
     if grep -qi "UnknownError\|Unexpected server error" "$outdir/output.log" && [ "$attempt" -lt $((RETRIES + 1)) ]; then
-      _log "    server error — retry $attempt after ${RUN_DELAY}s"; attempt=$((attempt + 1)); sleep "$RUN_DELAY"; continue
+      _jlog "    server error — retry $attempt after ${RUN_DELAY}s"; attempt=$((attempt + 1)); sleep "$RUN_DELAY"; continue
     fi
     break
   done
@@ -291,7 +306,11 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
     *) _snapshot_usage "$state_dir" "$outdir/usage.json" ;;
   esac
   _manifest_append "$task_name,$harness,$model,$pv,$run,$outdir,$start,$end,$dur,$status"
-  _log "    done ($status, ${dur}s)"
+  # API generation seconds for the live table (reuses aggregate.py's log parsers); tools_s = dur - calls_s
+  local calls_s
+  calls_s="$(python3 "$SCRIPT_DIR/run_stats.py" "$harness" "$outdir" 2>/dev/null || echo 0)"
+  _runtable_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$harness" "$model" "$task_name" "$start" "$end" "$calls_s")"
+  _jlog "    done ($status, ${dur}s, calls ${calls_s}s)"
   # Keep the agent's change for grading/judging. For a git repo, save only the DIFF (KB): copying the
   # whole checked-out tree per run is GBs for big projects (django/astropy) and fills the disk. Only
   # non-git tasks copy the tree (there the tree IS the artifact). make_predictions.py / judge.py read
@@ -306,43 +325,66 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
   rm -rf "$work" "$state_dir"
 }
 
-# Groups run ONE AT A TIME (sequential across (harness,model)). WITHIN a group, every task × run
-# runs in PARALLEL (up to JOBS). So a model's runs all go together — e.g. all GLM runs hit the
-# endpoint concurrently (the packed scenario we want to measure) — and one model's contention is
-# never mixed with another model's runs, keeping each model's numbers clean.
-run_group() {
-  local harness="$1" model="$2" pids=() task tn ta run pf pfiles p alive
-  for task in "$TASKS_DIR"/*/; do
-    [ -f "$task/prompt.v1.txt" ] || continue
-    tn="$(basename "$task")"
-    [ -n "$ONLY_TASK" ] && [ "$tn" != "$ONLY_TASK" ] && continue   # --task: run only this one
-    ta="$(cd "$task" && pwd)"
-    # which prompt versions to run for this task: --prompts restricts; else every prompt.v*.txt
-    # present (prompt.v1.txt, prompt.v2.txt, ...)
-    pfiles=()
-    if [ "${#PROMPT_FILES[@]}" -gt 0 ]; then
-      for pf in "${PROMPT_FILES[@]}"; do [ -f "$ta/$pf" ] && pfiles+=("$pf"); done
-    else
-      for p in "$ta"/prompt.v*.txt; do [ -f "$p" ] && pfiles+=("$(basename "$p")"); done
-    fi
-    for pf in "${pfiles[@]}"; do
-      for run in $(seq 1 "$RUNS"); do
-        # count only OUR task workers, not every background process in the shell — the reasoning
-        # proxies are also backgrounded here and never exit, so `jobs -pr` alone would count against
-        # $JOBS and deadlock this throttle before any worker ever launches.
-        while :; do
-          alive=0
-          for p in "${pids[@]:-}"; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive=$((alive + 1)); done
-          [ "$alive" -lt "$JOBS" ] && break
-          sleep 0.3
+# ONE global queue of every (harness,model,task,prompt,run) job, ordered by harness/model exactly
+# as given (so all modal* GLM setups come first, Claude last), then by task. A single pool of JOBS
+# slots is kept FULL: the instant any job finishes, the next queued one launches, even across
+# setups — no per-group barrier, so the endpoint stays saturated end to end. Dollars stay honest
+# because aggregate.py attributes the real bill by concurrency (each second split among whoever was
+# actually generating), and Claude runs on a different provider so it never muddies GLM's call_s.
+QUEUE=()
+build_queue() {
+  local i h m task tn ta run pf pfiles p
+  for i in "${!MREF[@]}"; do
+    h="${HARN[$i]}"; m="${MREF[$i]}"
+    for task in "$TASKS_DIR"/*/; do
+      [ -f "$task/prompt.v1.txt" ] || continue
+      tn="$(basename "$task")"
+      [ -n "$ONLY_TASK" ] && [ "$tn" != "$ONLY_TASK" ] && continue   # --task: run only this one
+      ta="$(cd "$task" && pwd)"
+      pfiles=()   # --prompts restricts; else every prompt.v*.txt present
+      if [ "${#PROMPT_FILES[@]}" -gt 0 ]; then
+        for pf in "${PROMPT_FILES[@]}"; do [ -f "$ta/$pf" ] && pfiles+=("$pf"); done
+      else
+        for p in "$ta"/prompt.v*.txt; do [ -f "$p" ] && pfiles+=("$(basename "$p")"); done
+      fi
+      for pf in "${pfiles[@]}"; do
+        for run in $(seq 1 "$RUNS"); do
+          QUEUE+=("$h"$'\t'"$m"$'\t'"$tn"$'\t'"$ta"$'\t'"$pf"$'\t'"$run")
         done
-        run_one_job "$tn" "$ta" "$pf" "$harness" "$model" "$run" &
-        pids+=($!)
       done
     done
   done
-  [ "${#pids[@]}" -gt 0 ] && wait "${pids[@]}" 2>/dev/null || true   # finish this group before the next
-  return 0
+}
+
+# Redraw the live run table in place (TTY only). The main loop owns the terminal; workers only
+# append rows, so there's nothing to fight with. On a pipe/CI we skip the redraw and print once
+# at the end.
+LIVE=0; [ -t 2 ] && LIVE=1
+TABLE_LINES=0
+redraw_table() {   # running-count
+  [ "$LIVE" = 1 ] || return 0
+  local out
+  out="$(python3 "$SCRIPT_DIR/runtable.py" --tsv "$RUNTABLE" --order "$ORDER_FILE" \
+          --total "${#QUEUE[@]}" --running "${1:-0}" 2>/dev/null)" || return 0
+  [ "$TABLE_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$TABLE_LINES" >&2
+  printf '%s\n' "$out" >&2
+  TABLE_LINES="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+}
+
+run_pool() {   # drain QUEUE through JOBS always-full slots
+  local pids=() qi=0 total="${#QUEUE[@]}" p alive h m tn ta pf run
+  while [ "$qi" -lt "$total" ] || [ "${#pids[@]}" -gt 0 ]; do
+    alive=()   # reap finished worker pids (proxies are not in this list, so they never block a slot)
+    for p in "${pids[@]:-}"; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive+=("$p"); done
+    pids=("${alive[@]:-}"); [ -z "${pids[0]:-}" ] && pids=()
+    while [ "${#pids[@]}" -lt "$JOBS" ] && [ "$qi" -lt "$total" ]; do   # fill every free slot
+      IFS=$'\t' read -r h m tn ta pf run <<< "${QUEUE[$qi]}"; qi=$((qi + 1))
+      run_one_job "$tn" "$ta" "$pf" "$h" "$m" "$run" &
+      pids+=($!)
+    done
+    redraw_table "${#pids[@]}"
+    sleep 0.3
+  done
 }
 
 # Warm the GLM endpoint up front: a cold / scaled-to-zero 8xB200 returns 503 for a while, and
@@ -376,14 +418,14 @@ for i in "${!MREF[@]}"; do
 done
 
 trap 'kill $(jobs -p) 2>/dev/null; wait 2>/dev/null; exit 130' INT TERM
-# One (harness,model) at a time for CLEAN per-arm cost — no cross-arm contention muddying call_s.
-# Within a group, tasks still run parallel (up to JOBS), so each arm is measured at its own packing.
-# The modal* arms are adjacent in the matrix, so the endpoint stays warm across them (no re-cold-start).
-for i in "${!MREF[@]}"; do
-  echo ">>> group: ${HARN[$i]} | ${MREF[$i]} — running its tasks in parallel (up to $JOBS)" >&2
-  run_group "${HARN[$i]}" "${MREF[$i]}"
-done
+build_queue
+echo ">>> ${#QUEUE[@]} jobs across ${#MREF[@]} setups — global pool, $JOBS slots kept full, ordered modal-first" >&2
+run_pool
 trap - INT TERM
+
+# Clear the live table (if any) and print one clean final copy, TTY or not.
+[ "$LIVE" = 1 ] && [ "$TABLE_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$TABLE_LINES" >&2
+python3 "$SCRIPT_DIR/runtable.py" --tsv "$RUNTABLE" --order "$ORDER_FILE" --total "${#QUEUE[@]}" >&2
 
 echo "Done -> $MANIFEST"
 python3 "$SCRIPT_DIR/aggregate.py" --results-dir "$RESULTS_DIR" --rate "$GLM_RATE"
