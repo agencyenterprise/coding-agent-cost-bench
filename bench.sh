@@ -352,39 +352,57 @@ setup_label() {   # harness model
   esac
 }
 
-# Live "not stuck?" monitor (TTY only). Redraws in place: a progress line plus one row per IN-FLIGHT
-# job with its pid and how long it's been running (a ⚠ once it nears the timeout). The main loop owns
-# the terminal; workers only write to bench.log, so nothing fights the redraw. Detailed per-run
+# Live "not stuck?" monitor (TTY only). Redraws in place a boxed table of the IN-FLIGHT jobs: setup,
+# short task id, pid, and how long it's been running (a ⚠ once it nears the timeout). The main loop
+# owns the terminal; workers only write to bench.log, so nothing fights the redraw. Detailed per-run
 # numbers live in report.html, not here.
 LIVE=0; [ -t 2 ] && LIVE=1
 MON_LINES=0
+SW=13 TW=15 PW=7 EW=8    # column inner widths: setup, task, pid, elapsed
+_seg() { local n="$1" s=""; while [ "$n" -gt 0 ]; do s+="─"; n=$((n - 1)); done; printf '%s' "$s"; }
+MON_TOP="┌─$(_seg $SW)─┬─$(_seg $TW)─┬─$(_seg $PW)─┬─$(_seg $EW)─┐"
+MON_MID="├─$(_seg $SW)─┼─$(_seg $TW)─┼─$(_seg $PW)─┼─$(_seg $EW)─┤"
+MON_BOT="└─$(_seg $SW)─┴─$(_seg $TW)─┴─$(_seg $PW)─┴─$(_seg $EW)─┘"
+_fmt_el() { [ "$1" -ge 60 ] && printf '%dm%02ds' $(($1 / 60)) $(($1 % 60)) || printf '%ds' "$1"; }
+
 run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
-  local pids=() starts=() labels=() qi=0 total="${#QUEUE[@]}" run_start now el warn i
-  local np ns nl h m tn ta pf run
+  local pids=() starts=() setls=() tsks=() qi=0 total="${#QUEUE[@]}" run_start now el warn i t
+  local np ns nl nt h m tn ta pf run done_n
   run_start="$(date +%s)"
   while [ "$qi" -lt "$total" ] || [ "${#pids[@]}" -gt 0 ]; do
-    np=(); ns=(); nl=()                       # reap finished workers, keeping the 3 arrays aligned
+    np=(); ns=(); nl=(); nt=()                # reap finished workers, keeping the 4 arrays aligned
     for i in "${!pids[@]}"; do
-      if kill -0 "${pids[$i]}" 2>/dev/null; then np+=("${pids[$i]}"); ns+=("${starts[$i]}"); nl+=("${labels[$i]}"); fi
+      if kill -0 "${pids[$i]}" 2>/dev/null; then
+        np+=("${pids[$i]}"); ns+=("${starts[$i]}"); nl+=("${setls[$i]}"); nt+=("${tsks[$i]}")
+      fi
     done
-    pids=("${np[@]:-}"); starts=("${ns[@]:-}"); labels=("${nl[@]:-}")
-    [ -z "${pids[0]:-}" ] && { pids=(); starts=(); labels=(); }
+    pids=("${np[@]:-}"); starts=("${ns[@]:-}"); setls=("${nl[@]:-}"); tsks=("${nt[@]:-}")
+    [ -z "${pids[0]:-}" ] && { pids=(); starts=(); setls=(); tsks=(); }
     while [ "${#pids[@]}" -lt "$JOBS" ] && [ "$qi" -lt "$total" ]; do   # fill every free slot
       IFS=$'\t' read -r h m tn ta pf run <<< "${QUEUE[$qi]}"; qi=$((qi + 1))
       run_one_job "$tn" "$ta" "$pf" "$h" "$m" "$run" &
-      pids+=($!); starts+=("$(date +%s)"); labels+=("$(setup_label "$h" "$m") · ${tn#demo-swebench-}")
+      t="${tn#demo-swebench-}"; t="${t##*__}"     # astropy__astropy-13579 -> astropy-13579
+      pids+=($!); starts+=("$(date +%s)"); setls+=("$(setup_label "$h" "$m")"); tsks+=("$t")
     done
     if [ "$LIVE" = 1 ]; then                  # redraw the monitor in place
-      now="$(date +%s)"
+      now="$(date +%s)"; done_n=$((qi - ${#pids[@]}))
       [ "$MON_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$MON_LINES" >&2
-      printf 'done %d/%d · running %d/%d · %dm%02ds\n' \
-        "$((qi - ${#pids[@]}))" "$total" "${#pids[@]}" "$JOBS" \
-        "$(((now - run_start) / 60))" "$(((now - run_start) % 60))" >&2
-      for i in "${!pids[@]}"; do
-        el=$((now - starts[i])); warn=""; [ "$el" -gt $((TIMEOUT_SECS * 4 / 5)) ] && warn="  ⚠"
-        printf '  %-28s pid %-7s %4ds%s\n' "${labels[$i]}" "${pids[$i]}" "$el" "$warn" >&2
-      done
-      MON_LINES=$((1 + ${#pids[@]}))
+      printf 'bench  done %d/%d · running %d/%d · elapsed %s\n' \
+        "$done_n" "$total" "${#pids[@]}" "$JOBS" "$(_fmt_el $((now - run_start)))" >&2
+      if [ "${#pids[@]}" -gt 0 ]; then
+        printf '%s\n' "$MON_TOP" >&2
+        printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │\n" "setup" "task" "pid" "elapsed" >&2
+        printf '%s\n' "$MON_MID" >&2
+        for i in "${!pids[@]}"; do
+          el=$((now - starts[i])); warn=""; [ "$el" -gt $((TIMEOUT_SECS * 4 / 5)) ] && warn=" ⚠"
+          printf "│ %-${SW}s │ %-${TW}s │ %-${PW}s │ %${EW}s │%s\n" \
+            "${setls[$i]}" "${tsks[$i]}" "${pids[$i]}" "$(_fmt_el "$el")" "$warn" >&2
+        done
+        printf '%s\n' "$MON_BOT" >&2
+        MON_LINES=$((4 + ${#pids[@]}))
+      else
+        MON_LINES=1
+      fi
     fi
     sleep 1
   done
