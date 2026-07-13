@@ -89,8 +89,27 @@ else
   exit 1
 fi
 
+# Exact name match only — substring would pick up e.g. Modal-Auto-Endpoints--edson when
+# looking for Modal-Auto-Endpoints. Always read from a file (heredoc steals stdin).
+_endpoint_status() {  # $1 = path to endpoint-list JSON; prints status of exact NAME
+  python3 - "$NAME" "$1" <<'PY'
+import json, sys
+want = sys.argv[1].lower()
+try:
+    data = json.load(open(sys.argv[2]))
+except Exception:
+    print(""); raise SystemExit(0)
+for it in (data if isinstance(data, list) else []):
+    if isinstance(it, dict) and str(it.get("name", "")).lower() == want:
+        print(str(it.get("status") or "").lower()); raise SystemExit(0)
+print("")
+PY
+}
+
 # 3. endpoint — create only if missing (idempotent), reusing the weights volume
-if modal endpoint list --json 2>/dev/null | grep -qi "$NAME"; then
+tmp="$(mktemp)"
+modal endpoint list --json > "$tmp" 2>/dev/null || true
+if [ -n "$(_endpoint_status "$tmp")" ]; then
   :   # already exists — reuse silently
 else
   echo "creating auto-endpoint '$NAME' for $MODEL (reusing volume '$VOLUME')..."
@@ -104,23 +123,11 @@ fi
 # 4. wait until the endpoint leaves 'provisioning' (endpoint list --json has no URL — only status)
 echo
 echo "waiting for '$NAME' to finish provisioning (8×B200 cold start — a few minutes)..."
-tmp="$(mktemp)"; status=""
+status=""
 set +e   # the poll must never kill the script
 for i in $(seq 1 "$WAIT_TRIES"); do
   modal endpoint list --json > "$tmp" 2>/dev/null
-  status="$(python3 - "$NAME" "$tmp" <<'PY'
-import json, sys
-name = sys.argv[1].lower()
-try:
-    data = json.load(open(sys.argv[2]))
-except Exception:
-    print(""); sys.exit(0)
-for it in (data if isinstance(data, list) else []):
-    if isinstance(it, dict) and name in str(it.get("name", "")).lower():
-        print(str(it.get("status") or "").lower()); sys.exit(0)
-print("")
-PY
-)"
+  status="$(_endpoint_status "$tmp")"
   case "$status" in
     provisioning|pending|creating|starting|building|initializing|queued|"")
       printf '  [%4ds] status=%s   \r' "$((i * WAIT_SLEEP))" "${status:-?}" >&2
