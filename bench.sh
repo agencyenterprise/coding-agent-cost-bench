@@ -181,12 +181,8 @@ echo "task,harness,model,prompt,run,outdir,start,end,duration_s,status" > "$MANI
 
 _log() { echo "$*" >&2; }
 
-# Live run table (calls_s / tools_s / elapsed per run). Pool workers append rows here; the main
-# pool loop re-renders it in place via runtable.py. Per-worker chatter goes to bench.log so it
-# doesn't corrupt the in-place table.
-RUNTABLE="$RESULTS_DIR/runtable.tsv"; : > "$RUNTABLE"
-ORDER_FILE="$RESULTS_DIR/.setups.order"; : > "$ORDER_FILE"
-for i in "${!MREF[@]}"; do printf '%s\t%s\n' "${HARN[$i]}" "${MREF[$i]}" >> "$ORDER_FILE"; done
+# Per-worker chatter goes to bench.log so it never corrupts the in-place live monitor (which the
+# main pool loop owns). Detailed per-run numbers (calls_s, tokens, cost) come from report.html.
 BENCHLOG="$RESULTS_DIR/bench.log"; : > "$BENCHLOG"
 _jlog() { echo "$*" >> "$BENCHLOG"; }
 
@@ -194,12 +190,6 @@ _manifest_append() {   # append one CSV line under a lock (safe with --jobs)
   local lock="$RESULTS_DIR/.manifest.lock"
   while ! mkdir "$lock" 2>/dev/null; do sleep 0.05; done
   echo "$1" >> "$MANIFEST"; rmdir "$lock"
-}
-
-_runtable_append() {   # append one TSV row (harness,model,task,start,end,calls_s) under a lock
-  local lock="$RESULTS_DIR/.runtable.lock"
-  while ! mkdir "$lock" 2>/dev/null; do sleep 0.02; done
-  echo "$1" >> "$RUNTABLE"; rmdir "$lock"
 }
 
 prepare_work() {   # populate $2 (work dir) from the task's source; echo external src path (or "")
@@ -306,11 +296,7 @@ run_one_job() {   # task_name task_abs prompt_file harness model run
     *) _snapshot_usage "$state_dir" "$outdir/usage.json" ;;
   esac
   _manifest_append "$task_name,$harness,$model,$pv,$run,$outdir,$start,$end,$dur,$status"
-  # API generation seconds for the live table (reuses aggregate.py's log parsers); tools_s = dur - calls_s
-  local calls_s
-  calls_s="$(python3 "$SCRIPT_DIR/run_stats.py" "$harness" "$outdir" 2>/dev/null || echo 0)"
-  _runtable_append "$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$harness" "$model" "$task_name" "$start" "$end" "$calls_s")"
-  _jlog "    done ($status, ${dur}s, calls ${calls_s}s)"
+  _jlog "    done ($status, ${dur}s)"
   # Keep the agent's change for grading/judging. For a git repo, save only the DIFF (KB): copying the
   # whole checked-out tree per run is GBs for big projects (django/astropy) and fills the disk. Only
   # non-git tasks copy the tree (there the tree IS the artifact). make_predictions.py / judge.py read
@@ -356,34 +342,51 @@ build_queue() {
   done
 }
 
-# Redraw the live run table in place (TTY only). The main loop owns the terminal; workers only
-# append rows, so there's nothing to fight with. On a pipe/CI we skip the redraw and print once
-# at the end.
-LIVE=0; [ -t 2 ] && LIVE=1
-TABLE_LINES=0
-redraw_table() {   # running-count
-  [ "$LIVE" = 1 ] || return 0
-  local out
-  out="$(python3 "$SCRIPT_DIR/runtable.py" --tsv "$RUNTABLE" --order "$ORDER_FILE" \
-          --total "${#QUEUE[@]}" --running "${1:-0}" 2>/dev/null)" || return 0
-  [ "$TABLE_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$TABLE_LINES" >&2
-  printf '%s\n' "$out" >&2
-  TABLE_LINES="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+# short setup label for the monitor, e.g. GLM(high), Opus
+setup_label() {   # harness model
+  case "$2" in
+    modal-high/*)    echo "GLM(high)";;
+    modal-nothink/*) echo "GLM(no-think)";;
+    modal/*)         echo "GLM(default)";;
+    *) [ "$1" = claude ] && echo "Opus" || echo "${2##*/}";;
+  esac
 }
 
-run_pool() {   # drain QUEUE through JOBS always-full slots
-  local pids=() qi=0 total="${#QUEUE[@]}" p alive h m tn ta pf run
+# Live "not stuck?" monitor (TTY only). Redraws in place: a progress line plus one row per IN-FLIGHT
+# job with its pid and how long it's been running (a ⚠ once it nears the timeout). The main loop owns
+# the terminal; workers only write to bench.log, so nothing fights the redraw. Detailed per-run
+# numbers live in report.html, not here.
+LIVE=0; [ -t 2 ] && LIVE=1
+MON_LINES=0
+run_pool() {   # drain QUEUE through JOBS always-full slots, ordered modal-first
+  local pids=() starts=() labels=() qi=0 total="${#QUEUE[@]}" run_start now el warn i
+  local np ns nl h m tn ta pf run
+  run_start="$(date +%s)"
   while [ "$qi" -lt "$total" ] || [ "${#pids[@]}" -gt 0 ]; do
-    alive=()   # reap finished worker pids (proxies are not in this list, so they never block a slot)
-    for p in "${pids[@]:-}"; do [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive+=("$p"); done
-    pids=("${alive[@]:-}"); [ -z "${pids[0]:-}" ] && pids=()
+    np=(); ns=(); nl=()                       # reap finished workers, keeping the 3 arrays aligned
+    for i in "${!pids[@]}"; do
+      if kill -0 "${pids[$i]}" 2>/dev/null; then np+=("${pids[$i]}"); ns+=("${starts[$i]}"); nl+=("${labels[$i]}"); fi
+    done
+    pids=("${np[@]:-}"); starts=("${ns[@]:-}"); labels=("${nl[@]:-}")
+    [ -z "${pids[0]:-}" ] && { pids=(); starts=(); labels=(); }
     while [ "${#pids[@]}" -lt "$JOBS" ] && [ "$qi" -lt "$total" ]; do   # fill every free slot
       IFS=$'\t' read -r h m tn ta pf run <<< "${QUEUE[$qi]}"; qi=$((qi + 1))
       run_one_job "$tn" "$ta" "$pf" "$h" "$m" "$run" &
-      pids+=($!)
+      pids+=($!); starts+=("$(date +%s)"); labels+=("$(setup_label "$h" "$m") · ${tn#demo-swebench-}")
     done
-    redraw_table "${#pids[@]}"
-    sleep 0.3
+    if [ "$LIVE" = 1 ]; then                  # redraw the monitor in place
+      now="$(date +%s)"
+      [ "$MON_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$MON_LINES" >&2
+      printf 'done %d/%d · running %d/%d · %dm%02ds\n' \
+        "$((qi - ${#pids[@]}))" "$total" "${#pids[@]}" "$JOBS" \
+        "$(((now - run_start) / 60))" "$(((now - run_start) % 60))" >&2
+      for i in "${!pids[@]}"; do
+        el=$((now - starts[i])); warn=""; [ "$el" -gt $((TIMEOUT_SECS * 4 / 5)) ] && warn="  ⚠"
+        printf '  %-28s pid %-7s %4ds%s\n' "${labels[$i]}" "${pids[$i]}" "$el" "$warn" >&2
+      done
+      MON_LINES=$((1 + ${#pids[@]}))
+    fi
+    sleep 1
   done
 }
 
@@ -422,10 +425,7 @@ build_queue
 echo ">>> ${#QUEUE[@]} jobs across ${#MREF[@]} setups — global pool, $JOBS slots kept full, ordered modal-first" >&2
 run_pool
 trap - INT TERM
-
-# Clear the live table (if any) and print one clean final copy, TTY or not.
-[ "$LIVE" = 1 ] && [ "$TABLE_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$TABLE_LINES" >&2
-python3 "$SCRIPT_DIR/runtable.py" --tsv "$RUNTABLE" --order "$ORDER_FILE" --total "${#QUEUE[@]}" >&2
+[ "$LIVE" = 1 ] && [ "$MON_LINES" -gt 0 ] && printf '\033[%dA\033[J' "$MON_LINES" >&2   # clear the monitor
 
 echo "Done -> $MANIFEST"
 python3 "$SCRIPT_DIR/aggregate.py" --results-dir "$RESULTS_DIR" --rate "$GLM_RATE"

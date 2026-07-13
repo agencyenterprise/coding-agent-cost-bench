@@ -74,8 +74,9 @@ by harness/model (all `modal*` GLM setups first, Claude last), and a pool of `--
 endpoint stays saturated end to end instead of idling at each group's slow tail. Dollars stay honest
 because `aggregate.py` attributes the real bill by **concurrency** (each GPU-second split among
 whoever was actually generating), and Claude runs on a different provider, so it never inflates GLM's
-`call_s` even when it overlaps the tail. A live table (`calls_s` / `tools_s` / `elapsed` per run,
-grouped by setup) redraws as jobs finish, with a final copy in the output.
+`call_s` even when it overlaps the tail. While it runs, a small live monitor shows the in-flight jobs
+(setup · task, pid, seconds elapsed, and a ⚠ once a job nears the timeout) so you can see at a glance
+it isn't stuck. Detailed per-run numbers (`call_s`, tokens, cost) are in `report.html`.
 
 Writes `results/manifest.csv` + per-run logs, then `aggregate.py` → `results/summary.csv` +
 `results_detailed.csv`. Claude Code reports its own cost/usage/turns → those rows carry
