@@ -1,0 +1,3 @@
+[submodule "deep-swe"]
+	path = deep-swe
+	url = https://github.com/datacurve-ai/deep-swe.git

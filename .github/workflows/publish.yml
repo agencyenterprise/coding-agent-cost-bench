@@ -5,7 +5,7 @@ name: build-and-publish
 # on this branch (so you can publish before the PR merges), and manually.
 on:
   push:
-    branches: [main, docker-python-orchestrator]
+    branches: [main, docker-python-orchestrator, deep-swe-migration]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -20,6 +20,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive   # deep-swe tasks/ must be present so `COPY . /app` bakes them in
 
       - uses: docker/setup-buildx-action@v3
 

@@ -11,10 +11,11 @@ grades the SWE tasks on Modal and writes report.html. The GLM GPU stays on Modal
 
 Creds come from the process environment and, if missing, from a local `.env` (via python-dotenv).
 Supports plain `KEY=val` and shell `export KEY="val"`; real env / `-e` always wins. Flags: --runs,
---jobs, --tasks, --task, --models, --prompts, --timeout, --rate. Grading always runs.
+--jobs, --tasks, --task, --models, --timeout, --rate, --list. Grading always runs.
 """
 import argparse
 import csv
+import glob
 import os
 import re
 import shutil
@@ -24,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.request
 
 from dotenv import load_dotenv
@@ -80,8 +82,10 @@ def sanitize(s):
     return re.sub(r"[/ :]", "_", s)
 
 
-def plabel(prompt_file):
-    return prompt_file[len("prompt."):-len(".txt")] if prompt_file.startswith("prompt.") else prompt_file
+# deep-swe (Q14): each task's sole prompt is its instruction.md, verbatim. The old prompt.v* sweep is
+# gone, so the `pv` result column is fixed to one label — aggregate.py/report generation stay unchanged.
+PROMPT_FILE = "instruction.md"
+PROMPT_LABEL = "instr"
 
 
 def is_self_hosted(model):
@@ -174,7 +178,7 @@ def run_one_job(job, cfg, manifest):
     jid = job["id"]
     task, task_abs = job["task"], job["task_abs"]
     harness, model, run, pf = job["harness"], job["model"], job["run"], job["prompt_file"]
-    pv = plabel(pf)
+    pv = PROMPT_LABEL
     safe = sanitize(f"{harness}_{model}")
     outdir = os.path.join(cfg["results_dir"], f"{task}__{pv}__{safe}__run{run}")
     os.makedirs(outdir, exist_ok=True)
@@ -499,24 +503,48 @@ def monitor_loop(stop, total, timeout, stall, run_start):
         time.sleep(5)
 
 
+# ---------------------------------------------------------------- deep-swe task discovery (Q15)
+def load_task_meta(task_dir):
+    """Read the deep-swe `task.toml` fields the orchestrator needs downstream (Q1/Q9/Q10/Q13). The
+    agent-env limits live under `[environment]`; `timeout_sec` under `[agent]`; ids/commit under
+    `[metadata]` (the parallel `[verifier.*]` values are for the separate grading step, not this)."""
+    with open(os.path.join(task_dir, "task.toml"), "rb") as f:
+        t = tomllib.load(f)
+    meta, env, agent = t.get("metadata", {}), t.get("environment", {}), t.get("agent", {})
+    ts = agent.get("timeout_sec")
+    return {"task_id": meta.get("task_id") or os.path.basename(task_dir),
+            "docker_image": env.get("docker_image", ""),
+            "base_commit_hash": meta.get("base_commit_hash", ""),
+            "timeout_sec": int(ts) if ts else None,
+            "cpus": env.get("cpus"), "memory_mb": env.get("memory_mb")}
+
+
+def discover_tasks(tasks_dir):
+    """deep-swe Harbor tasks: every dir under `tasks/` holding a `task.toml`. The 4 dataset-level
+    FILES (dataset.toml, manifest.json, manifest.schema.json, README.md) have no task.toml, so the
+    glob skips them → exactly 113. Returns {task_id: task_dir}, keyed by `[metadata].task_id`."""
+    out = {}
+    for toml_path in sorted(glob.glob(os.path.join(tasks_dir, "*", "task.toml"))):
+        meta = load_task_meta(os.path.dirname(toml_path))
+        out[meta["task_id"]] = os.path.dirname(toml_path)
+    return out
+
+
 # ---------------------------------------------------------------- main
 def build_queue(cfg):
-    q = []
-    prompts = cfg["prompts"]
-    tasks = sorted(d for d in os.listdir(cfg["tasks_dir"])
-                   if os.path.exists(os.path.join(cfg["tasks_dir"], d, "prompt.v1.txt")))
+    tasks = discover_tasks(cfg["tasks_dir"])
     if cfg["only_task"]:
-        tasks = [t for t in tasks if t == cfg["only_task"]]
+        if cfg["only_task"] not in tasks:
+            sys.exit(f"--task {cfg['only_task']!r} not found among {len(tasks)} deep-swe tasks")
+        tasks = {cfg["only_task"]: tasks[cfg["only_task"]]}
+    q = []
     for harness, model in cfg["setups"]:
-        for task in tasks:
-            task_abs = os.path.join(cfg["tasks_dir"], task)
-            for pf in prompts:
-                if not os.path.exists(os.path.join(task_abs, pf)):
-                    continue
-                for run in range(1, cfg["runs"] + 1):
-                    q.append({"id": f"{task}|{harness}|{model}|{pf}|{run}", "task": task,
-                              "task_abs": task_abs, "harness": harness, "model": model,
-                              "prompt_file": pf, "run": run})
+        for task, task_abs in sorted(tasks.items()):
+            meta = load_task_meta(task_abs)
+            for run in range(1, cfg["runs"] + 1):
+                q.append({"id": f"{task}|{harness}|{model}|{run}", "task": task,
+                          "task_abs": task_abs, "harness": harness, "model": model,
+                          "prompt_file": PROMPT_FILE, "run": run, "meta": meta})
     return q
 
 
@@ -551,10 +579,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--jobs", type=int, default=4)
-    ap.add_argument("--tasks", default=os.path.join(HERE, "tasks"))
+    ap.add_argument("--tasks", default=os.path.join(HERE, "deep-swe", "tasks"))
     ap.add_argument("--task", default="")
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS))
-    ap.add_argument("--prompts", default="prompt.v2.txt")
+    ap.add_argument("--list", action="store_true",
+                    help="discover tasks and exit; with --task also print its instruction.md + docker_image")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--retries", type=int, default=2)
     ap.add_argument("--rate", default="50.7")
@@ -571,6 +600,24 @@ def main():
         log(f">>> grade-only -> {a.grade_only}")
         grade(a.grade_only, a.rate)
         log(f">>> done -> {a.grade_only}/report.html")
+        return
+
+    if a.list:                             # discover tasks and exit — no creds, no container run
+        tasks = discover_tasks(a.tasks)
+        if a.task:
+            if a.task not in tasks:
+                sys.exit(f"--task {a.task!r} not found among {len(tasks)} deep-swe tasks")
+            meta = load_task_meta(tasks[a.task])
+            log(f"# task_id      : {meta['task_id']}")
+            log(f"# docker_image : {meta['docker_image']}")
+            log(f"# base_commit  : {meta['base_commit_hash']}")
+            log(f"# cpus={meta['cpus']} memory_mb={meta['memory_mb']} timeout_sec={meta['timeout_sec']}")
+            log(f"# prompt ({PROMPT_FILE}, label={PROMPT_LABEL}):\n")
+            sys.stdout.write(open(os.path.join(tasks[a.task], PROMPT_FILE)).read())
+        else:
+            for tid in sorted(tasks):
+                print(tid)
+            log(f">>> {len(tasks)} deep-swe tasks")
         return
 
     for v in ("MODAL_ENDPOINT", "MODAL_KEY", "MODAL_SECRET"):
@@ -595,8 +642,7 @@ def main():
     os.environ["OUT_DIR_RUN"] = rdir
     cfg = {"results_dir": rdir, "cache_dir": a.cache_dir,
            "timeout": a.timeout, "retries": a.retries, "run_delay": 2, "runs": a.runs,
-           "prompts": re.split(r"[,\s]+", a.prompts.strip()), "tasks_dir": a.tasks,
-           "only_task": a.task, "setups": setups}
+           "tasks_dir": a.tasks, "only_task": a.task, "setups": setups}
     os.makedirs(cfg["cache_dir"], exist_ok=True)
 
     manifest = os.path.join(rdir, "manifest.csv")
