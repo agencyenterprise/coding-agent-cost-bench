@@ -60,6 +60,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if body and "chat/completions" in self.path and MODE in ("off", "high"):
             try:
                 body = json.dumps(_inject(json.loads(body))).encode()
+                print(f"[{MODE}] injected reasoning tier -> {self.path}", flush=True)
             except Exception:
                 pass
         req = urllib.request.Request(BASE + self.path, data=body, method=self.command)
@@ -83,5 +84,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"reasoning proxy [{MODE}] on 127.0.0.1:{PORT} -> {BASE}", flush=True)
-    http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    # 0.0.0.0 (not 127.0.0.1): as a sibling container on the per-run bridge, this must be reachable
+    # by NAME from the task containers (Q11), not just the loopback of its own netns.
+    print(f"reasoning proxy [{MODE}] on 0.0.0.0:{PORT} -> {BASE}", flush=True)
+    http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

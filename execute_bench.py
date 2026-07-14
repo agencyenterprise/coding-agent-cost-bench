@@ -20,10 +20,13 @@ Supports plain `KEY=val` and shell `export KEY="val"`; real env / `-e` always wi
 import argparse
 import csv
 import glob
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -157,6 +160,69 @@ def sweep(runid):
         subprocess.run(["docker", "rm", "-f", *ids], stdout=DEVNULL, stderr=DEVNULL)
 
 
+def capture_patch(cname, task_abs, outdir):
+    """Q7: our agents edit /app WITHOUT committing, so deep-swe's pre_artifacts.sh (which diffs only
+    committed base..HEAD) would emit an empty patch. Commit the working tree under a bench identity,
+    then run the task's UNMODIFIED pre_artifacts.sh inside the container (its `git diff --binary
+    base..HEAD` + safe.directory = the grader's exact input contract) and copy the patch out. Done via
+    docker exec/cp on the still-alive container so the orchestrator needn't know the host /logs path."""
+    ga = ["docker", "exec", "-w", "/app", cname, "git", "-c", "safe.directory=/app",
+          "-c", "user.email=bench@local", "-c", "user.name=bench"]
+    subprocess.run(ga + ["add", "-A"], stdout=DEVNULL, stderr=DEVNULL)
+    subprocess.run(ga + ["commit", "-qm", "bench"], stdout=DEVNULL, stderr=DEVNULL)
+    subprocess.run(["docker", "cp", os.path.join(task_abs, "pre_artifacts.sh"),
+                    f"{cname}:/tmp/pre_artifacts.sh"], stdout=DEVNULL, stderr=DEVNULL)
+    subprocess.run(["docker", "exec", cname, "bash", "/tmp/pre_artifacts.sh"], stdout=DEVNULL, stderr=DEVNULL)
+    subprocess.run(["docker", "cp", f"{cname}:/logs/artifacts/model.patch",
+                    os.path.join(outdir, "model.patch")], stdout=DEVNULL, stderr=DEVNULL)
+
+
+def snapshot_usage(cname, outdir):
+    """Q8 opencode cost capture: copy this run's opencode.db out of the container and run host-side
+    ccusage to write usage.json (the `ccusage session --json` shape aggregate.load_usage reads).
+    Returns total tokens so the zero-token guard can tell a lost DB from a real result. `ccusage` is
+    installed globally in this image, so `npx` uses it without a download even under the temp HOME."""
+    outfile = os.path.join(outdir, "usage.json")
+    home = tempfile.mkdtemp()
+    dst = os.path.join(home, ".local/share/opencode")
+    os.makedirs(dst, exist_ok=True)
+    got = False
+    for ext in ("", "-wal", "-shm"):
+        rc = subprocess.run(["docker", "cp", f"{cname}:/root/.local/share/opencode/opencode.db{ext}",
+                             os.path.join(dst, "opencode.db" + ext)],
+                            stdout=DEVNULL, stderr=DEVNULL).returncode
+        if ext == "" and rc == 0:
+            got = True
+    if not got:
+        open(outfile, "w").write('{"sessions":[]}')
+        shutil.rmtree(home, ignore_errors=True)
+        return 0
+    with open(outfile, "w") as f:
+        subprocess.run(["npx", "-y", "ccusage", "opencode", "session", "--json"], stdout=f,
+                       stderr=DEVNULL, env={**os.environ, "HOME": home, "XDG_DATA_HOME": dst[:-len("/opencode")]})
+    try:
+        sessions = json.load(open(outfile)).get("sessions", [])
+        tokens = sum(int(s.get("inputTokens", 0) or 0) + int(s.get("outputTokens", 0) or 0)
+                     + int(s.get("cacheCreationTokens", 0) or 0) + int(s.get("cacheReadTokens", 0) or 0)
+                     for s in sessions)
+    except Exception:
+        open(outfile, "w").write('{"sessions":[]}')
+        tokens = 0
+    shutil.rmtree(home, ignore_errors=True)
+    return tokens
+
+
+def log_active(outdir):
+    """Did the opencode run actually do work (any step/tool in output.log)? An exit-0 opencode run with
+    tool activity but 0 tokens (Q8) means the DB was lost, never a legit empty — the zero-token guard."""
+    try:
+        from aggregate import log_stats
+        s = log_stats(outdir)
+        return (s.get("steps") or 0) > 0 or (s.get("tools") or 0) > 0
+    except Exception:
+        return False
+
+
 def run_one_job(job, cfg, manifest):
     """Generate one (task, harness, model, run). Returns a result dict; updates JOBS for the monitor."""
     jid = job["id"]
@@ -185,21 +251,31 @@ def run_one_job(job, cfg, manifest):
     else:
         agent = ["/opt/agent/bin/opencode", "run", prompt, "-m", model, "--format", "json", "--auto"]
 
-    # Default-GLM + claude reach Modal/Anthropic over the container's normal egress (Q5); no proxy here.
+    # Default-GLM + claude reach Modal/Anthropic directly over the bridge's NAT egress (Q5); the two
+    # proxied tiers reach off:/high: by name over the same bridge (Q11). NOTHINK_/HIGH_ENDPOINT are only
+    # set when their proxy container is up, so passing them through unconditionally is a no-op otherwise.
     denv = []
-    for k in ("MODAL_ENDPOINT", "MODAL_KEY", "MODAL_SECRET", "ANTHROPIC_API_KEY"):
+    for k in ("MODAL_ENDPOINT", "MODAL_KEY", "MODAL_SECRET", "ANTHROPIC_API_KEY",
+              "NOTHINK_ENDPOINT", "HIGH_ENDPOINT"):
         if os.environ.get(k):
             denv += ["-e", f"{k}={os.environ[k]}"]
     denv += ["-e", "OPENCODE_CONFIG=/opt/agent/opencode.jsonc", "-e", "NO_COLOR=1",
-             "-e", "HOME=/root", "-e", "IS_SANDBOX=1"]  # IS_SANDBOX lets claude skip-perms as root
+             "-e", "HOME=/root", "-e", "IS_SANDBOX=1",            # IS_SANDBOX lets claude skip-perms as root
+             "-e", "XDG_DATA_HOME=/root/.local/share"]            # pins opencode.db where snapshot_usage cp's
 
-    # Q10: deterministic name + label so cleanup is a label sweep; --cpus/--memory from task.toml.
-    cmd = ["docker", "run", "--name", cname, "--label", f"bench={cfg['runid']}",
-           "--cpus", cpus, "--memory", mem,
-           "-v", f"{cfg['bundle_vol']}:/opt/agent:ro", "-w", "/app", *denv, image, *agent]
+    # Q10: deterministic name + label so cleanup is a label sweep; --cpus/--memory from task.toml. The
+    # container's PID 1 is `sleep infinity` and the agent runs via `docker exec` — a stopped container
+    # can't be exec'd, but capture_patch (commit + pre_artifacts.sh) and snapshot_usage (opencode.db cp)
+    # must run AFTER the agent finishes, so the container has to outlive the agent process (Q7/Q8).
+    runc = ["docker", "run", "-d", "--name", cname, "--label", f"bench={cfg['runid']}",
+            "--network", cfg["network"], "--cpus", cpus, "--memory", mem,
+            "-v", f"{cfg['bundle_vol']}:/opt/agent:ro", "-w", "/app", *denv,
+            "--entrypoint", "sleep", image, "infinity"]
+    execc = ["docker", "exec", "-w", "/app", cname, *agent]
 
     start = time.time()
     killed_signal = None
+    errored = None            # "errored": zero-token guard tripped through all retries -> exclude from cost
     with JOBS_LOCK:
         JOBS[jid] = {"setup": setup_label(harness, model), "task": short_task(task),
                      "pid": None, "start": start, "outdir": outdir, "status": "running",
@@ -209,8 +285,10 @@ def run_one_job(job, cfg, manifest):
         attempt = 1
         while True:
             subprocess.run(["docker", "rm", "-f", cname], stdout=DEVNULL, stderr=DEVNULL)  # reuse name on retry
+            subprocess.run(runc, stdout=DEVNULL, stderr=subprocess.STDOUT)  # detached; exec-fail below degrades gracefully
+            killed_signal = None
             with open(logpath, "w") as lf:
-                proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT)
+                proc = subprocess.Popen(execc, stdout=lf, stderr=subprocess.STDOUT)
             with JOBS_LOCK:
                 JOBS[jid]["pid"] = proc.pid
             try:
@@ -224,51 +302,91 @@ def run_one_job(job, cfg, manifest):
                 open(logpath, "w", encoding="utf-8").write(ANSI.sub("", data))
             except OSError:
                 data = ""
+
+            # opencode token capture + zero-token guard (Q8). claude tokens ride stdout stream-json in
+            # output.log (claude_stats) and need no DB, so this whole block is opencode-only.
+            zero_tok = False
+            if harness != "claude" and killed_signal is None:
+                zero_tok = snapshot_usage(cname, outdir) == 0 and log_active(outdir)
+
             if killed_signal is None and SERVER_ERR.search(data) and attempt < cfg["retries"] + 1:
                 attempt += 1
                 with JOBS_LOCK:
                     JOBS[jid]["retries"] = attempt - 1
                 time.sleep(cfg["run_delay"])
                 continue
+            if zero_tok and attempt < cfg["retries"] + 1:      # lost DB -> hard-retry within budget
+                attempt += 1
+                with JOBS_LOCK:
+                    JOBS[jid]["retries"] = attempt - 1
+                log(f"!! {jid}: opencode active but 0 tokens (lost usage DB) — retry {attempt - 1}")
+                time.sleep(cfg["run_delay"])
+                continue
+            if zero_tok:
+                errored = "errored"      # still zero after retries -> not a legit $0, exclude from cost
             break
+
+        if killed_signal is None:        # a killed container is dead; nothing to commit/diff
+            capture_patch(cname, task_abs, outdir)
     finally:
         subprocess.run(["docker", "rm", "-f", cname], stdout=DEVNULL, stderr=DEVNULL)  # Q10: always tear down
     end = time.time()
 
-    # Cost capture (opencode usage.json) + patch harvest land in T1b; write the empty stub the report
-    # pipeline expects so nothing downstream trips over a missing file.
-    if harness != "claude":
-        open(os.path.join(outdir, "usage.json"), "w").write('{"sessions":[]}')
+    # Guarantee usage.json exists (killed runs skip snapshot_usage) so the report pipeline never trips.
+    up = os.path.join(outdir, "usage.json")
+    if harness != "claude" and not os.path.exists(up):
+        open(up, "w").write('{"sessions":[]}')
 
+    status_col = errored or "n/a"
     with MANIFEST_LOCK:
         with open(manifest, "a", newline="") as f:
             csv.writer(f).writerow([task, harness, model, pv, run, outdir,
-                                    f"{start:.6f}", f"{end:.6f}", f"{end - start:.2f}", "n/a"])
+                                    f"{start:.6f}", f"{end:.6f}", f"{end - start:.2f}", status_col])
 
-    status = "done" if killed_signal is None else f"KILLED sig{killed_signal}"
+    status = "errored" if errored else ("done" if killed_signal is None else f"KILLED sig{killed_signal}")
     with JOBS_LOCK:
         JOBS[jid]["status"] = status
         JOBS[jid]["end"] = end
-    return {"id": jid, "killed": killed_signal, "dur": end - start}
+    return {"id": jid, "killed": killed_signal, "dur": end - start, "errored": bool(errored)}
 
 
 # ---------------------------------------------------------------- reasoning proxies + warm
-def start_proxies(models):
-    procs = []
+def proxy_name(runid, mode):
+    return f"bench-{runid}-proxy-{mode}"
+
+
+def start_proxies(models, runid, network):
+    """Q11: start each needed reasoning tier as its OWN stateless sibling container on the run bridge,
+    running reasoning_proxy.py (bound 0.0.0.0) from THIS orchestrator's image. Task containers reach it
+    by name; NOTHINK_/HIGH_ENDPOINT are set to that name so denv forwards them into every opencode job."""
+    img = self_image()
     started = set()
     for m in models:
         head = m.split("/")[0]
         if head in PROXIES and head not in started:
             mode, port, envvar = PROXIES[head]
-            log(f"starting reasoning proxy [{mode}] on :{port}")
-            lf = open(os.path.join(os.environ["OUT_DIR_RUN"], f"proxy_{mode}.log"), "w")
-            p = subprocess.Popen([sys.executable, os.path.join(HERE, "reasoning_proxy.py"),
-                                  "--reasoning", mode, "--port", str(port)], stdout=lf, stderr=subprocess.STDOUT)
-            procs.append(p)
-            os.environ[envvar] = f"http://127.0.0.1:{port}/v1"
+            name = proxy_name(runid, mode)
+            log(f"starting reasoning proxy [{mode}] container {name} on :{port}")
+            subprocess.run(["docker", "rm", "-f", name], stdout=DEVNULL, stderr=DEVNULL)
+            subprocess.run(["docker", "run", "-d", "--name", name, "--label", f"bench={runid}",
+                            "--network", network, "-e", f"MODAL_ENDPOINT={os.environ['MODAL_ENDPOINT']}",
+                            "--entrypoint", "python3", img,
+                            "/app/reasoning_proxy.py", "--reasoning", mode, "--port", str(port)],
+                           stdout=DEVNULL, check=True)
+            os.environ[envvar] = f"http://{name}:{port}/v1"
             started.add(head)
-            time.sleep(1)
-    return procs
+    time.sleep(1)
+
+
+def dump_proxy_logs(runid):
+    """Persist each proxy container's stdout (startup + per-request tier-injection lines) to the run
+    dir before the shutdown sweep removes it — this is the T2 verification artifact."""
+    for mode, _, _ in PROXIES.values():
+        name = proxy_name(runid, mode)
+        r = subprocess.run(["docker", "logs", name], capture_output=True, text=True)
+        if r.returncode == 0 and (r.stdout or r.stderr):
+            with open(os.path.join(os.environ["OUT_DIR_RUN"], f"proxy_{mode}.log"), "w") as f:
+                f.write(r.stdout + r.stderr)
 
 
 def endpoint_up():
@@ -614,7 +732,7 @@ def main():
     os.environ["OUT_DIR_RUN"] = rdir
     runid = sanitize(os.path.basename(os.path.normpath(rdir)))   # docker --name/--label safe
     disp_timeout = a.timeout or 5400                              # monitor's ⚠ threshold only
-    cfg = {"results_dir": rdir, "runid": runid, "bundle_vol": None,
+    cfg = {"results_dir": rdir, "runid": runid, "bundle_vol": None, "network": f"bench-{runid}",
            "timeout": a.timeout, "retries": a.retries, "run_delay": 2, "runs": a.runs,
            "tasks_dir": a.tasks, "only_task": a.task, "setups": setups}
 
@@ -637,7 +755,9 @@ def main():
     sweep(runid)                                    # Q10 startup sweep — clear any prior run's leftovers
     cfg["bundle_vol"] = setup_bundle_volume(runid)  # Q6 read-only node+CLI bundle, seeded once
 
-    proxies = start_proxies([m for _, m in setups])
+    # Q11: one user-defined bridge per run — name-DNS for the proxies + NAT egress for direct tiers.
+    subprocess.run(["docker", "network", "create", cfg["network"]], stdout=DEVNULL, stderr=DEVNULL)
+    start_proxies([m for _, m in setups], runid, cfg["network"])
     try:
         if glm and not warm_endpoint(glm.split("/", 1)[1]):
             sys.exit(f"GLM endpoint {os.environ['MODAL_ENDPOINT']} not ready")
@@ -662,10 +782,10 @@ def main():
         if killed:
             log(f"!! {len(killed)} job(s) hit the timeout / were killed: {killed[:5]}")
     finally:
-        for p in proxies:
-            p.terminate()
-        sweep(runid)        # Q10 shutdown sweep — no orphan survives a normal run, timeout, or Ctrl-C
+        dump_proxy_logs(runid)   # persist tier-injection logs before the sweep removes the proxies
+        sweep(runid)             # Q10 shutdown sweep — removes task + proxy containers by label
         subprocess.run(["docker", "volume", "rm", "-f", cfg["bundle_vol"]], stdout=DEVNULL, stderr=DEVNULL)
+        subprocess.run(["docker", "network", "rm", cfg["network"]], stdout=DEVNULL, stderr=DEVNULL)
 
     grade(rdir, a.rate)   # always grade on Modal + bill + aggregate -> report.html
     log(f">>> done -> {host_display_path(rdir)}/report.html")

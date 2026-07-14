@@ -417,6 +417,8 @@ def main():
             m = row.get("model")
             if not m or not row.get("task") or not row.get("outdir"):
                 continue   # skip malformed/partial lines (e.g. a stray write that corrupted the manifest)
+            if row.get("status") == "errored":
+                continue   # zero-token guard tripped (lost usage DB) — not a legit result, exclude from cost
             row["outdir"] = resolve_outdir(row["outdir"])
             h = row.get("harness") or harness_of(m)   # harness recorded by bench.sh (fallback for old data)
             if h == "deepclaude":
