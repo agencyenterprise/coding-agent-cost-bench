@@ -465,6 +465,7 @@ def main():
                 "status": row["status"],
                 "start": _iso(s), "end": _iso(e), "duration_s": row.get("duration_s", ""),
                 "call_s": round(cs, 2),
+                "steps": pm["steps"],
                 "tokens_in": tin, "tokens_out": tout,
                 "cost_usd": run_cost,
                 "billed_usd": "",       # actual bill attributed to this run (filled below), self-hosted only
@@ -492,6 +493,20 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(detailed[0].keys()))
         w.writeheader()
         w.writerows(detailed)
+
+    # per_run.csv — the report's "Per-task cost & result" table, ungrouped (one row per run).
+    # The report's grouped table is just a GROUP BY (task, setup) rollup of these rows.
+    _passed = lambda s: {"pass": "true", "fail": "false"}.get(s, "n/a")
+    per_run = [{"task": _tshort(d["task"]), "setup": _arm_label(d["harness"], d["model"]),
+                "run": d["run"], "passed": _passed(d["status"]),
+                "billed_usd": d["billed_usd"], "sole_usd": d["cost_usd"],
+                "elapsed_s": d["duration_s"], "steps": d.get("steps", ""),
+                "tokens_in": d["tokens_in"], "tokens_out": d["tokens_out"]} for d in detailed]
+    per_run.sort(key=lambda r: (r["task"], r["setup"], str(r["run"])))
+    with open(os.path.join(RESULTS_DIR, "per_run.csv"), "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(per_run[0].keys()))
+        w.writeheader()
+        w.writerows(per_run)
 
     by_arm = defaultdict(list)
     for d in detailed:
