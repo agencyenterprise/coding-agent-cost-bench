@@ -460,31 +460,35 @@ def monitor_loop(stop, total, timeout, stall, run_start):
             s += f" · mem {_sz(tmem)}" + (f"/{_sz(limit)}" if limit else "")
         return s
 
-    try:
-        from rich.console import Console
-        from rich.live import Live
-        from rich.table import Table
-        console = Console(stderr=True)
+    # Rich live table only when stderr is a real terminal (docker run -it). Without a TTY (plain
+    # `docker run`, CI, piped) rich disables the live display and shows nothing — so fall through to
+    # the plain periodic status line instead of going silent.
+    if sys.stderr.isatty():
+        try:
+            from rich.console import Console
+            from rich.live import Live
+            from rich.table import Table
+            console = Console(stderr=True)
 
-        def make():
-            rows, ndone, nrun, tmem = render_rows(time.time(), timeout, stall)
-            near = limit and tmem > limit * 0.85               # near the OOM ceiling -> red title
-            t = Table(title=header(ndone, nrun, tmem),
-                      title_style="bold red" if near else "bold", expand=False)
-            for c in ("setup", "task", "pid", "elapsed", "mem", "cpu", "steps", "tok", "quiet", ""):
-                t.add_column(c, justify="left" if c in ("setup", "task") else "right")
-            for r in rows:
-                t.add_row(*r, style="yellow" if r[9] else None)
-            return t
+            def make():
+                rows, ndone, nrun, tmem = render_rows(time.time(), timeout, stall)
+                near = limit and tmem > limit * 0.85               # near the OOM ceiling -> red title
+                t = Table(title=header(ndone, nrun, tmem),
+                          title_style="bold red" if near else "bold", expand=False)
+                for c in ("setup", "task", "pid", "elapsed", "mem", "cpu", "steps", "tok", "quiet", ""):
+                    t.add_column(c, justify="left" if c in ("setup", "task") else "right")
+                for r in rows:
+                    t.add_row(*r, style="yellow" if r[9] else None)
+                return t
 
-        with Live(make(), console=console, refresh_per_second=2, transient=False) as live:
-            while not stop.is_set():
+            with Live(make(), console=console, refresh_per_second=2, transient=False) as live:
+                while not stop.is_set():
+                    live.update(make())
+                    time.sleep(1)
                 live.update(make())
-                time.sleep(1)
-            live.update(make())
-        return
-    except ImportError:
-        pass
+            return
+        except ImportError:
+            pass
     last = ""
     while not stop.is_set():
         _rows, ndone, nrun, tmem = render_rows(time.time(), timeout, stall)
