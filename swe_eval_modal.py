@@ -67,8 +67,16 @@ def grade(repo, output, f2p, p2p):
     return resolved, summary
 
 
+EVAL_TIMEOUT = int(os.environ.get("EVAL_TIMEOUT", "900"))   # hard wall-clock cap on one patch's tests
+
+
+class EvalTimeout(Exception):
+    """A patch's test run hung past EVAL_TIMEOUT (e.g. a bad patch introduced an infinite loop)."""
+
+
 def _eval_once(app, image, eval_script, patch, repo, f2p, p2p):
     sb = modal.Sandbox.create(app=app, image=image, cpu=4.0, memory=8192, timeout=1800)
+    box = {}
     try:
         b64p = base64.b64encode(patch.encode()).decode()
         b64s = base64.b64encode(eval_script.encode()).decode()
@@ -78,10 +86,25 @@ def _eval_once(app, image, eval_script, patch, repo, f2p, p2p):
                      "cd /testbed && (git apply -v /tmp/model.patch || git apply --3way /tmp/model.patch "
                      "|| patch -p1 -i /tmp/model.patch) 2>&1")
         ap.stdout.read(); ap.wait()
+        # Read the eval in a watchdog thread. A bad patch can make a test hang, and a surviving child
+        # keeps stdout open so .read() would block forever — so on the deadline we terminate the WHOLE
+        # sandbox (kills every process, unblocks the read) and treat it as a timeout, not a retry.
         ev = sb.exec("bash", "-lc", "bash /tmp/eval.sh 2>&1")
-        output = ev.stdout.read(); ev.wait()
+
+        def _drain():
+            try:
+                box["out"] = ev.stdout.read(); ev.wait()
+            except Exception as ex:   # noqa: BLE001
+                box["err"] = ex
+
+        th = threading.Thread(target=_drain, daemon=True)
+        th.start(); th.join(EVAL_TIMEOUT)
+        if th.is_alive():
+            sb.terminate()            # unblocks _drain by killing everything in the sandbox
+            raise EvalTimeout(f"tests hung past {EVAL_TIMEOUT}s")
     finally:
         sb.terminate()
+    output = box.get("out", "")
     if START not in output:   # the eval never emitted its markers -> it didn't really run (infra flake)
         raise RuntimeError("no test-output markers — eval did not run")
     return grade(repo, output, f2p, p2p)
@@ -89,11 +112,14 @@ def _eval_once(app, image, eval_script, patch, repo, f2p, p2p):
 
 def run_one(app, image, eval_script, patch, repo, f2p, p2p, retries=2):
     """Grade one patch in a fresh Sandbox. Retries ONLY on infra/exec errors (a sandbox that dies, or
-    an eval that produced no test output) — never on a legitimate 'unresolved' (tests ran and failed)."""
+    an eval that produced no test output) — never on a legitimate 'unresolved' (tests ran and failed),
+    and never on a genuine hang (EvalTimeout is terminal, else a retry just hangs again)."""
     last = None
     for _ in range(retries + 1):
         try:
             return _eval_once(app, image, eval_script, patch, repo, f2p, p2p)
+        except EvalTimeout:
+            raise                     # terminal: don't retry a hang
         except Exception as e:  # noqa: BLE001 — transient Modal/sandbox/network failure; retry
             last = e
     raise last
@@ -138,6 +164,17 @@ def main():
             jobs.append((iid, p))
 
     results, done, lock = {}, [0], threading.Lock()
+    if os.path.exists(out):                        # resume: keep prior grades, only grade what's missing
+        try:
+            results = json.load(open(out))
+        except Exception:
+            results = {}
+    skip = set(results)
+    before = len(jobs)
+    jobs = [j for j in jobs if f"{j[0]}::{j[1]['model_name_or_path']}" not in skip]
+    if before != len(jobs):
+        print(f"resuming from {os.path.basename(out)}: {before - len(jobs)} already graded, {len(jobs)} to go "
+              "(delete an entry to re-grade it)")
 
     def work(job):
         iid, p = job
@@ -155,6 +192,7 @@ def main():
         with lock:
             results[rkey] = res
             done[0] += 1
+            json.dump(results, open(out, "w"), indent=2)   # incremental: safe to pause/kill and resume
             if "error" in res:
                 tag = f"ERROR {res['error']}"
             elif res.get("note"):
