@@ -10,8 +10,8 @@ set -euo pipefail
 
 NAME="${MODAL_ENDPOINT_NAME:-Modal-Auto-Endpoints}"
 MODEL="${GLM_MODEL:-zai-org/GLM-5.2-FP8}"
-VOLUME="${GLM_VOLUME:-glm-5-2-weights}"
-VOLUME_PATH="${GLM_VOLUME_PATH:-zai-org/GLM-5.2-FP8}"
+VOLUME="${GLM_VOLUME:-/glm-5-2-weights}"
+VOLUME_PATH="${GLM_VOLUME_PATH:-/zai-org/GLM-5.2-FP8}"
 ENV_NAME="${MODAL_ENV:-main}"
 ENV_FILE=".env"
 WAIT_TRIES="${WAIT_TRIES:-160}"
@@ -51,10 +51,11 @@ done
 command -v modal >/dev/null 2>&1 || { echo "installing modal CLI..."; pip install -q modal; }
 modal app list >/dev/null 2>&1 || { echo "modal not authenticated — running 'modal setup'..."; modal setup; }
 
-# 2. proxy auth token — enforce exactly ONE, matching .env
+# 2. proxy auth token — enforce exactly ONE, matching the MODAL_KEY we'll use
 #    (server empty -> create; matches -> allow; mismatch/missing -> warn + stop)
-env_key="$(grep -E '^[[:space:]]*export[[:space:]]+MODAL_KEY=' "$ENV_FILE" 2>/dev/null \
-            | head -1 | sed -E 's/^[^=]*=//; s/^["'\'']//; s/["'\'']$//')"
+#    Prefer the env var (set in Docker via --env-file); fall back to grepping $ENV_FILE on a host.
+env_key="${MODAL_KEY:-$(grep -E '^[[:space:]]*(export[[:space:]]+)?MODAL_KEY=' "$ENV_FILE" 2>/dev/null \
+            | head -1 | sed -E 's/^[^=]*=//; s/^["'\'']//; s/["'\'']$//')}"
 server_ids="$(modal workspace proxy-tokens list 2>/dev/null | grep -oE 'wk-[A-Za-z0-9]+' | sort -u)"
 n="$(printf '%s\n' "$server_ids" | grep -c . || true)"
 
@@ -151,7 +152,7 @@ echo "endpoint '$NAME' is up (status=$status)."
 
 # The auto-endpoint URL is NOT in `endpoint list` — it's derived from workspace + name, so
 # it's the same URL as before (name unchanged). Confirm MODAL_ENDPOINT is set.
-cur="$(grep -E '^[[:space:]]*export[[:space:]]+MODAL_ENDPOINT=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^[^=]*=//; s/^["'\'']//; s/["'\'']$//')"
+cur="${MODAL_ENDPOINT:-$(grep -E '^[[:space:]]*(export[[:space:]]+)?MODAL_ENDPOINT=' "$ENV_FILE" 2>/dev/null | head -1 | sed -E 's/^[^=]*=//; s/^["'\'']//; s/["'\'']$//')}"
 if [ -n "$cur" ]; then
   echo "MODAL_ENDPOINT: $cur"
 else

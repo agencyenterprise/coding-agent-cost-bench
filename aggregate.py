@@ -311,6 +311,20 @@ def resolve_outdir(outdir):
     return os.path.join(RESULTS_DIR, os.path.basename(outdir)) if outdir else outdir
 
 
+def _host_display_path(path):
+    """Rewrite container OUT_DIR paths for host-facing logs. Default: /out → results
+    (README mounts -v \"$PWD/results:/out\"). Override with HOST_OUT_DIR=…"""
+    out = os.path.abspath(os.environ.get("OUT_DIR", "/out"))
+    host = os.environ.get("HOST_OUT_DIR") or ("results" if out == "/out" else None)
+    if not host:
+        return path
+    abs_path = os.path.abspath(path)
+    if abs_path == out or abs_path.startswith(out + os.sep):
+        rel = os.path.relpath(abs_path, out)
+        return host if rel == "." else os.path.join(host, rel)
+    return path
+
+
 def _report_file_url(path):
     return Path(path).resolve().as_uri()
 
@@ -330,9 +344,14 @@ def _open_report(path):
 
 
 def _emit_report_ready(path, *, open_browser=False):
+    # Inside Docker, print the host mount path (results/...) — /out/... is wrong for the operator.
+    shown = _host_display_path(path)
     abs_path = str(Path(path).resolve())
-    url = _report_file_url(abs_path)
-    print(f"✓ report: {_terminal_link(abs_path, url)}")
+    # Only hyperlink when the shown path is a real local file (host run); container /out links break.
+    if shown == path or shown == abs_path or os.path.isfile(shown):
+        print(f"✓ report: {_terminal_link(shown, _report_file_url(path if os.path.isfile(path) else shown))}")
+    else:
+        print(f"✓ report: {shown}")
     if open_browser:
         _open_report(abs_path)
 
@@ -562,7 +581,8 @@ def main():
     if rows:
         path = _html_report(RESULTS_DIR, rows, arows, eff, crows, overall_peak, detailed)
         _emit_report_ready(path, open_browser=open_report)
-        print(f"  data:   {RESULTS_DIR}/summary.csv  {RESULTS_DIR}/arms.csv  {RESULTS_DIR}/complexity.csv  {RESULTS_DIR}/results_detailed.csv")
+        shown = _host_display_path(RESULTS_DIR)
+        print(f"  data:   {shown}/summary.csv  {shown}/arms.csv  {shown}/complexity.csv  {shown}/results_detailed.csv")
 
 
 def _mname(model):

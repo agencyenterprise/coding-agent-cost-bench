@@ -7,4 +7,6 @@ __pycache__/
 tasks/*
 !tasks/demo-*/
 .cache/
+out/
+results/
 .DS_Store

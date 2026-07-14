@@ -12,20 +12,22 @@ python3 make_swebench_task.py psf__requests-6028     # any real Verified instanc
 ```
 No `datasets` install needed — it falls back to the cached HF parquet via `pyarrow`.
 
-## Two phases: generate locally, grade on Modal
-The agent writes the fix on your machine (`bench.sh`), but grading runs in the cloud, inside each
+## Two phases: generate in-container, grade on Modal
+The agent writes the fix inside the benchmark container, but grading runs in the cloud, inside each
 instance's **official SWE-bench Docker image** (`swebench/sweb.eval.x86_64.<id>`, pulled as a Modal
 Sandbox — no docker-in-docker). That image has the exact old Python + dependencies the project needs,
-so **any Verified instance works** — django, sympy, pytest, sphinx, the heavy scientific repos —
-nothing is limited by your host Python.
+so **any Verified instance works** — django, sympy, pytest, sphinx, the heavy scientific repos.
 
 ```bash
-./run_auto_endpoint.sh --runs 3 --swe-grade     # generate on the AEP, then grade on Modal
-./run_app.sh --tier 8xH200 --runs 3 --swe-grade # same, on a hand-rolled App
-./grade_swe.sh --results-dir results/<run>       # grade a run you already have
+docker run --rm -v "$PWD/out:/out" \
+  -e MODAL_ENDPOINT -e MODAL_KEY -e MODAL_SECRET -e ANTHROPIC_API_KEY \
+  -e MODAL_TOKEN_ID -e MODAL_TOKEN_SECRET \
+  glm-bench --runs 3 --jobs 4                     # generate, then grade on Modal (always)
+docker run --rm -v "$PWD/out:/out" -e MODAL_TOKEN_ID -e MODAL_TOKEN_SECRET \
+  glm-bench --grade-only /out/<run>               # re-grade a run you already have
 ```
 
-Under the hood (`--swe-grade` chains these):
+Under the hood, after generation the orchestrator chains these:
 1. `make_predictions.py` — harvest each attempt's `model.patch` (the agent's `git diff`) → `predictions.jsonl`.
 2. `swe_eval_modal.py` — run each patch in the instance's Modal image, run the project's tests, grade
    with SWE-bench's own parser → `resolved.json`.
