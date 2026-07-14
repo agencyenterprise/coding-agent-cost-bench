@@ -406,7 +406,9 @@ def main():
                 continue   # Opus·opencode arm dropped — opencode now drives only the GLM (modal*) arms
             pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
             if resolved_map and "swebench" in row["task"].lower():
-                iid = row["task"].split("demo-swebench-", 1)[-1]      # task dir -> SWE instance id
+                # meta.json's instance_id is authoritative — Pro task dirs (demo-swebenchpro-<repo>-<sha12>)
+                # don't share Verified's demo-swebench-<iid> naming, so guessing from the dir name misses them.
+                iid = task_meta(row["task"]).get("instance_id") or row["task"].split("demo-swebench-", 1)[-1]
                 rk = f"{iid}::{_pred_key(h, m, pv, row.get('run'))}"  # composite: same mnp recurs per instance
                 if rk in resolved_map:                 # official Docker grade wins over host verify
                     row["status"] = "pass" if resolved_map[rk].get("resolved") else "fail"
@@ -576,7 +578,7 @@ def _mname(model):
 
 
 def _tshort(t):
-    t = t.replace("demo-swebench-", "").replace("demo-", "")
+    t = t.replace("demo-swebenchpro-", "").replace("demo-swebench-", "").replace("demo-", "")
     return t.split("__")[-1] if "__" in t else t
 
 
@@ -1165,7 +1167,7 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
     # --- "How this benchmark works": plain-English method + an SVG of the generate→grade pipeline ---
     swe_tasks = {r["task"] for r in crows if "swebench" in r["task"].lower()} if crows else set()
     nswe = len(swe_tasks) or ntask
-    nrepo = len({t.split("demo-swebench-", 1)[-1].rsplit("-", 1)[0] for t in swe_tasks})
+    nrepo = len({_tshort(t).rsplit("-", 1)[0] for t in swe_tasks})
     _proj = f", across {nrepo} projects" if nrepo else ""
     _box = "fill='var(--card)' stroke='var(--border)' rx='12'"
     method_html = f"""
