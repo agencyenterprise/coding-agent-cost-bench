@@ -2,6 +2,8 @@
 # Per-task deps (pytest, dbt, ...) are installed by the agent inside each cloned repo.
 
 modal        # aggregate.py — real GLM $ via modal.billing  (then: modal setup, to auth)
+python-dotenv  # execute_bench.py — load .env (KEY=val or export KEY=val)
 datasets     # make_swebench_task.py — pull a real SWE-bench Verified instance
 swebench     # swe_eval_modal.py / grade_swe.sh — official SWE-bench graders + log parsers
 pyarrow      # swe_eval_modal.py — read SWE-bench_Verified parquet from HF cache
+rich         # execute_bench.py — live monitor

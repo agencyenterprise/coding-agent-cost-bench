@@ -42,7 +42,7 @@ def main():
     ap.add_argument("--out", help="[<results-dir>/billing.json]")
     a = ap.parse_args()
 
-    import modal.billing as mb  # imported here so the file at least parses without modal installed
+    import modal  # imported here so the file at least parses without modal installed
 
     s, e = run_window(a.results_dir)
     start = datetime.fromtimestamp(s, tz=timezone.utc)
@@ -50,13 +50,13 @@ def main():
     q0 = start.replace(minute=0, second=0, microsecond=0)
     q1 = end.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
-    rep = mb.workspace_billing_report(start=q0, end=q1, resolution="h")
+    # Modal 1.5+: workspace_billing_report() is deprecated → Workspace.billing.report()
+    rep = modal.Workspace.from_context().billing.report(start=q0, end=q1, resolution="h")
     total, by_hour = 0.0, []
     for it in rep:
-        d = dict(it)
-        if d.get("description") != a.app:
+        if it.description != a.app:
             continue                                   # only the endpoint app; skip grading/other apps
-        h0 = d["interval_start"]
+        h0 = it.interval_start
         if h0.tzinfo is None:
             h0 = h0.replace(tzinfo=timezone.utc)
         h1 = h0 + timedelta(hours=1)
@@ -64,7 +64,7 @@ def main():
         if overlap <= 0:
             continue
         frac = overlap / 3600.0
-        hour_cost = float(d.get("cost") or 0)
+        hour_cost = float(it.cost or 0)
         billed = hour_cost * frac                      # prorate the edge hours by overlap
         total += billed
         by_hour.append({"hour": h0.isoformat(), "hour_cost": round(hour_cost, 4),
