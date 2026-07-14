@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """In-container benchmark orchestrator: generate -> grade -> report.html, one process.
 
-This is the Docker entrypoint. It owns the job pool (real subprocesses in their own process groups,
-so timeouts/kills take the whole tree and every exit signal is visible), a live monitor, then always
-grades the SWE tasks on Modal and writes report.html. The GLM GPU stays on Modal; this is CPU-only.
+This is the Docker entrypoint. Each job runs its agent INSIDE the task's prebuilt image as a sibling
+container on the host daemon (Q1/Q2, via the mounted docker.sock — NOT docker-in-docker); the node+CLI
+bundle is mounted read-only (Q6) and the agent edits the repo at /app. Containers are named/labelled
+`bench-<runid>-*` so timeout (docker kill) and a finally + startup/shutdown label sweep leave no orphans
+(Q10). A live monitor runs alongside; grading on Modal + report.html always follow. The GLM GPU stays
+on Modal; this orchestrator is CPU-only.
 
   docker run --rm -e MODAL_ENDPOINT=... -e MODAL_KEY=... -e MODAL_SECRET=... \
       -e ANTHROPIC_API_KEY=... -e MODAL_TOKEN_ID=... -e MODAL_TOKEN_SECRET=... \
-      -v "$PWD/out:/out" glm-bench --runs 1 --jobs 4
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      -v "$PWD/results:/out" glm-bench --runs 1 --jobs 4
 
 Creds come from the process environment and, if missing, from a local `.env` (via python-dotenv).
 Supports plain `KEY=val` and shell `export KEY="val"`; real env / `-e` always wins. Flags: --runs,
@@ -18,11 +22,8 @@ import csv
 import glob
 import os
 import re
-import shutil
-import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tomllib
@@ -103,80 +104,63 @@ def short_task(name):
     return t.split("__")[-1]
 
 
-# ---------------------------------------------------------------- per-job work (ported from bench.sh)
-def prepare_work(task_abs, work, cache_dir):
-    """Populate `work` from the task's source. Returns the external src path (or '')."""
-    repo_dir = os.path.join(task_abs, "repo")
-    repo_git = os.path.join(task_abs, "repo.git")
-    if os.path.isdir(repo_dir):
-        shutil.copytree(repo_dir, work, dirs_exist_ok=True)
-        return ""
-    if os.path.exists(repo_git):
-        url, _, ref = open(repo_git).read().strip().partition(" ")
-        ref = ref.strip()
-        key = sanitize(f"{url}__{ref or 'HEAD'}")
-        cache = os.path.join(cache_dir, key)
-        lock = cache + ".lock"
-        while True:
-            try:
-                os.mkdir(lock)
-                break
-            except FileExistsError:
-                time.sleep(0.2)
-        try:
-            if not os.path.isdir(os.path.join(cache, ".git")):
-                shutil.rmtree(cache, ignore_errors=True)
-                ok = False
-                for _ in range(3):
-                    if subprocess.run(["git", "clone", "--quiet", url, cache]).returncode == 0:
-                        ok = True
-                        break
-                    time.sleep(3)
-                if not ok:
-                    raise RuntimeError(f"git clone failed after 3 tries: {url} -> {cache}")
-        finally:
-            os.rmdir(lock)
-        # --no-hardlinks: Docker Desktop bind-mounts (macOS host -> Linux VM) can't hardlink
-        # into container /tmp; plain --local then dies with "Invalid cross-device link" (128).
-        subprocess.run(["git", "-c", "advice.detachedHead=false", "clone",
-                        "--local", "--no-hardlinks", "--quiet", cache, work], check=True)
-        if ref:
-            subprocess.run(["git", "-C", work, "-c", "advice.detachedHead=false", "checkout", "--quiet", ref],
-                           check=True)
-        return ""
-    return ""
+# ---------------------------------------------------------------- docker sibling plumbing (Q1/Q2/Q6/Q10)
+DEVNULL = subprocess.DEVNULL
 
 
-def snapshot_usage(state_dir, outfile):
-    """opencode: copy this run's isolated DB into a temp HOME so ccusage reads only this job."""
-    db = os.path.join(state_dir, "opencode", "opencode.db")
-    if not os.path.exists(db):
-        open(outfile, "w").write('{"sessions":[]}')
-        return
-    home = tempfile.mkdtemp()
-    dst = os.path.join(home, ".local/share/opencode")
-    os.makedirs(dst, exist_ok=True)
-    for ext in ("", "-wal", "-shm"):
-        try:
-            shutil.copy(db + ext, dst)
-        except OSError:
-            pass
-    env = {**os.environ, "HOME": home}
-    with open(outfile, "w") as f:
-        subprocess.run(["npx", "-y", "ccusage", "opencode", "session", "--json"],
-                       stdout=f, stderr=subprocess.DEVNULL, env=env)
-    try:
-        import json
-        json.load(open(outfile))
-    except Exception:
-        open(outfile, "w").write('{"sessions":[]}')
-    shutil.rmtree(home, ignore_errors=True)
+def pull_image(image, logpath):
+    """Anonymous ECR pull (Q1/Q13). Repo is already at /app in the image, base_commit checked out.
+    Retries a few times — ECR/network flakiness shouldn't sink a job. Output tees to pull.log."""
+    with open(logpath, "w") as lf:
+        for i in range(3):
+            if subprocess.run(["docker", "pull", image], stdout=lf, stderr=subprocess.STDOUT).returncode == 0:
+                return
+            lf.write(f"\n[pull retry {i + 1}]\n")
+            lf.flush()
+            time.sleep(3)
+    raise RuntimeError(f"docker pull failed after 3 tries: {image}")
+
+
+def self_image():
+    """Image id of the orchestrator's own container — so we can spawn a sibling from it to seed the
+    bundle volume. HOSTNAME is the container's short id under a normal `docker run` (gosu preserves it)."""
+    cid = os.environ.get("HOSTNAME", "")
+    img = subprocess.run(["docker", "inspect", "--format", "{{.Image}}", cid],
+                         capture_output=True, text=True).stdout.strip()
+    if not img:
+        sys.exit(f"cannot determine orchestrator image id (HOSTNAME={cid!r}); is /var/run/docker.sock mounted?")
+    return img
+
+
+def setup_bundle_volume(runid):
+    """Q6: seed a named volume ONCE with the baked node+CLI bundle (+ opencode.jsonc) from /opt/agent,
+    then mount it read-only into every task container. A named volume is the only bundle path a SIBLING
+    container can see (the orchestrator's own FS isn't on the host daemon). Returns the volume name."""
+    vol = f"bench-{runid}-agent"
+    subprocess.run(["docker", "volume", "create", vol], stdout=DEVNULL, check=True)
+    img = self_image()
+    log(f">>> seeding agent bundle volume {vol} (node+CLIs, ~527M) from {img[:19]}")
+    rc = subprocess.run(["docker", "run", "--rm", "--entrypoint", "sh",
+                         "-v", f"{vol}:/dst", img, "-c",
+                         "cp -a /opt/agent/. /dst/ && cp /app/opencode.jsonc /dst/opencode.jsonc"]).returncode
+    if rc != 0:
+        sys.exit("failed to seed bundle volume")
+    return vol
+
+
+def sweep(runid):
+    """Deterministic cleanup (Q10): remove every container this run owns by label. Run at startup and
+    shutdown so no orphan survives a normal run, a timeout, or a Ctrl-C."""
+    ids = subprocess.run(["docker", "ps", "-aq", "--filter", f"label=bench={runid}"],
+                         capture_output=True, text=True).stdout.split()
+    if ids:
+        subprocess.run(["docker", "rm", "-f", *ids], stdout=DEVNULL, stderr=DEVNULL)
 
 
 def run_one_job(job, cfg, manifest):
     """Generate one (task, harness, model, run). Returns a result dict; updates JOBS for the monitor."""
     jid = job["id"]
-    task, task_abs = job["task"], job["task_abs"]
+    task, task_abs, meta = job["task"], job["task_abs"], job["meta"]
     harness, model, run, pf = job["harness"], job["model"], job["run"], job["prompt_file"]
     pv = PROMPT_LABEL
     safe = sanitize(f"{harness}_{model}")
@@ -185,34 +169,34 @@ def run_one_job(job, cfg, manifest):
     logpath = os.path.join(outdir, "output.log")
     prompt = open(os.path.join(task_abs, pf)).read()
 
-    work = tempfile.mkdtemp()
-    state_dir = tempfile.mkdtemp()
-    env = {**os.environ, "XDG_DATA_HOME": state_dir, "XDG_STATE_HOME": state_dir,
-           "XDG_CONFIG_HOME": state_dir, "OPENCODE_CONFIG": os.path.join(HERE, "opencode.jsonc"),
-           "NO_COLOR": "1"}
-    prepare_work(task_abs, work, cfg["cache_dir"])
+    # Q1: the task's prebuilt ECR image already has the repo at /app with base_commit checked out.
+    image = meta["docker_image"]
+    cname = f"bench-{cfg['runid']}-{job['idx']}"
+    cpus = str(meta.get("cpus") or 2)
+    mem = f"{meta.get('memory_mb') or 8192}m"
+    # Q9: per-job ceiling = task.toml [agent].timeout_sec (5400); --timeout overrides for smoke tests.
+    timeout = cfg["timeout"] if cfg["timeout"] is not None else (meta.get("timeout_sec") or 5400)
 
-    if os.path.exists(os.path.join(task_abs, "setup.sh")):
-        with open(os.path.join(outdir, "setup.log"), "w") as sl:
-            subprocess.run(["bash", os.path.join(task_abs, "setup.sh")], cwd=work,
-                           env={**env, "TASK_REPO_SRC": ""}, stdout=sl, stderr=subprocess.STDOUT)
-
-    if subprocess.run(["git", "-C", work, "rev-parse", "--is-inside-work-tree"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        ga = ["git", "-C", work, "-c", "user.email=bench@local", "-c", "user.name=bench"]
-        subprocess.run(ga + ["add", "-A"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.run(ga + ["commit", "-qm", "post-setup baseline"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    agent_path = env["PATH"]
-    venv_bin = os.path.join(work, ".venv/bin")
-    if os.path.exists(os.path.join(venv_bin, "python")):
-        agent_path = venv_bin + ":" + agent_path
-
+    # Q6: invoke the agent as the ABSOLUTE native binary from the read-only bundle mount. These are
+    # bun-compiled ELFs, not node scripts — do NOT wrap in node, and do NOT touch the container PATH.
     if harness == "claude":
-        cmd = ["claude", "-p", prompt, "--model", model.split("/")[-1],
-               "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
+        agent = ["/opt/agent/bin/claude", "-p", prompt, "--model", model.split("/")[-1],
+                 "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
     else:
-        cmd = ["opencode", "run", prompt, "-m", model, "--format", "json", "--auto"]
+        agent = ["/opt/agent/bin/opencode", "run", prompt, "-m", model, "--format", "json", "--auto"]
+
+    # Default-GLM + claude reach Modal/Anthropic over the container's normal egress (Q5); no proxy here.
+    denv = []
+    for k in ("MODAL_ENDPOINT", "MODAL_KEY", "MODAL_SECRET", "ANTHROPIC_API_KEY"):
+        if os.environ.get(k):
+            denv += ["-e", f"{k}={os.environ[k]}"]
+    denv += ["-e", "OPENCODE_CONFIG=/opt/agent/opencode.jsonc", "-e", "NO_COLOR=1",
+             "-e", "HOME=/root", "-e", "IS_SANDBOX=1"]  # IS_SANDBOX lets claude skip-perms as root
+
+    # Q10: deterministic name + label so cleanup is a label sweep; --cpus/--memory from task.toml.
+    cmd = ["docker", "run", "--name", cname, "--label", f"bench={cfg['runid']}",
+           "--cpus", cpus, "--memory", mem,
+           "-v", f"{cfg['bundle_vol']}:/opt/agent:ro", "-w", "/app", *denv, image, *agent]
 
     start = time.time()
     killed_signal = None
@@ -220,57 +204,46 @@ def run_one_job(job, cfg, manifest):
         JOBS[jid] = {"setup": setup_label(harness, model), "task": short_task(task),
                      "pid": None, "start": start, "outdir": outdir, "status": "running",
                      "harness": harness, "retries": 0}
-    attempt = 1
-    while True:
-        with open(logpath, "w") as lf:
-            proc = subprocess.Popen(cmd, cwd=work, env={**env, "PATH": agent_path},
-                                    stdout=lf, stderr=subprocess.STDOUT, start_new_session=True)
-        with JOBS_LOCK:
-            JOBS[jid]["pid"] = proc.pid
-        try:
-            proc.wait(timeout=cfg["timeout"])
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait()
-        rc = proc.returncode
-        if rc is not None and rc < 0:
-            killed_signal = -rc          # killed by a signal (e.g. 9 = SIGKILL/OOM) — now visible
-        try:
-            data = open(logpath, encoding="utf-8", errors="replace").read()
-            open(logpath, "w", encoding="utf-8").write(ANSI.sub("", data))
-        except OSError:
-            data = ""
-        if SERVER_ERR.search(data) and attempt < cfg["retries"] + 1:
-            attempt += 1
+    try:
+        pull_image(image, os.path.join(outdir, "pull.log"))
+        attempt = 1
+        while True:
+            subprocess.run(["docker", "rm", "-f", cname], stdout=DEVNULL, stderr=DEVNULL)  # reuse name on retry
+            with open(logpath, "w") as lf:
+                proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT)
             with JOBS_LOCK:
-                JOBS[jid]["retries"] = attempt - 1
-            time.sleep(cfg["run_delay"])
-            continue
-        break
+                JOBS[jid]["pid"] = proc.pid
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                subprocess.run(["docker", "kill", cname], stdout=DEVNULL, stderr=DEVNULL)
+                proc.wait()
+                killed_signal = 9        # SIGKILL via docker kill — recorded like the old killpg path
+            try:
+                data = open(logpath, encoding="utf-8", errors="replace").read()
+                open(logpath, "w", encoding="utf-8").write(ANSI.sub("", data))
+            except OSError:
+                data = ""
+            if killed_signal is None and SERVER_ERR.search(data) and attempt < cfg["retries"] + 1:
+                attempt += 1
+                with JOBS_LOCK:
+                    JOBS[jid]["retries"] = attempt - 1
+                time.sleep(cfg["run_delay"])
+                continue
+            break
+    finally:
+        subprocess.run(["docker", "rm", "-f", cname], stdout=DEVNULL, stderr=DEVNULL)  # Q10: always tear down
     end = time.time()
 
+    # Cost capture (opencode usage.json) + patch harvest land in T1b; write the empty stub the report
+    # pipeline expects so nothing downstream trips over a missing file.
     if harness != "claude":
-        snapshot_usage(state_dir, os.path.join(outdir, "usage.json"))
-
-    # harvest the agent's change (git repos: just the diff; else the whole tree)
-    if subprocess.run(["git", "-C", work, "rev-parse", "--is-inside-work-tree"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
-        with open(os.path.join(outdir, "model.patch"), "w") as pf_out:
-            subprocess.run(["git", "-C", work, "-c", "core.fileMode=false", "diff", "HEAD"],
-                           stdout=pf_out, stderr=subprocess.DEVNULL)
-    else:
-        fr = os.path.join(outdir, "final_repo")
-        shutil.copytree(work, fr, dirs_exist_ok=True)
+        open(os.path.join(outdir, "usage.json"), "w").write('{"sessions":[]}')
 
     with MANIFEST_LOCK:
         with open(manifest, "a", newline="") as f:
             csv.writer(f).writerow([task, harness, model, pv, run, outdir,
                                     f"{start:.6f}", f"{end:.6f}", f"{end - start:.2f}", "n/a"])
-    shutil.rmtree(work, ignore_errors=True)
-    shutil.rmtree(state_dir, ignore_errors=True)
 
     status = "done" if killed_signal is None else f"KILLED sig{killed_signal}"
     with JOBS_LOCK:
@@ -542,7 +515,7 @@ def build_queue(cfg):
         for task, task_abs in sorted(tasks.items()):
             meta = load_task_meta(task_abs)
             for run in range(1, cfg["runs"] + 1):
-                q.append({"id": f"{task}|{harness}|{model}|{run}", "task": task,
+                q.append({"id": f"{task}|{harness}|{model}|{run}", "idx": len(q), "task": task,
                           "task_abs": task_abs, "harness": harness, "model": model,
                           "prompt_file": PROMPT_FILE, "run": run, "meta": meta})
     return q
@@ -584,12 +557,11 @@ def main():
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS))
     ap.add_argument("--list", action="store_true",
                     help="discover tasks and exit; with --task also print its instruction.md + docker_image")
-    ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--timeout", type=int, default=None,
+                    help="per-job wall-clock ceiling in seconds; default = task.toml [agent].timeout_sec (5400)")
     ap.add_argument("--retries", type=int, default=2)
     ap.add_argument("--rate", default="50.7")
     ap.add_argument("--results-dir", default="")
-    ap.add_argument("--cache-dir", default=os.environ.get("CACHE_DIR", os.path.join(HERE, ".cache/repos")),
-                    help="where cloned task repos are cached (mount a host dir to reuse across runs)")
     ap.add_argument("--grade-only", default="", help="re-grade an existing results dir and exit")
     a = ap.parse_args()
 
@@ -640,10 +612,11 @@ def main():
     rdir = a.results_dir or os.path.join(out, "aep-" + time.strftime("%Y-%m-%dT%H%M%S"))
     os.makedirs(rdir, exist_ok=True)
     os.environ["OUT_DIR_RUN"] = rdir
-    cfg = {"results_dir": rdir, "cache_dir": a.cache_dir,
+    runid = sanitize(os.path.basename(os.path.normpath(rdir)))   # docker --name/--label safe
+    disp_timeout = a.timeout or 5400                              # monitor's ⚠ threshold only
+    cfg = {"results_dir": rdir, "runid": runid, "bundle_vol": None,
            "timeout": a.timeout, "retries": a.retries, "run_delay": 2, "runs": a.runs,
            "tasks_dir": a.tasks, "only_task": a.task, "setups": setups}
-    os.makedirs(cfg["cache_dir"], exist_ok=True)
 
     manifest = os.path.join(rdir, "manifest.csv")
     with open(manifest, "w", newline="") as f:
@@ -661,6 +634,9 @@ def main():
             log(">>> GLM endpoint not reachable — provisioning (create-if-missing, wait until live)")
             ensure_endpoint()
 
+    sweep(runid)                                    # Q10 startup sweep — clear any prior run's leftovers
+    cfg["bundle_vol"] = setup_bundle_volume(runid)  # Q6 read-only node+CLI bundle, seeded once
+
     proxies = start_proxies([m for _, m in setups])
     try:
         if glm and not warm_endpoint(glm.split("/", 1)[1]):
@@ -672,7 +648,7 @@ def main():
         from concurrent.futures import ThreadPoolExecutor
         stop = threading.Event()
         mon = threading.Thread(target=monitor_loop,
-                               args=(stop, len(queue), a.timeout, int(os.environ.get("STALL_SECS", "120")), time.time()))
+                               args=(stop, len(queue), disp_timeout, int(os.environ.get("STALL_SECS", "120")), time.time()))
         mon.start()
         killed = []
         with ThreadPoolExecutor(max_workers=a.jobs) as ex:
@@ -684,10 +660,12 @@ def main():
         stop.set()
         mon.join()
         if killed:
-            log(f"!! {len(killed)} job(s) killed by a signal (likely OOM — lower --jobs): {killed[:5]}")
+            log(f"!! {len(killed)} job(s) hit the timeout / were killed: {killed[:5]}")
     finally:
         for p in proxies:
             p.terminate()
+        sweep(runid)        # Q10 shutdown sweep — no orphan survives a normal run, timeout, or Ctrl-C
+        subprocess.run(["docker", "volume", "rm", "-f", cfg["bundle_vol"]], stdout=DEVNULL, stderr=DEVNULL)
 
     grade(rdir, a.rate)   # always grade on Modal + bill + aggregate -> report.html
     log(f">>> done -> {host_display_path(rdir)}/report.html")
