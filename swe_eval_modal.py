@@ -134,8 +134,15 @@ def main():
     for iid in by_inst:
         row = inst_rows[iid]
         ts = make_test_spec(row)
-        spec[iid] = (ts, modal.Image.from_registry(dockerhub(ts.instance_image_key)),
-                     as_list(row["FAIL_TO_PASS"]), as_list(row["PASS_TO_PASS"]), row["repo"])
+        # some base images need help booting as a Modal Sandbox (see swe_pro_eval_modal.py, hit
+        # on NodeBB's Debian/bash image): PEP 668's EXTERNALLY-MANAGED marker blocks Modal's own
+        # bootstrap pip install, and a custom ENTRYPOINT crashes Modal's process launcher on
+        # start. Both no-ops where absent.
+        image = modal.Image.from_registry(
+            dockerhub(ts.instance_image_key),
+            setup_dockerfile_commands=["RUN rm -f /usr/lib/python3*/EXTERNALLY-MANAGED",
+                                        "ENTRYPOINT []"])
+        spec[iid] = (ts, image, as_list(row["FAIL_TO_PASS"]), as_list(row["PASS_TO_PASS"]), row["repo"])
 
     # flatten to independent jobs, then grade them concurrently (each is its own Modal Sandbox)
     jobs = []

@@ -181,7 +181,16 @@ def main():
             jobs.append((iid, p))
 
     app = modal.App.lookup(a.app, create_if_missing=True)
-    images = {iid: modal.Image.from_registry(tasks[iid]["image"]) for iid in by_inst}
+    # Some sweap-images need help booting as a Modal Sandbox:
+    #  - Debian bases (e.g. NodeBB's) ship PEP 668's EXTERNALLY-MANAGED marker, which blocks
+    #    Modal's own bootstrap `pip install` of its sandbox client before anything of ours runs.
+    #  - Images with a custom ENTRYPOINT (e.g. NodeBB's ENTRYPOINT ["/bin/bash"]) crash Modal's
+    #    process launcher on start (container exits ~immediately, exit 126) — clear it.
+    images = {iid: modal.Image.from_registry(
+                  tasks[iid]["image"],
+                  setup_dockerfile_commands=["RUN rm -f /usr/lib/python3*/EXTERNALLY-MANAGED",
+                                              "ENTRYPOINT []"])
+              for iid in by_inst}
 
     results = json.load(open(out)) if os.path.exists(out) else {}
     done, lock = [0], threading.Lock()
