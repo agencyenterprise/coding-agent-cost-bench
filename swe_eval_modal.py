@@ -121,6 +121,12 @@ def main():
         by_inst[p["instance_id"]].append(p)
 
     inst_rows = load_instances()
+    unknown = [iid for iid in by_inst if iid not in inst_rows]
+    if unknown:   # e.g. SWE-bench PRO instances — swe_pro_eval_modal.py grades those
+        print(f"({sum(len(by_inst[i]) for i in unknown)} prediction(s) skipped — "
+              f"{len(unknown)} instance(s) not in SWE-bench_Verified, e.g. {unknown[0]})")
+        for iid in unknown:
+            del by_inst[iid]
     app = modal.App.lookup(a.app, create_if_missing=True)
 
     # per-instance spec + image (built once, reused across that instance's predictions/threads)
@@ -137,7 +143,9 @@ def main():
         for p in (plist[:a.limit] if a.limit else plist):
             jobs.append((iid, p))
 
-    results, done, lock = {}, [0], threading.Lock()
+    # merge with an existing resolved.json (the Pro grader writes to the same file)
+    results = json.load(open(out)) if os.path.exists(out) else {}
+    done, lock = [0], threading.Lock()
 
     def work(job):
         iid, p = job

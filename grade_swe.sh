@@ -44,7 +44,13 @@ echo ">>> [1/4] harvest agent patches from $RDIR"
 "$PY" make_predictions.py --results-dir "$RDIR"
 
 echo ">>> [2/4] grade on Modal (x86 per-instance images)"
+# Verified first (writes resolved.json), then SWE-bench Pro (merges into the same file); each
+# grader skips the other's instances, so both run over the same predictions file.
 "$PY" swe_eval_modal.py --predictions "$RDIR/predictions.jsonl" ${PASS[@]+"${PASS[@]}"}
+if compgen -G "tasks/demo-swebenchpro-*" >/dev/null; then
+  echo ">>> [2b/4] grade SWE-bench Pro tasks on Modal (jefzda/sweap-images)"
+  "$PY" swe_pro_eval_modal.py --predictions "$RDIR/predictions.jsonl" ${PASS[@]+"${PASS[@]}"}
+fi
 
 echo ">>> [3/4] pull the actual endpoint bill for the run window ($BILLING_APP)"
 "$PY" billing.py --results-dir "$RDIR" --app "$BILLING_APP" \

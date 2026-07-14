@@ -1,13 +1,24 @@
 # Adding SWE-bench Pro tasks (research + integration plan)
 
-> **Status:** `make_swebenchpro_task.py` exists and 10 mixed-language tasks
-> (`tasks/demo-swebenchpro-*`: 4 python, 3 go, 1 js, 2 ts) are materialized — generation via
-> `bench.sh` works today. **Grading is not wired yet** (step 2 below is the remaining work);
-> don't trust host-side results for these until the Pro Modal grader lands.
-> Note: the full dataset ships inside the eval repo as `helper_code/sweap_eval_full_v2.jsonl`
-> (same rows as HF plus image + run/parse-script refs), so no HF download is needed:
+> **Status: fully wired.** `make_swebenchpro_task.py` + 10 mixed-language tasks
+> (`tasks/demo-swebenchpro-*`: 4 python, 3 go, 1 js, 2 ts) + `swe_pro_eval_modal.py` (grading).
+> `./grade_swe.sh --results-dir <dir>` now grades BOTH benchmarks: the Verified grader skips Pro
+> instances, the Pro grader skips Verified ones, both merge into the same `resolved.json`.
+> Each task dir vendors its official grading assets under `pro_eval/` (run_script.sh, parser.py,
+> env.sh = the image dockerfiles' ENV lines, p2p.json), so grading needs no dataset access.
+>
+> **Validate before trusting** (needs Modal auth; ~10 sandbox-minutes):
+> `python3 swe_pro_eval_modal.py --gold` — grades the dataset's gold patches for all Pro tasks;
+> every line must say RESOLVED. Locally verified so far: gold patch + test-file checkout apply
+> cleanly at base_commit (navidrome spot check).
+>
+> Notes: the full dataset ships inside the eval repo as `helper_code/sweap_eval_full_v2.jsonl`
+> (same rows as HF plus image/run-script refs) — no HF download needed:
 > `git clone --depth 1 https://github.com/scaleapi/SWE-bench_Pro-os .cache/SWE-bench_Pro-os`.
 > Quirk: many rows quote-wrap text fields with literal `\n` escapes — the generator undoes this.
+> Resolved criterion (Scale's): (FAIL_TO_PASS ∪ PASS_TO_PASS) ⊆ passed; tests are staged not by
+> applying test_patch but by checking the dataset's test files out of the fix commit (the last
+> line of `before_repo_set_cmd`), exactly like the official harness.
 
 SWE-bench Pro (Scale AI, 2025) is the "harder SWE-bench": 731 public instances from 11 large
 OSS repos (NodeBB, qutebrowser, ansible, teleport, navidrome, openlibrary, tutao, ...), 4

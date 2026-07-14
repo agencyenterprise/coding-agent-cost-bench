@@ -24,7 +24,14 @@ import subprocess
 
 
 def instance_id(task):
-    """demo-swebench-psf__requests-6028 -> psf__requests-6028."""
+    """The task's meta.json is authoritative (Pro dir names are shortened, so name-derivation is
+    wrong for them); fall back to the Verified naming convention:
+    demo-swebench-psf__requests-6028 -> psf__requests-6028."""
+    mp = os.path.join("tasks", task, "meta.json")
+    if os.path.exists(mp):
+        iid = json.load(open(mp)).get("instance_id")
+        if iid:
+            return iid
     return task.split("demo-swebench-", 1)[-1]
 
 

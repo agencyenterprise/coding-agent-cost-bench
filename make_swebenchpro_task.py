@@ -25,10 +25,8 @@ import pathlib
 import re
 import sys
 
-JSONL_CANDIDATES = [
-    ".cache/SWE-bench_Pro-os/helper_code/sweap_eval_full_v2.jsonl",
-    os.path.expanduser("~/.cache/SWE-bench_Pro-os/helper_code/sweap_eval_full_v2.jsonl"),
-]
+SCRIPTS_ROOTS = [".cache/SWE-bench_Pro-os", os.path.expanduser("~/.cache/SWE-bench_Pro-os")]
+JSONL_CANDIDATES = [f"{r}/helper_code/sweap_eval_full_v2.jsonl" for r in SCRIPTS_ROOTS]
 
 REPO_LANG = {  # HF `repo_language` column, keyed by repo (each Pro repo is single-language)
     "qutebrowser/qutebrowser": "python", "ansible/ansible": "python",
@@ -83,9 +81,37 @@ def _load_rows():
 
 def _dockerhub_tag(row):
     """ECR image_name -> public DockerHub tag under jefzda/sweap-images.
-    .../sweap-images/nodebb.nodebb:NodeBB__NodeBB-<sha>[-v<hash>] -> nodebb.nodebb-NodeBB__NodeBB-<sha>[-v<hash>]"""
+    .../sweap-images/nodebb.nodebb:NodeBB__NodeBB-<sha>[-v<hash>] -> nodebb.nodebb-NodeBB__NodeBB-<sha>[-v<hash>]
+    (matches Scale's helper_code/image_uri.py, incl. its 128-char DockerHub tag cap)"""
     path, tag = row["image_name"].rsplit(":", 1)
-    return f"{path.rsplit('/', 1)[-1]}-{tag}"
+    return f"{path.rsplit('/', 1)[-1]}-{tag}"[:128]
+
+
+def _vendor_eval_assets(d, row):
+    """Copy the instance's OFFICIAL grading assets (from the scaleapi/SWE-bench_Pro-os clone) into
+    tasks/<dir>/pro_eval/, so grading (swe_pro_eval_modal.py) is self-contained: run_script.sh +
+    parser.py verbatim, env.sh = the ENV lines of both dockerfiles as exports (what Scale's
+    entryscript does), p2p.json = PASS_TO_PASS (resolved iff f2p AND p2p all pass)."""
+    iid = row["instance_id"]
+    root = next((r for r in SCRIPTS_ROOTS if os.path.isdir(f"{r}/run_scripts/{iid}")), None)
+    if root is None:
+        print(f"WARNING: no run_scripts/{iid} in {SCRIPTS_ROOTS} — task not gradable until vendored")
+        return
+    ev = d / "pro_eval"
+    ev.mkdir(exist_ok=True)
+    for name in ("run_script.sh", "parser.py"):
+        (ev / name).write_text(open(f"{root}/run_scripts/{iid}/{name}").read())
+    envs = []
+    for kind in ("base_dockerfile", "instance_dockerfile"):
+        p = f"{root}/dockerfiles/{kind}/{iid}/Dockerfile"
+        if os.path.exists(p):
+            envs += [ln.strip().replace("ENV", "export", 1)
+                     for ln in open(p) if ln.strip().startswith("ENV")]
+    (ev / "env.sh").write_text("\n".join(envs) + "\n")
+    p2p = row["PASS_TO_PASS"]
+    if isinstance(p2p, str):
+        p2p = json.loads(p2p)
+    (ev / "p2p.json").write_text(json.dumps(p2p, indent=0) + "\n")
 
 
 def _suite_cmd(row, lang, f2p):
@@ -137,6 +163,7 @@ def main():
         "before_repo_set_cmd": _unjson(row.get("before_repo_set_cmd", "")),
         "selected_test_files_to_run": _unjson(row.get("selected_test_files_to_run", [])),
     }, indent=2) + "\n")
+    _vendor_eval_assets(d, row)
 
     if lang == "python":
         bad = [x for x in f2p if "::" not in x]

