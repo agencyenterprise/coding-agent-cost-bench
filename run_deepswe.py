@@ -270,7 +270,11 @@ def main():
     run_dir = os.path.join(args.out, run_id)
     work_dir = args.work_dir or os.path.join(run_dir, "pier-jobs")
     os.makedirs(run_dir, exist_ok=True)
-    jobs = [(s, t, r) for s in setups for t in tasks for r in range(1, args.runs + 1)]
+    # Interleave setups (task-outer, setup-inner) so consecutive jobs cycle through the setups
+    # rather than running all of one setup first. This (a) mixes endpoint load — you get ~a few of
+    # each tier in flight instead of N concurrent max-reasoning streams saturating the GPU — and
+    # (b) surfaces a full cross-setup comparison on the first tasks early, instead of hours in.
+    jobs = [(s, t, r) for t in tasks for r in range(1, args.runs + 1) for s in setups]
     log(f"DeepSWE bench: {len(setups)} setups × {len(tasks)} tasks × {args.runs} runs "
         f"= {len(jobs)} pier runs, {args.jobs} parallel → {run_dir}")
 
