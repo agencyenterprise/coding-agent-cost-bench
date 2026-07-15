@@ -1,118 +1,131 @@
 # Coding Agent Cost Benchmark
 
-Compare coding agents on real GitHub issues using the metrics that matter: **success rate** and **cost per solved task**.
+Compare coding agents on the metric that matters for self-hosting: **cost per solved task**.
 
-The benchmark runs the same SWE-bench Verified tasks through each agent, grades every solution with the project's own test suite, and generates a report comparing quality and cost.
+The benchmark runs the same contamination-free [DeepSWE](https://github.com/datacurve-ai/deep-swe)
+tasks through each agent setup, grades every attempt with the task's own tests, and generates a
+report comparing success rate and cost. It's built to weigh **self-hosted GLM-5.2 (on Modal, 8×B200)**
+against **Claude Opus** across GLM's reasoning tiers.
 
-Currently supported:
+## Setups
 
-- GLM 5.2 (self hosted on Modal)
-- Claude Opus
+| Setup | Harness | Model / tier |
+|-------|---------|--------------|
+| `glm-default` | opencode | GLM-5.2 FP8 — **max** reasoning (the default) |
+| `glm-high`    | opencode | GLM-5.2 FP8 — **high** reasoning (`reasoning_effort:high`) |
+| `glm-nothink` | opencode | GLM-5.2 FP8 — **no** reasoning (`enable_thinking:false`) |
+| `opus`        | claude-code | Claude Opus 4.8 |
 
-## Quick Start
+The three GLM tiers are the only ones GLM-5.2's chat template distinguishes: `reasoning_effort` is
+either `high` or `max` (max = the default when unset), plus `enable_thinking:false` for no reasoning.
+opencode can't set `chat_template_kwargs` itself, so a small reasoning-proxy sidecar injects the tier
+and forwards to the endpoint (see [Reasoning tiers](#reasoning-tiers)).
+
+## How it runs
+
+Everything is one `docker run`. [pier](https://pypi.org/project/datacurve-pier/) drives the **host**
+Docker daemon (via the mounted socket) to build and run each task's own container, inject the agent
+CLI into it, and grade it. The image ships only python + the Docker CLI + pier + the orchestrator —
+the agent CLIs (opencode / claude-code) are installed by pier inside each task container.
 
 ```bash
-cp .env.example .env
-# Fill in your credentials
+docker pull ghcr.io/agencyenterprise/coding-agent-cost-bench:latest
 
-docker build -t glm-bench .
+sudo mkdir -p /work && sudo chmod 777 /work        # host-aligned pier job tree (see note below)
 
-# Run one task with GLM
-docker run --rm -it \
-  --env-file .env \
+docker run --rm -p 80:80 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /work:/work \
   -v "$PWD/results:/out" \
-  glm-bench \
-  --models opencode:modal/zai-org/GLM-5.2-FP8 \
-  --task demo-swebench-psf__requests-6028 \
-  --runs 1
-
-# Run the full benchmark
-docker run --rm -it \
+  -e HOST_IP="$(hostname -I | awk '{print $1}')" \
   --env-file .env \
-  -v "$PWD/results:/out" \
-  glm-bench \
-  --runs 4 \
-  --jobs 20
+  ghcr.io/agencyenterprise/coding-agent-cost-bench:latest \
+  --setups glm-default,glm-high,glm-nothink,opus \
+  --tasks ytt-jsonpath-query-api \
+  --runs 4 --jobs 8
 ```
 
-Results are written to:
+Results land in `results/`; open `report.html`.
 
-```
-results/<timestamp>/
-```
+### Required `docker run` wiring
 
-Open `report.html` to view the summary.
+| Flag | Why |
+|------|-----|
+| `-v /var/run/docker.sock:/var/run/docker.sock` | pier builds & runs task containers on the host daemon |
+| `-v /work:/work` | pier's job tree at a **host-aligned** path — see below |
+| `-v "$PWD/results:/out"` | where `report.html` + CSVs are written |
+| `-p 80:80` | publishes the reasoning-proxy sidecar so pier's egress proxy can reach it (only needed for `glm-high` / `glm-nothink`) |
+| `-e HOST_IP=<box private ip>` | address the egress proxy uses to reach the sidecar (only for `glm-high` / `glm-nothink`) |
+| `--env-file .env` | credentials (below) |
 
-Add `-v "$PWD/.cache:/cache"` to reuse cloned task repos across runs (skips re-cloning each time).
+**Why the host-aligned `/work`:** pier runs *inside* this container but tells the *host* daemon to
+bind-mount its job tree into each task container. Those paths must exist at the same location inside
+and outside the container, so `/work` must map to a host `/work` (docker-out-of-docker). `/out` needs
+no alignment — only the orchestrator touches it.
 
 ## Credentials
 
-All credentials are loaded from `.env`.
-
-Required for Modal:
+All from `.env` (`--env-file`); nothing is baked into the image. Copy `.env.example` and fill in:
 
 ```
-MODAL_TOKEN_ID
-MODAL_TOKEN_SECRET
-MODAL_KEY
-MODAL_SECRET
+MODAL_ENDPOINT        # GLM auto-endpoint URL (…/v1)      — GLM setups
+MODAL_KEY             # proxy token (wk-…)                — GLM setups
+MODAL_SECRET          # proxy token (ws-…)                — GLM setups
+MODAL_TOKEN_ID        # Modal account token (ak-…)        — real billing
+MODAL_TOKEN_SECRET    # Modal account token (as-…)        — real billing
+ANTHROPIC_API_KEY     # Claude Opus                       — opus setup
 ```
 
-Required for Claude:
+The GLM endpoint must already be running. Provision it once with `./setup_auto_endpoint.sh` (needs
+the Modal CLI authenticated); it's idempotent and reuses the pre-downloaded weights volume.
 
-```
-ANTHROPIC_API_KEY
-```
+## Reasoning tiers
 
-## Common Flags
+`reasoning_proxy.py --router` runs as a sidecar on port 80 inside the container. For `glm-high` and
+`glm-nothink`, opencode's `baseURL` points at `http://$HOST_IP/<tier>/v1`; the proxy strips the
+`/<tier>` prefix, injects the matching `chat_template_kwargs` (`reasoning_effort:high` or
+`enable_thinking:false`), and forwards to `MODAL_ENDPOINT`. `glm-default` talks to the endpoint
+directly (no proxy). A single sidecar serves every tier by URL path because the task egress proxy
+only permits ports 80/443.
+
+## Common flags
 
 | Flag | Description |
 |------|-------------|
-| `--runs` | Attempts per task |
-| `--jobs` | Number of parallel workers |
-| `--task` | Run a single task |
-| `--models` | Comma separated list of models |
-| `--grade-only` | Regrade an existing run |
-
-Run `--help` to see all available options.
+| `--setups` | comma list: `glm-default,glm-high,glm-nothink,opus` |
+| `--tasks` | comma list of task names, or `all` |
+| `--runs` | attempts per (setup, task) |
+| `--jobs` | parallel pier runs |
+| `--timeout-mult` | scale pier's agent timeout (`1.0` = full; smaller = faster smoke) |
+| `--no-billing` | skip the real Modal bill pull (report uses the modeled GPU rate) |
+| `--list-tasks` | print the baked DeepSWE task names and exit |
 
 ## Output
 
-Each benchmark produces:
+Written to `results/` (i.e. the mounted `/out`):
 
-- `report.html` — success rate, cost per solved task, and cost comparison
-- `summary.csv`
-- `results_detailed.csv`
-- `billing.json`
+- `report.html` — success rate + cost per solved task per setup
+- `per_run.csv` — one row per run (task, setup, passed, cost, tokens, steps)
+- `summary.csv` — per-setup rollup
+- `billing.json` — the actual Modal endpoint bill over the run window (unless `--no-billing`)
 
-## Cost Model
+## Cost model
 
-API models are priced from their reported token usage.
+- **Claude Opus** — priced from reported token usage.
+- **GLM (self-hosted)** — generation-seconds × the endpoint's hourly rate, reconciled against the
+  **actual** Modal bill for the auto-endpoint over the run window (`billing.json`).
 
-GLM uses the actual Modal endpoint cost during the benchmark.
+The report normalizes everything to **cost per solved task**, making the API model and the
+self-hosted tiers directly comparable.
 
-The report normalizes everything into **cost per solved task**, making API and self hosted models directly comparable.
-
-## Add a Task
-
-```bash
-python make_swebench_task.py psf__requests-6028
-```
-
-This imports any SWE-bench Verified instance into `tasks/`.
-
-## Project Layout
+## Project layout
 
 ```
-Dockerfile
-execute_bench.py         Benchmark runner
-aggregate.py             Generate reports
-billing.py               Fetch Modal billing
-judge.py                 Optional LLM review
-make_predictions.py      Build predictions.jsonl
-make_swebench_task.py    Import SWE-bench tasks
-reasoning_proxy.py       GLM reasoning control
-setup_auto_endpoint.sh   Start Modal endpoint
-swe_eval_modal.py        Grade solutions on Modal
-tasks/                   Benchmark tasks
+Dockerfile              one-`docker run` image
+entrypoint.sh           starts the reasoning-proxy sidecar, then the orchestrator
+run_deepswe.py          orchestrator: fans pier over (setup × task × run), then reports
+reasoning_proxy.py      GLM reasoning-tier sidecar (router mode)
+aggregate.py            report.html + per_run.csv + summary.csv
+billing.py              real Modal endpoint bill for the run window
+setup_auto_endpoint.sh  provision the GLM Modal auto-endpoint
 ```
