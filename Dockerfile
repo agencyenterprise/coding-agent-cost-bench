@@ -32,9 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        docker-ce-cli docker-compose-plugin docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# pier (DeepSWE runner + agent injector) and modal (real endpoint billing). pier pulls its own deps
-# (rich, typer, pyyaml, httpx, tenacity, …). run_deepswe.py / aggregate.py are stdlib-only.
-RUN pip install --no-cache-dir datacurve-pier modal
+# pier (DeepSWE runner + agent injector) and modal (real endpoint billing) — from requirements.txt
+# so the deps have one source of truth. Copied first for layer caching. pier pulls its own deps
+# (rich, typer, pyyaml, httpx, tenacity, …); run_deepswe.py / aggregate.py are stdlib-only.
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 WORKDIR /app
 # Bake the contamination-free DeepSWE tasks (no git on the target box). Used only as docker build
