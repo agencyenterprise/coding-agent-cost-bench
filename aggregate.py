@@ -602,10 +602,12 @@ def main():
 
 def _mname(model):
     """Friendly model name (no harness), e.g. GLM-5.2 FP8 (no thinking) / Claude Opus 4.8.
-    Harness is shown in its own column, so it's not folded in here."""
+    Harness is shown in its own column, so it's not folded in here. GLM-5.2's chat template only
+    distinguishes reasoning_effort 'high' vs 'max' (max = the default when unset), plus
+    enable_thinking:false for no reasoning — so the 'default' arm IS the max-reasoning tier."""
     prov, last = model.split("/")[0], model.split("/")[-1]
     name = {"claude-opus-4-8": "Claude Opus 4.8"}.get(last, last.replace("-FP8", " FP8"))
-    tag = {"modal": " (default)", "modal-nothink": " (no thinking)",
+    tag = {"modal": " (max reasoning)", "modal-nothink": " (no thinking)",
            "modal-high": " (high reasoning)"}.get(prov, "")
     return name + tag
 

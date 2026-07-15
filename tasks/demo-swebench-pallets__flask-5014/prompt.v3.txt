@@ -1,6 +1,0 @@
-Require a non-empty name for Blueprints
-Things do not work correctly if a Blueprint is given an empty name (e.g. #4944).
-It would be helpful if a `ValueError` was raised when trying to do that.
-
----
-Fresh clone, no virtualenv: create `.venv` at the repo root and `.venv/bin/pip install -e . pytest`. Make the failing tests pass, then confirm with `.venv/bin/python -m pytest tests/test_blueprints.py` (exit 0) before finishing.

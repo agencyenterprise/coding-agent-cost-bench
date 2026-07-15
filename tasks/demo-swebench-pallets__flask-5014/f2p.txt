@@ -1,1 +1,0 @@
-tests/test_blueprints.py::test_empty_name_not_allowed
