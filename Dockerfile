@@ -1,53 +1,53 @@
-# glm-review benchmark — reproducible CPU orchestrator. One `docker run` does generate -> grade ->
-# report.html. The GLM GPU (Modal AEP) and SWE grading (Modal sandboxes) stay in the cloud; this
-# image never needs a GPU or docker-in-docker.
+# DeepSWE cost benchmark — one `docker run` fans pier over (setup × task × run) on contamination-free
+# DeepSWE tasks and writes report.html + per_run.csv + summary.csv to /out.
 #
-#   docker build -t glm-bench .
-#   docker run --rm -v "$PWD/results:/out" \
-#     -e MODAL_ENDPOINT -e MODAL_KEY -e MODAL_SECRET -e ANTHROPIC_API_KEY \
-#     -e MODAL_TOKEN_ID -e MODAL_TOKEN_SECRET glm-bench --runs 1 --jobs 4
+# pier drives the HOST docker (via the mounted socket) to build & run each task's own container and
+# inject the agent CLI into it — so this image ships only python + the docker CLI + pier + the
+# orchestrator, NOT node/opencode/claude-code (pier installs those inside each task image).
 #
-# Creds come ONLY from the environment at RUNTIME (never baked, never a mounted file): pass -e (as
-# above, forwarding from your shell) or --env-file with a plain KEY=value file. Grading always runs;
-# it needs the Modal CLI token (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET). See execute_bench.py.
-FROM node:22-bookworm-slim
+#   docker run --rm -p 80:80 \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     -v /work:/work \
+#     -v "$PWD/results:/out" \
+#     -e HOST_IP=$(hostname -I | awk '{print $1}') \
+#     --env-file .env \
+#     ghcr.io/agencyenterprise/coding-agent-cost-bench \
+#     --setups glm-default,glm-high,glm-nothink,opus --runs 4 --jobs 8
+#
+# Creds come ONLY from the runtime env (--env-file); nothing is baked. The DeepSWE tasks ARE baked
+# (the target box has no git). See entrypoint.sh for the required mounts (esp. the host-aligned /work).
+FROM python:3.12-slim-bookworm
 
-# python 3.11 (bookworm) is a broad-compat sweet spot for the task repos — deliberately NOT the host's
-# 3.14 that broke old libs. git for clones; coreutils gives a real `timeout`; sqlite3 for ccusage.
+# docker CLI + compose/buildx plugins (client only — pier talks to the HOST daemon via the socket).
+# Debian bookworm is in Docker's apt repo (unlike the EC2 host's newer Ubuntu, which is why we ship
+# the CLI here rather than relying on the box).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip git curl ca-certificates coreutils perl sqlite3 \
+      curl ca-certificates gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+       > /etc/apt/sources.list.d/docker.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       docker-ce-cli docker-compose-plugin docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# pinned agent CLIs (the "setups": opencode drives GLM, Claude Code drives Opus)
-RUN npm i -g opencode-ai@1.17.13 @anthropic-ai/claude-code@2.1.193
-
-# python tooling prebaked so nothing pip-installs mid-benchmark: aggregate/billing (modal) and the
-# official SWE-bench grader (swebench + pyarrow + datasets). grade_swe.sh reuses this via the symlink.
-ENV VENV=/opt/venv
-RUN python3 -m venv "$VENV" \
-    && "$VENV/bin/pip" install -q --upgrade pip \
-    && "$VENV/bin/pip" install -q modal swebench pyarrow datasets rich python-dotenv psutil
-ENV PATH="$VENV/bin:$PATH"
-
-# non-root user — `claude --dangerously-skip-permissions` refuses to run as root
-RUN useradd -m -u 1001 bench \
-    && printf '{"hasCompletedOnboarding":true}\n' > /home/bench/.claude.json
+# pier (DeepSWE runner + agent injector) and modal (real endpoint billing). pier pulls its own deps
+# (rich, typer, pyyaml, httpx, tenacity, …). run_deepswe.py / aggregate.py are stdlib-only.
+RUN pip install --no-cache-dir datacurve-pier modal
 
 WORKDIR /app
-COPY . /app
-RUN mkdir -p /app/.cache /out /cache \
-    && ln -sfn /opt/venv /app/.cache/swe-venv \
-    && chmod +x /app/*.sh \
-    && chown -R bench:bench /app /out /cache
+# Bake the contamination-free DeepSWE tasks (no git on the target box). Used only as docker build
+# context / compose config by the CLI locally, so a container path here is fine — only the pier job
+# tree under /work must be host-aligned (see entrypoint.sh).
+RUN curl -sL https://github.com/datacurve-ai/deep-swe/archive/refs/heads/main.tar.gz | tar xz
+ENV TASKS_DIR=/app/deep-swe-main/tasks
 
-USER bench
-# /out = results, /cache = cloned task repos. Mount host dirs to keep either across runs.
-ENV OPENCODE_CONFIG=/app/opencode.jsonc NO_COLOR=1 OUT_DIR=/out CACHE_DIR=/cache
-RUN npx -y ccusage --help >/dev/null 2>&1 || true   # prefetch ccusage so per-run usage.json is clean
-# Bake the SWE-bench Verified parquet into the image's HF cache (as bench, so ~ = /home/bench) — the
-# grader reads test patches + FAIL_TO_PASS from it, and the container has no host HF cache to borrow.
-RUN python3 -c "from huggingface_hub import snapshot_download; \
-    snapshot_download(repo_id='princeton-nlp/SWE-bench_Verified', repo_type='dataset')"
+COPY run_deepswe.py reasoning_proxy.py aggregate.py billing.py entrypoint.sh /app/
+RUN chmod +x /app/entrypoint.sh
 
-VOLUME ["/out", "/cache"]
-ENTRYPOINT ["/opt/venv/bin/python3", "/app/execute_bench.py"]
+# Runs as root: needs the docker socket and to bind :80 for the sidecar. The agent (incl. Claude
+# Code, which refuses root) runs inside pier's task containers, not here, so root is fine.
+ENV OUT_DIR=/out WORK_DIR=/work
+VOLUME ["/out", "/work"]
+ENTRYPOINT ["/app/entrypoint.sh"]

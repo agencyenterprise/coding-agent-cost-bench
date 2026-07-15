@@ -5,7 +5,7 @@ name: build-and-publish
 # on this branch (so you can publish before the PR merges), and manually.
 on:
   push:
-    branches: [main, docker-python-orchestrator]
+    branches: [main, docker-python-orchestrator, deepswe]
     tags: ["v*"]
   workflow_dispatch:
 
