@@ -7,17 +7,18 @@
 #   -p 80:80                                        publish the sidecar so pier's Squid (a host
 #                                                   container) can reach it at $HOST_IP:80
 #   -v /var/run/docker.sock:/var/run/docker.sock    pier drives the HOST docker daemon
-#   -v /work:/work                                  pier job tree at a HOST-ALIGNED path — the host
-#                                                   daemon bind-mounts these dirs into task
-#                                                   containers, so they must be the same path here
-#   -v "$PWD/results:/out"                          report.html + per_run.csv + summary.csv land here
+#   -v "$DIR:$DIR"  -e OUT_DIR="$DIR"               ONE host-aligned data dir: report.html, csvs, and
+#                                                   the pier job tree all land under $DIR/<timestamp>/.
+#                                                   Same-path mount is required — the host daemon
+#                                                   bind-mounts the job tree into task containers by
+#                                                   literal path (docker-out-of-docker).
 #   -e HOST_IP=<box private ip>                      address Squid uses to reach the sidecar
 #   --env-file .env                                 MODAL_ENDPOINT/KEY/SECRET (+ MODAL_TOKEN_* for
 #                                                   real billing, ANTHROPIC_API_KEY for opus)
 set -euo pipefail
 
 OUT="${OUT_DIR:-/out}"
-mkdir -p "$OUT" "${WORK_DIR:-/work}"
+mkdir -p "$OUT"     # run_deepswe.py creates the per-run subfolder + its pier-jobs tree under here
 
 if [ -n "${MODAL_ENDPOINT:-}" ]; then
   echo "starting reasoning-proxy sidecar (router) on :80 -> $MODAL_ENDPOINT"
