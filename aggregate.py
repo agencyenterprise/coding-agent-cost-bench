@@ -62,32 +62,6 @@ def model_disp(ref):
     return f"{p[0]}/{p[-1]}" if len(p) > 1 else ref
 
 
-def task_source(name, tasks_dir="tasks"):
-    """Prompt provenance: 'swe-bench' if the task carries SWE-bench dataset artifacts (a test.patch),
-    else 'invented' (our injected-bug demos + the from-scratch build task). NOTE: swe-bench prompts
-    embed the real problem statement verbatim but are still wrapped in our uniform v2 template."""
-    if os.path.exists(os.path.join(tasks_dir, name, "test.patch")):
-        return "swe-bench"
-    return "swe-bench" if "swebench" in name.lower() else "invented"
-
-
-def task_meta(name, tasks_dir="tasks"):
-    """Per-task provenance written by make_swebench_task.py (repo, version, SWE-bench difficulty tier).
-    Empty dict if absent — the report degrades gracefully."""
-    try:
-        with open(os.path.join(tasks_dir, name, "meta.json")) as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _pred_key(harness, model, prompt, run):
-    """Reconstruct make_predictions.py's model_name_or_path for one run, so a SWE task's pass/fail
-    can be looked up in resolved.json (the official Modal Docker grade)."""
-    safe = model.replace("/", "_").replace(":", "_").replace(" ", "_")
-    return f"{harness}__{safe}__{prompt}__run{run}"
-
-
 def load_usage(outdir):
     """(tokens_in, tokens_out, ccusage_cost) for a run from its usage.json.
 
@@ -381,16 +355,6 @@ def main():
         sys.exit(f"no manifest at {manifest} — run bench.sh first "
                  f"(or point --results-dir at the right folder, e.g. --results-dir results/app-8xH200)")
 
-    # Official SWE-bench grade (from grade_swe.sh / swe_eval_modal.py). If present, it overrides the
-    # host verify.sh pass/fail for SWE tasks — Docker-in-the-right-Python is the trustworthy signal.
-    resolved_map = {}
-    _rp = os.path.join(RESULTS_DIR, "resolved.json")
-    if os.path.exists(_rp):
-        try:
-            resolved_map = json.load(open(_rp))
-        except Exception:
-            resolved_map = {}
-
     # Actual endpoint bill (billing.py -> billing.json). If present, per-call dollars are attributed
     # from the REAL $/second Modal billed over the window; otherwise fall back to the modeled --rate.
     billing = {}
@@ -418,17 +382,8 @@ def main():
             if not m or not row.get("task") or not row.get("outdir"):
                 continue   # skip malformed/partial lines (e.g. a stray write that corrupted the manifest)
             row["outdir"] = resolve_outdir(row["outdir"])
-            h = row.get("harness") or harness_of(m)   # harness recorded by bench.sh (fallback for old data)
-            if h == "deepclaude":
-                continue   # deepclaude harness removed — drop any lingering rows from older runs
-            if h == "opencode" and not is_self_hosted(m):
-                continue   # Opus·opencode arm dropped — opencode now drives only the GLM (modal*) arms
-            pv = row.get("prompt") or "v1"             # prompt version (fallback for pre-sweep manifests)
-            if resolved_map and "swebench" in row["task"].lower():
-                iid = row["task"].split("demo-swebench-", 1)[-1]      # task dir -> SWE instance id
-                rk = f"{iid}::{_pred_key(h, m, pv, row.get('run'))}"  # composite: same mnp recurs per instance
-                if rk in resolved_map:                 # official Docker grade wins over host verify
-                    row["status"] = "pass" if resolved_map[rk].get("resolved") else "fail"
+            h = row.get("harness") or harness_of(m)   # harness recorded in the manifest by run_deepswe.py
+            pv = row.get("prompt") or "v1"             # single prompt per task; kept as a rollup key
             key = (h, m, pv)
             s, e = _f(row.get("start")), _f(row.get("end"))
             if s is not None and e is not None:
@@ -574,7 +529,7 @@ def main():
     peak = {}
     for (t, pv), a in comp.items():
         peak[t] = max(peak.get(t, 0.0), a["complexity"])
-    crows = [{"task": t[0], "prompt": t[1], "source": task_source(t[0]), "complexity": a["complexity"],
+    crows = [{"task": t[0], "prompt": t[1], "complexity": a["complexity"],
               "pass_rate": a["pass_rate"], "runs": a["runs"],
               "avg_steps": round(a["avg_steps"], 1), "avg_tools": round(a["avg_tools"], 1),
               "avg_out_tok": round(a["avg_out"]), "avg_dur_s": round(a["avg_dur"], 1),
@@ -906,13 +861,14 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                 continue
             seen_t.add(r["task"])
             diff_body.append(
-                f"<tr><td>{esc(_tshort(r['task']))}</td><td>{esc(r['source'])}</td>"
+                f"<tr><td>{esc(_tshort(r['task']))}</td>"
                 f"<td class='num'>{esc(r['complexity'])}</td><td class='num'>{r['pass_rate']:.0%}</td>"
                 f"<td class='num'>{usd(r.get('avg_api_cost_usd'))}</td>"
                 f"<td class='num'>{r['avg_steps']:.0f}</td></tr>")
         diff_html = ("<h2>Task Difficulty</h2><p class=note>Empirical difficulty per task from observed "
-                     "effort (steps/tools/tokens). Source: swe-bench = real dataset issue embedded verbatim.</p>"
-                     + tbl([("Task", 0), ("Source", 0), ("Diff", 1), ("Pass", 1),
+                     "effort (steps, tool calls, output tokens, time) pooled across all setups and runs, "
+                     "min-max normalized to 0-10 — relative to this task set, not an absolute rating.</p>"
+                     + tbl([("Task", 0), ("Diff", 1), ("Pass", 1),
                             ("API $", 1), ("Avg steps", 1)], diff_body))
 
     # ---- #1 cost spread + #2 throughput (per arm, from per-run `detailed`) ----
@@ -1141,12 +1097,12 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
 
     # --- glossary: plain-English definitions of every term used in the tables above ---
     _terms = [
-        ("Setup", "One thing under test: a harness, a model, and a reasoning setting (for example “GLM high” "
-                  "or “Opus · Claude Code”). Each setup solves every task once."),
+        ("Setup", "One thing under test: a harness, a model, and a reasoning tier (for example “GLM high” "
+                  "or “Opus · Claude Code”)."),
         ("Setup rollup", "One row per setup, pooling all of that setup's runs into a single summary."),
-        ("Run", "One setup solving one task, once. This benchmark = setups × tasks runs in total."),
-        ("Resolved / pass", "The fix worked. In the project's Docker image, every FAIL_TO_PASS test passes and "
-                            "every PASS_TO_PASS test still passes."),
+        ("Run", "One setup attempting one task, once. Total runs = setups × tasks × attempts."),
+        ("Resolved / pass", "The fix worked. In the task's own Docker image, every FAIL_TO_PASS test passes and "
+                            "every PASS_TO_PASS test still passes (reward = 1.0)."),
         ("FAIL_TO_PASS", "The bug's tests. They have to go from failing to passing; that's what proves the fix."),
         ("PASS_TO_PASS", "Tests that already passed. They have to stay passing, so a fix can't quietly break "
                          "something else."),
@@ -1174,96 +1130,70 @@ def _html_report(results_dir, rows, arms, eff, crows, overall_peak=None, detaile
                                              "how much cheaper packed is than sole."),
         ("Break-even concurrency", "How many tasks GLM has to run in parallel for its packed $/task to match Opus's "
                                    "flat per-token price."),
-        ("Difficulty", "SWE-bench Verified's own estimate of how long a fix takes, from under 15 minutes to over "
-                       "4 hours."),
+        ("Difficulty", "An empirical, relative score (0-10) from observed effort — steps, tool calls, output "
+                       "tokens, and time — pooled across setups and runs. Relative to this task set, not absolute."),
     ]
     glossary_html = ("<h2>Glossary</h2><p class=note>What the columns and terms above mean.</p>"
                      + tbl([("Term", 0), ("Meaning", 0)],
                            [f"<tr><td><b>{esc(t)}</b></td><td>{esc(d)}</td></tr>" for t, d in _terms]))
 
-    # --- benchmark tasks: repo + SWE-bench Verified difficulty tier (from each task's meta.json) ---
-    tasks_html = ""
-    _tasks = sorted({r["task"] for r in crows}) if crows else []
-    if _tasks:
-        _tier = {"<15 min fix": 0, "15 min - 1 hour": 1, "1-4 hours": 2, ">4 hours": 3}
-        trows = [(t, task_meta(t).get("repo", ""), task_meta(t).get("difficulty", "")) for t in _tasks]
-        trows.sort(key=lambda r: (_tier.get(r[2], 9), r[1], r[0]))
-        tbody = [f"<tr><td>{esc(_tshort(t))}</td><td>{esc(repo or '·')}</td>"
-                 f"<td>{esc(diff or '·')}</td></tr>" for t, repo, diff in trows]
-        nrepos = len({r[1] for r in trows if r[1]})
-        ntiers = len({r[2] for r in trows if r[2]})
-        tasks_html = ("<h2>Benchmark tasks</h2>"
-                      f"<p class=note>A hand-picked slice of <b>SWE-bench Verified</b>: {len(trows)} real GitHub "
-                      f"issues across {nrepos} repos and {ntiers} difficulty tiers (using SWE-bench's own estimate of "
-                      "time-to-fix). We picked them to span repos and difficulty, so it isn't a random sample. Read "
-                      "the resolved-rate as a cross-section, not a full SWE-bench Verified score.</p>"
-                      + tbl([("Task", 0), ("Repo", 0), ("Difficulty", 0)], tbody))
+    tasks_html = ""   # DeepSWE task provenance shows in the pass matrix + difficulty tables below
 
-    # --- "How this benchmark works": plain-English method + an SVG of the generate→grade pipeline ---
-    swe_tasks = {r["task"] for r in crows if "swebench" in r["task"].lower()} if crows else set()
-    nswe = len(swe_tasks) or ntask
-    nrepo = len({t.split("demo-swebench-", 1)[-1].rsplit("-", 1)[0] for t in swe_tasks})
-    _proj = f", across {nrepo} projects" if nrepo else ""
+    # --- "How this benchmark works": plain-English method + an SVG of the pier solve→grade pipeline ---
     _box = "fill='var(--card)' stroke='var(--border)' rx='12'"
     method_html = f"""
 <h2>How this benchmark works</h2>
 <p class="note">We measure one thing: <b>what it actually costs to finish a coding task</b>. Not tokens,
-not leaderboard scores. A task only counts when the project's own tests go from failing to passing.
-Every model gets the same {nswe} real GitHub issues (from SWE-bench Verified{_proj}, ranging from
-15-minute fixes to multi-hour ones). The only thing we change is the model and how it's configured.
-Each <b>setup</b> is a harness, a model, and a reasoning effort. This run is {run_structure}.</p>
+not leaderboard scores. A task only counts when the task's own tests go from failing to passing.
+Every setup gets the same {ntask} contamination-free <b>DeepSWE</b> tasks — real repo issues across
+several languages, each shipping its own container image and test suite. The only thing we change is the
+model and how it's configured. Each <b>setup</b> is a harness, a model, and a reasoning tier. This run
+is {run_structure}.</p>
 <div class="tw" style="padding:16px 10px">
-<svg viewBox="0 0 960 200" role="img" aria-label="Pipeline: generate locally, then grade in the cloud"
+<svg viewBox="0 0 960 200" role="img" aria-label="Pipeline: solve then grade, in the same task container"
      style="width:100%;height:auto;max-width:960px;display:block;margin:auto">
   <defs><marker id="arw" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto">
     <path d="M0,0 L7.5,3 L0,6 Z" fill="var(--muted)"/></marker></defs>
-  <text x="6" y="26" font-size="12" fill="var(--muted)">Two phases: <tspan fill="var(--fg)" font-weight="600">generate locally</tspan>, then <tspan fill="var(--fg)" font-weight="600">grade in the cloud</tspan> (the same split the official SWE-bench uses).</text>
-  <rect x="6" y="54" width="150" height="92" {_box}/>
-  <text x="81" y="84" text-anchor="middle" font-size="14" font-weight="700" fill="var(--fg)">Tasks</text>
-  <text x="81" y="105" text-anchor="middle" font-size="11" fill="var(--muted)">{nswe} real issues</text>
-  <text x="81" y="121" text-anchor="middle" font-size="11" fill="var(--muted)">SWE-bench Verified</text>
-  <rect x="176" y="54" width="170" height="92" {_box}/>
-  <text x="190" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">1 · </tspan>Generate</text>
-  <text x="190" y="105" font-size="11" fill="var(--muted)">bench.sh · local</text>
-  <text x="190" y="121" font-size="11" fill="var(--muted)">agent writes a fix</text>
-  <text x="261" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">records GPU-seconds → cost</text>
-  <rect x="366" y="54" width="170" height="92" {_box}/>
-  <text x="380" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">2 · </tspan>Harvest</text>
-  <text x="380" y="105" font-size="11" fill="var(--muted)">make_predictions</text>
-  <text x="380" y="121" font-size="11" fill="var(--muted)">collect the diffs</text>
-  <rect x="556" y="54" width="170" height="92" {_box}/>
-  <text x="570" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">3 · </tspan>Grade</text>
-  <text x="570" y="105" font-size="11" fill="var(--muted)">Modal · x86 Docker</text>
-  <text x="570" y="121" font-size="11" fill="var(--muted)">run project tests</text>
-  <text x="641" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">official pass / fail</text>
-  <rect x="746" y="54" width="170" height="92" {_box}/>
-  <text x="760" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">4 · </tspan>Report</text>
-  <text x="760" y="105" font-size="11" fill="var(--muted)">aggregate</text>
-  <text x="760" y="121" font-size="11" fill="var(--muted)">cost ÷ passes</text>
-  <line x1="158" y1="100" x2="174" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
-  <line x1="348" y1="100" x2="364" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
-  <line x1="538" y1="100" x2="554" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
-  <line x1="728" y1="100" x2="744" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
+  <text x="6" y="26" font-size="12" fill="var(--muted)">One container per task: <tspan fill="var(--fg)" font-weight="600">solve it, then grade it</tspan>, in the task's own image — driven by <tspan fill="var(--fg)" font-weight="600">pier</tspan>.</text>
+  <rect x="10" y="54" width="200" height="92" {_box}/>
+  <text x="110" y="84" text-anchor="middle" font-size="14" font-weight="700" fill="var(--fg)">Tasks</text>
+  <text x="110" y="105" text-anchor="middle" font-size="11" fill="var(--muted)">{ntask} DeepSWE issues</text>
+  <text x="110" y="121" text-anchor="middle" font-size="11" fill="var(--muted)">own image + tests</text>
+  <rect x="250" y="54" width="200" height="92" {_box}/>
+  <text x="264" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">1 · </tspan>Solve</text>
+  <text x="264" y="105" font-size="11" fill="var(--muted)">pier · in-container</text>
+  <text x="264" y="121" font-size="11" fill="var(--muted)">agent writes a fix</text>
+  <text x="350" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">records GPU-seconds → cost</text>
+  <rect x="500" y="54" width="200" height="92" {_box}/>
+  <text x="514" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">2 · </tspan>Grade</text>
+  <text x="514" y="105" font-size="11" fill="var(--muted)">same image</text>
+  <text x="514" y="121" font-size="11" fill="var(--muted)">run the task's tests</text>
+  <text x="600" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">reward = pass / fail</text>
+  <rect x="750" y="54" width="200" height="92" {_box}/>
+  <text x="764" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">3 · </tspan>Report</text>
+  <text x="764" y="105" font-size="11" fill="var(--muted)">aggregate</text>
+  <text x="764" y="121" font-size="11" fill="var(--muted)">cost ÷ passes</text>
+  <line x1="212" y1="100" x2="248" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="452" y1="100" x2="498" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="702" y1="100" x2="748" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
 </svg>
 </div>
-<p class="note"><b>1 · Generate.</b> <code>bench.sh</code> hands each agent the bug report and the code,
-and it writes a fix. We track how many seconds the model spends generating; that time, at the GPU's
-hourly rate, is the cost. <b>2 · Harvest.</b> <code>make_predictions.py</code> pulls each attempt's
-change (a git diff). <b>3 · Grade (in the cloud).</b> <code>swe_eval_modal.py</code> runs each fix inside
-that project's official SWE-bench Docker image, which has the exact old Python and dependencies it needs,
-then runs the project's real test suite. A fix passes only if every target test <i>and</i> every
-already-passing test still pass. <b>4 · Report.</b> <code>aggregate.py</code> divides the cost by the
-fixes that actually worked.</p>
-<p class="note"><b>Why two machines?</b> Writing the fix needs the model, which is fast and runs on your
-laptop. Grading a years-old project needs its exact environment, and that only lives in the project's
-container, so grading runs in the cloud. It's the same approach the official SWE-bench uses, so our
-pass/fail matches the published standard. Every task also ships a known-good <i>gold</i> fix, and we
-check that the grader marks it as passing before we trust the task.</p>
-<p class="note"><b>What we change:</b> the reasoning effort (default, high, off). Nothing else differs
-between models. <b>How cost is counted:</b> for self-hosted GLM it's GPU-seconds times the hourly rate;
-for Claude it's tokens times list price. <b>&ldquo;Sole&rdquo;</b> means one task at a time on the
-endpoint. <b>&ldquo;Packed&rdquo;</b> means the endpoint is shared by many tasks at once, which is where
-self-hosting gets cheap.</p>
+<p class="note"><b>1 · Solve.</b> Each DeepSWE task is a real repo issue with its own Docker image and
+tests. <code>pier</code> builds that image, injects the agent CLI (opencode for GLM, Claude Code for Opus)
+into it, and the agent works the issue inside the container. We track the seconds the model spends
+generating; that time, at the GPU's hourly rate, is GLM's cost. <b>2 · Grade.</b> pier runs the task's
+own tests in the same image — a fix passes only if every <code>FAIL_TO_PASS</code> test goes green and
+every <code>PASS_TO_PASS</code> test stays green (reward = 1.0). <b>3 · Report.</b> <code>aggregate.py</code>
+divides cost by the fixes that actually worked.</p>
+<p class="note"><b>Where things run.</b> The benchmark box drives Docker to build, solve, and grade each
+task container — one place, one image per task. Only model inference is remote: GLM calls go to the
+self-hosted GLM endpoint on Modal (8×B200); Opus calls go to the Anthropic API. Grading is local to the
+task's image and uses the task's own tests, so pass/fail is the real thing, not a re-implementation.</p>
+<p class="note"><b>What we change:</b> the GLM reasoning tier (max, high, off) — nothing else differs
+between the GLM setups. <b>How cost is counted:</b> for self-hosted GLM it's GPU generation-seconds times
+the hourly rate, reconciled against the actual Modal bill; for Claude it's tokens times list price.
+<b>&ldquo;Sole&rdquo;</b> means one task at a time on the endpoint; <b>&ldquo;Packed&rdquo;</b> means the
+endpoint is shared by many tasks at once, which is where self-hosting gets cheap.</p>
 <p class="note"><b>Cold start and scale-down.</b> The Modal endpoint <b>scales to zero when idle</b>, so
 you only pay for GPU time while it's actually serving. There's no charge for idle hours, unlike an
 always-on box. The trade-off is a <b>cold start</b>: the first request after it has scaled down has to

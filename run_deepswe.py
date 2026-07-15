@@ -32,6 +32,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -223,8 +224,10 @@ def main():
     ap.add_argument("--tasks-dir", default=os.environ.get("TASKS_DIR", "deep-swe-main/tasks"))
     ap.add_argument("--out", default=os.environ.get("OUT_DIR", "results"),
                     help="results dir (report + csvs land here) [%(default)s]")
-    ap.add_argument("--work-dir", default=os.environ.get("WORK_DIR", "pier-jobs"),
-                    help="scratch dir for pier job trees [%(default)s]")
+    ap.add_argument("--work-dir", default=os.environ.get("WORK_DIR", ""),
+                    help="pier job tree dir [default: <out>/<run-id>/pier-jobs]")
+    ap.add_argument("--run-id", default=os.environ.get("RUN_ID", ""),
+                    help="name for this run's subfolder under --out [default: timestamp]")
     ap.add_argument("--host-ip", default=os.environ.get("HOST_IP", ""),
                     help="address Squid uses to reach the reasoning-proxy sidecar (box private IP)")
     ap.add_argument("--pier", default=os.environ.get("PIER", "pier"), help="pier executable [%(default)s]")
@@ -260,12 +263,18 @@ def main():
     if "opus" in setups and not env.get("ANTHROPIC_API_KEY"):
         sys.exit("opus needs ANTHROPIC_API_KEY")
 
-    os.makedirs(args.out, exist_ok=True)
+    # each invocation gets its own timestamped folder under --out, so repeated runs never clobber.
+    # the pier job tree lives inside it too — so a single host-aligned mount of --out holds everything
+    # (report, csvs, per-run logs, and the docker-out-of-docker job tree). See entrypoint.sh.
+    run_id = args.run_id or datetime.now().strftime("%Y-%m-%d__%H-%M-%S")
+    run_dir = os.path.join(args.out, run_id)
+    work_dir = args.work_dir or os.path.join(run_dir, "pier-jobs")
+    os.makedirs(run_dir, exist_ok=True)
     jobs = [(s, t, r) for s in setups for t in tasks for r in range(1, args.runs + 1)]
     log(f"DeepSWE bench: {len(setups)} setups × {len(tasks)} tasks × {args.runs} runs "
-        f"= {len(jobs)} pier runs, {args.jobs} parallel")
+        f"= {len(jobs)} pier runs, {args.jobs} parallel → {run_dir}")
 
-    manifest_path = os.path.join(args.out, "manifest.csv")
+    manifest_path = os.path.join(run_dir, "manifest.csv")
     with open(manifest_path, "w", newline="") as f:
         csv.DictWriter(f, fieldnames=MANIFEST_FIELDS).writeheader()
 
@@ -275,7 +284,7 @@ def main():
 
     done = 0
     with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-        futs = {ex.submit(run_job, s, t, r, args, env, args.out, args.work_dir): (s, t, r)
+        futs = {ex.submit(run_job, s, t, r, args, env, run_dir, work_dir): (s, t, r)
                 for (s, t, r) in jobs}
         for fut in as_completed(futs):
             row = fut.result()
@@ -287,13 +296,13 @@ def main():
     if need_glm and not args.no_billing:
         try:
             log("billing: pulling the Modal AEP bill for the run window…")
-            subprocess.run([sys.executable, str(HERE / "billing.py"), "--results-dir", args.out],
+            subprocess.run([sys.executable, str(HERE / "billing.py"), "--results-dir", run_dir],
                            env=env, check=False)
         except Exception as e:
             log(f"billing skipped: {e}")
 
     if not args.no_aggregate:
-        subprocess.run([sys.executable, str(HERE / "aggregate.py"), "--results-dir", args.out, "--no-open"],
+        subprocess.run([sys.executable, str(HERE / "aggregate.py"), "--results-dir", run_dir, "--no-open"],
                        env=env, check=False)
 
 

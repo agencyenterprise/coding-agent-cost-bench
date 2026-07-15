@@ -5,17 +5,24 @@
 # inject the agent CLI into it — so this image ships only python + the docker CLI + pier + the
 # orchestrator, NOT node/opencode/claude-code (pier installs those inside each task image).
 #
+#   DIR="$PWD/results-deepswe"; mkdir -p "$DIR"
 #   docker run --rm -p 80:80 \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
-#     -v /work:/work \
-#     -v "$PWD/results:/out" \
+#     -v "$DIR:$DIR" -e OUT_DIR="$DIR" \
 #     -e HOST_IP=$(hostname -I | awk '{print $1}') \
 #     --env-file .env \
 #     ghcr.io/agencyenterprise/coding-agent-cost-bench \
 #     --setups glm-default,glm-high,glm-nothink,opus --runs 4 --jobs 8
+#   # -> $DIR/<timestamp>/report.html (+ per_run.csv, summary.csv, pier-jobs/)
+#
+# ONE data mount, mounted at the SAME path inside and out (-v "$DIR:$DIR"): everything for a run —
+# report, csvs, and the pier job tree — lands under $DIR/<timestamp>/. The same-path mount is required
+# because pier drives the HOST daemon, which bind-mounts the job tree into task containers by literal
+# path (docker-out-of-docker), so the path must resolve identically on both sides. Each invocation
+# gets its own timestamped subfolder, so repeated runs never clobber.
 #
 # Creds come ONLY from the runtime env (--env-file); nothing is baked. The DeepSWE tasks ARE baked
-# (the target box has no git). See entrypoint.sh for the required mounts (esp. the host-aligned /work).
+# (the target box has no git). See entrypoint.sh.
 FROM python:3.12-slim-bookworm
 
 # docker CLI + compose/buildx plugins (client only — pier talks to the HOST daemon via the socket).
@@ -41,7 +48,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 WORKDIR /app
 # Bake the contamination-free DeepSWE tasks (no git on the target box). Used only as docker build
 # context / compose config by the CLI locally, so a container path here is fine — only the pier job
-# tree under /work must be host-aligned (see entrypoint.sh).
+# tree (under the host-aligned OUT_DIR at runtime) must be host-aligned (see entrypoint.sh).
 RUN curl -sL https://github.com/datacurve-ai/deep-swe/archive/refs/heads/main.tar.gz | tar xz
 ENV TASKS_DIR=/app/deep-swe-main/tasks
 
@@ -50,6 +57,7 @@ RUN chmod +x /app/entrypoint.sh
 
 # Runs as root: needs the docker socket and to bind :80 for the sidecar. The agent (incl. Claude
 # Code, which refuses root) runs inside pier's task containers, not here, so root is fine.
-ENV OUT_DIR=/out WORK_DIR=/work
-VOLUME ["/out", "/work"]
+# OUT_DIR is where runs land; override it at runtime to a host-aligned path (-e OUT_DIR="$DIR" with
+# -v "$DIR:$DIR"). The pier job tree defaults to <OUT_DIR>/<run-id>/pier-jobs, so it's aligned too.
+ENV OUT_DIR=/out
 ENTRYPOINT ["/app/entrypoint.sh"]
