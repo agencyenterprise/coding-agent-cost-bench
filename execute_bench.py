@@ -5,8 +5,9 @@ This is the Docker entrypoint. Each job runs its agent INSIDE the task's prebuil
 container on the host daemon (Q1/Q2, via the mounted docker.sock — NOT docker-in-docker); the node+CLI
 bundle is mounted read-only (Q6) and the agent edits the repo at /app. Containers are named/labelled
 `bench-<runid>-*` so timeout (docker kill) and a finally + startup/shutdown label sweep leave no orphans
-(Q10). A live monitor runs alongside; grading on Modal + report.html always follow. The GLM GPU stays
-on Modal; this orchestrator is CPU-only.
+(Q10). Each task-worker owns one task end-to-end — pull → generate → grade (local docker, the task's own
+verifier, no model call) → prune the image (--keep-images disables). A live monitor runs alongside;
+report.html always follows. The GLM GPU stays on Modal; this orchestrator is CPU-only.
 
   docker run --rm -e MODAL_ENDPOINT=... -e MODAL_KEY=... -e MODAL_SECRET=... \
       -e ANTHROPIC_API_KEY=... -e MODAL_TOKEN_ID=... -e MODAL_TOKEN_SECRET=... \
@@ -15,11 +16,12 @@ on Modal; this orchestrator is CPU-only.
 
 Creds come from the process environment and, if missing, from a local `.env` (via python-dotenv).
 Supports plain `KEY=val` and shell `export KEY="val"`; real env / `-e` always wins. Flags: --runs,
---jobs, --tasks, --task, --models, --timeout, --rate, --list. Grading always runs.
+--jobs, --tasks, --task, --models, --timeout, --rate, --keep-images, --grade-only, --list.
 """
 import argparse
 import csv
 import glob
+import itertools
 import json
 import os
 import re
@@ -61,6 +63,8 @@ PROXIES = {"modal-nothink": ("off", 8899, "NOTHINK_ENDPOINT"),
 JOBS = {}            # job_id -> live state for the monitor
 JOBS_LOCK = threading.Lock()
 MANIFEST_LOCK = threading.Lock()
+GRADE = {}           # outdir -> {task,harness,model,pv,run,verdict} (T3 local docker grade)
+GRADE_LOCK = threading.Lock()
 CPU_PROCS = {}       # pid -> persistent psutil.Process (cpu_percent needs deltas between calls)
 PARSE_CACHE = {}     # outdir -> (last_parse_ts, log_mtime, steps, tokens_out) — throttles log parsing
 
@@ -223,6 +227,63 @@ def log_active(outdir):
         return False
 
 
+def agent_finished(logpath, harness):
+    """Did the agent emit its TERMINAL event? opencode --format json ends with a `step_finish` whose
+    reason is `stop` (the model ended its turn with no pending tool call); claude stream-json ends with
+    a `{"type":"result"}` event. Detecting this in output.log is how we know the code is done — the
+    process itself may then wedge in teardown (esp. emulated), so we can't wait on it exiting."""
+    try:
+        tail = open(logpath, "rb").read()[-8000:].decode("utf-8", "replace")
+    except OSError:
+        return False
+    last = next((ln for ln in reversed(tail.splitlines()) if ln.strip()), "")
+    if harness == "claude":
+        return '"type":"result"' in last
+    return '"type":"step_finish"' in last and '"reason":"stop"' in last
+
+
+def wait_agent(proc, cname, harness, logpath, timeout):
+    """Wait for the agent's `docker exec` to finish. Returns killed_signal (None = clean, 9 = killed).
+
+    Exits, whichever comes first:
+      • the agent emitted its terminal event (agent_finished) — the code is done; return clean even if
+        the process is still alive (it commonly wedges in teardown under rosetta emulation);
+      • the exec returns on its own — the normal native path;
+      • the agent binary is gone from `docker top` while output.log is quiet — finished, exec stream just
+        never closed;
+      • a cutoff is hit — STALL_KILL_SECS of no output.log growth (a wedged agent that never emitted a
+        terminal event), or the hard wall-clock `timeout`.
+    We kill only the exec CLIENT and LEAVE THE CONTAINER ALIVE so capture_patch can still diff /app.
+    Set STALL_KILL_SECS=0 to disable the stall cutoff and rely on the wall timeout alone."""
+    start = time.time()
+    pat = "claude" if harness == "claude" else "opencode"
+    stall = int(os.environ.get("STALL_KILL_SECS", "1800"))
+    while True:
+        try:
+            proc.wait(timeout=5)
+            return None
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.time()
+        try:
+            quiet = now - os.stat(logpath).st_mtime
+        except OSError:
+            quiet = 0
+        if quiet > 5 and agent_finished(logpath, harness):   # code done; process may wedge in teardown
+            proc.kill()
+            proc.wait()
+            return None
+        alive = pat in subprocess.run(["docker", "top", cname], capture_output=True, text=True).stdout
+        if not alive and quiet > 15:                         # finished; exec stream just never closed
+            proc.kill()
+            proc.wait()
+            return None
+        if (stall and quiet > stall) or now - start > timeout:   # wedged w/o terminal event, or wall ceiling
+            proc.kill()
+            proc.wait()
+            return 9
+
+
 def run_one_job(job, cfg, manifest):
     """Generate one (task, harness, model, run). Returns a result dict; updates JOBS for the monitor."""
     jid = job["id"]
@@ -261,7 +322,12 @@ def run_one_job(job, cfg, manifest):
             denv += ["-e", f"{k}={os.environ[k]}"]
     denv += ["-e", "OPENCODE_CONFIG=/opt/agent/opencode.jsonc", "-e", "NO_COLOR=1",
              "-e", "HOME=/root", "-e", "IS_SANDBOX=1",            # IS_SANDBOX lets claude skip-perms as root
-             "-e", "XDG_DATA_HOME=/root/.local/share"]            # pins opencode.db where snapshot_usage cp's
+             "-e", "XDG_DATA_HOME=/root/.local/share",            # pins opencode.db where snapshot_usage cp's
+             # A git identity so the agent's own `git commit` succeeds. Without it the commit dies with
+             # "unable to auto-detect email address" and the agent burns turns flailing on the failure.
+             # (git reads these directly — no `git config` needed; capture_patch still diffs base..HEAD.)
+             "-e", "GIT_AUTHOR_NAME=bench", "-e", "GIT_AUTHOR_EMAIL=bench@local",
+             "-e", "GIT_COMMITTER_NAME=bench", "-e", "GIT_COMMITTER_EMAIL=bench@local"]
 
     # Q10: deterministic name + label so cleanup is a label sweep; --cpus/--memory from task.toml. The
     # container's PID 1 is `sleep infinity` and the agent runs via `docker exec` — a stopped container
@@ -291,12 +357,7 @@ def run_one_job(job, cfg, manifest):
                 proc = subprocess.Popen(execc, stdout=lf, stderr=subprocess.STDOUT)
             with JOBS_LOCK:
                 JOBS[jid]["pid"] = proc.pid
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                subprocess.run(["docker", "kill", cname], stdout=DEVNULL, stderr=DEVNULL)
-                proc.wait()
-                killed_signal = 9        # SIGKILL via docker kill — recorded like the old killpg path
+            killed_signal = wait_agent(proc, cname, harness, logpath, timeout)
             try:
                 data = open(logpath, encoding="utf-8", errors="replace").read()
                 open(logpath, "w", encoding="utf-8").write(ANSI.sub("", data))
@@ -304,10 +365,13 @@ def run_one_job(job, cfg, manifest):
                 data = ""
 
             # opencode token capture + zero-token guard (Q8). claude tokens ride stdout stream-json in
-            # output.log (claude_stats) and need no DB, so this whole block is opencode-only.
+            # output.log (claude_stats) and need no DB, so this whole block is opencode-only. Set
+            # BENCH_SKIP_ZERO_TOKEN_GUARD=1 for local smoke tests on Apple Silicon, where `npx ccusage`
+            # runs emulated and returns 0 tokens — falsely tripping the guard and hard-retrying every run.
             zero_tok = False
             if harness != "claude" and killed_signal is None:
-                zero_tok = snapshot_usage(cname, outdir) == 0 and log_active(outdir)
+                got_zero = snapshot_usage(cname, outdir) == 0     # still writes usage.json for the report
+                zero_tok = got_zero and log_active(outdir) and not os.environ.get("BENCH_SKIP_ZERO_TOKEN_GUARD")
 
             if killed_signal is None and SERVER_ERR.search(data) and attempt < cfg["retries"] + 1:
                 attempt += 1
@@ -326,8 +390,11 @@ def run_one_job(job, cfg, manifest):
                 errored = "errored"      # still zero after retries -> not a legit $0, exclude from cost
             break
 
-        if killed_signal is None:        # a killed container is dead; nothing to commit/diff
-            capture_patch(cname, task_abs, outdir)
+        # Capture even on a timeout: the container is still alive (we kill the exec client, never the
+        # container), so the agent's /app edits are diffable. A run that finished but whose exec stream
+        # hung (orbstack) yields its full solution; a genuine timeout yields its partial work (graded,
+        # usually unresolved) instead of being silently discarded.
+        capture_patch(cname, task_abs, outdir)
     finally:
         subprocess.run(["docker", "rm", "-f", cname], stdout=DEVNULL, stderr=DEVNULL)  # Q10: always tear down
     end = time.time()
@@ -347,7 +414,8 @@ def run_one_job(job, cfg, manifest):
     with JOBS_LOCK:
         JOBS[jid]["status"] = status
         JOBS[jid]["end"] = end
-    return {"id": jid, "killed": killed_signal, "dur": end - start, "errored": bool(errored)}
+    return {"id": jid, "killed": killed_signal, "dur": end - start, "errored": bool(errored),
+            "outdir": outdir}
 
 
 # ---------------------------------------------------------------- reasoning proxies + warm
@@ -603,10 +671,12 @@ def load_task_meta(task_dir):
         t = tomllib.load(f)
     meta, env, agent = t.get("metadata", {}), t.get("environment", {}), t.get("agent", {})
     ts = agent.get("timeout_sec")
+    vt = t.get("verifier", {}).get("timeout_sec")   # T3 grading ceiling (separate from [agent].timeout_sec)
     return {"task_id": meta.get("task_id") or os.path.basename(task_dir),
             "docker_image": env.get("docker_image", ""),
             "base_commit_hash": meta.get("base_commit_hash", ""),
             "timeout_sec": int(ts) if ts else None,
+            "verifier_timeout": int(vt) if vt else 1800,
             "cpus": env.get("cpus"), "memory_mb": env.get("memory_mb")}
 
 
@@ -622,23 +692,6 @@ def discover_tasks(tasks_dir):
 
 
 # ---------------------------------------------------------------- main
-def build_queue(cfg):
-    tasks = discover_tasks(cfg["tasks_dir"])
-    if cfg["only_task"]:
-        if cfg["only_task"] not in tasks:
-            sys.exit(f"--task {cfg['only_task']!r} not found among {len(tasks)} deep-swe tasks")
-        tasks = {cfg["only_task"]: tasks[cfg["only_task"]]}
-    q = []
-    for harness, model in cfg["setups"]:
-        for task, task_abs in sorted(tasks.items()):
-            meta = load_task_meta(task_abs)
-            for run in range(1, cfg["runs"] + 1):
-                q.append({"id": f"{task}|{harness}|{model}|{run}", "idx": len(q), "task": task,
-                          "task_abs": task_abs, "harness": harness, "model": model,
-                          "prompt_file": PROMPT_FILE, "run": run, "meta": meta})
-    return q
-
-
 def modal_auth():
     """Authenticate the Modal CLI for grading sandboxes, from env only (no-op if a token isn't set)."""
     if os.environ.get("MODAL_TOKEN_ID") and os.environ.get("MODAL_TOKEN_SECRET"):
@@ -647,23 +700,162 @@ def modal_auth():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def grade(rdir, rate):
-    """Grade + report, all Python (was grade_swe.sh): harvest patches -> run each in its Modal
-    sandbox -> pull the run-window bill -> aggregate with the official pass/fail into report.html."""
+def grade_run(task, task_abs, meta, outdir, cfg):
+    """T3: grade this run's model.patch with the task's OWN upstream verifier — no model call, no Modal.
+    A FRESH container off the pulled agent image (pristine /app) grades it: `docker cp` the task's
+    tests/ -> /tests and this run's model.patch -> /logs/artifacts, then `docker exec bash /tests/test.sh`
+    runs grader.py prepare -> suites -> grade -> /logs/verifier/reward.json, copied back out. Everything
+    goes through docker cp/exec (NOT host bind mounts) because we're a sibling container — the daemon
+    can't see the orchestrator's own /app or /out FS (same reason capture_patch uses cp, Q7). Returns the
+    3-way verdict (frontier #5): reward==1 -> 'resolved'; reward==0 -> 'unresolved'; reward.txt==-1 /
+    no reward.json (test.sh infra-fail sentinel) -> 'errored' (excluded from resolve-rate + cost, Q8)."""
+    mp = os.path.join(outdir, "model.patch")
+    if not os.path.exists(mp) or os.path.getsize(mp) == 0:
+        return "unresolved"          # empty/missing patch grades the pristine base -> reward 0 by construction
+    image = meta["docker_image"]
+    if subprocess.run(["docker", "image", "inspect", image],
+                      stdout=DEVNULL, stderr=DEVNULL).returncode != 0:   # --grade-only after a prune
+        pull_image(image, os.path.join(outdir, "pull.log"))
+    tests = os.path.join(task_abs, "tests")
+    cname = f"bench-{cfg['runid']}-grade-{job_idx(outdir)}"
+    subprocess.run(["docker", "rm", "-f", cname], stdout=DEVNULL, stderr=DEVNULL)
+    # PID 1 is sleep so we can cp + exec on a live container (a fresh run = pristine /app at base_commit).
+    subprocess.run(["docker", "run", "-d", "--name", cname, "--label", f"bench={cfg['runid']}",
+                    "--network", "none", "--cpus", str(meta.get("cpus") or 2),
+                    "--memory", f"{meta.get('memory_mb') or 8192}m",
+                    "--entrypoint", "sleep", image, "infinity"], stdout=DEVNULL, stderr=DEVNULL)
+    try:
+        subprocess.run(["docker", "exec", cname, "mkdir", "-p", "/tests", "/logs/artifacts"],
+                       stdout=DEVNULL, stderr=DEVNULL)
+        subprocess.run(["docker", "cp", tests + "/.", f"{cname}:/tests"], stdout=DEVNULL, stderr=DEVNULL)
+        subprocess.run(["docker", "cp", mp, f"{cname}:/logs/artifacts/model.patch"],
+                       stdout=DEVNULL, stderr=DEVNULL)
+        with open(os.path.join(outdir, "grade.log"), "w") as lf:
+            proc = subprocess.Popen(["docker", "exec", "-w", "/app", cname, "bash", "/tests/test.sh"],
+                                    stdout=lf, stderr=subprocess.STDOUT)
+        try:
+            proc.wait(timeout=meta.get("verifier_timeout", 1800) + 120)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["docker", "kill", cname], stdout=DEVNULL, stderr=DEVNULL)
+            proc.wait()
+            return "errored"
+        reward = os.path.join(outdir, "reward.json")
+        rc = subprocess.run(["docker", "cp", f"{cname}:/logs/verifier/reward.json", reward],
+                            stdout=DEVNULL, stderr=DEVNULL).returncode
+        if rc != 0:
+            return "errored"     # reward.txt=-1 crash sentinel (or nothing) -> infra fail, not a false unresolved
+        try:
+            return "resolved" if json.load(open(reward)).get("reward") == 1 else "unresolved"
+        except Exception:
+            return "errored"
+    finally:
+        subprocess.run(["docker", "rm", "-f", cname], stdout=DEVNULL, stderr=DEVNULL)
+
+
+def job_idx(outdir):
+    # docker --name-safe + unique per run (task+model+run all live in the basename, so grade
+    # containers from concurrent task-workers never collide). Names allow a long tail.
+    return sanitize(os.path.basename(os.path.normpath(outdir)))
+
+
+def run_task(task, task_abs, cfg, manifest):
+    """T4: one worker owns one task end-to-end — pull the agent image once, run all its
+    (harness × model × run) generate jobs, grade each locally (T3), then prune the image so peak disk
+    stays bounded to ~jobs × image (mars-base base layers stay shared). --keep-images disables the rmi."""
+    meta = load_task_meta(task_abs)
+    image = meta["docker_image"]
+    killed = []
+    try:
+        for harness, model in cfg["setups"]:
+            for run in range(1, cfg["runs"] + 1):
+                job = {"id": f"{task}|{harness}|{model}|{run}", "idx": next(cfg["counter"]),
+                       "task": task, "task_abs": task_abs, "harness": harness, "model": model,
+                       "prompt_file": PROMPT_FILE, "run": run, "meta": meta}
+                r = run_one_job(job, cfg, manifest)
+                if r["killed"]:
+                    killed.append(r["id"])
+                if r["errored"]:
+                    continue     # zero-token guard already excluded it; no patch worth grading
+                verdict = grade_run(task, task_abs, meta, r["outdir"], cfg)
+                with GRADE_LOCK:
+                    GRADE[r["outdir"]] = {"task": task, "harness": harness, "model": model,
+                                          "pv": PROMPT_LABEL, "run": run, "verdict": verdict}
+    finally:
+        if not cfg["keep_images"]:
+            subprocess.run(["docker", "rmi", "-f", image], stdout=DEVNULL, stderr=DEVNULL)
+    return killed
+
+
+def finalize_grades(rdir, grades):
+    """T3 adapter: fold the local grades into resolved.json AND stamp pass/fail/errored into
+    manifest.status (the lever aggregate.py already honours — 'errored' rows are dropped from
+    resolve-rate + cost, exactly like the Q8 zero-token guard). aggregate.py stays unchanged."""
+    resolved = {}
+    for g in grades.values():
+        if g["verdict"] == "errored":
+            continue
+        safe = g["model"].replace("/", "_").replace(":", "_").replace(" ", "_")
+        mnp = f"{g['harness']}__{safe}__{g['pv']}__run{g['run']}"
+        resolved[f"{g['task']}::{mnp}"] = {"instance_id": g["task"], "model_name_or_path": mnp,
+                                           "resolved": g["verdict"] == "resolved"}
+    with open(os.path.join(rdir, "resolved.json"), "w") as f:
+        json.dump(resolved, f, indent=2)
+
+    manifest = os.path.join(rdir, "manifest.csv")
+    rows = list(csv.reader(open(manifest)))
+    hdr = rows[0]
+    oi, si = hdr.index("outdir"), hdr.index("status")
+    to_status = {"resolved": "pass", "unresolved": "fail", "errored": "errored"}
+    for r in rows[1:]:
+        g = grades.get(r[oi])
+        if g and r[si] != "errored":          # never override a generation-errored (lost-DB) row
+            r[si] = to_status[g["verdict"]]
+    with open(manifest, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+    n = sum(1 for g in grades.values() if g["verdict"] == "resolved")
+    log(f">>> graded {len(grades)} run(s): {n} resolved -> resolved.json")
+
+
+def report(rdir, rate):
+    """Bill the run window + aggregate the local grades into report.html (grading itself is now
+    interleaved per task — no separate Modal pass)."""
     py = sys.executable
 
     def run(script, *args):
         return subprocess.run([py, os.path.join(HERE, script), *args])
 
-    log(">>> [1/4] harvest agent patches -> predictions.jsonl")
-    run("make_predictions.py", "--results-dir", rdir)
-    log(">>> [2/4] grade on Modal (per-instance sandboxes)")
-    run("swe_eval_modal.py", "--predictions", os.path.join(rdir, "predictions.jsonl"))
-    log(">>> [3/4] actual endpoint bill for the run window -> billing.json")
+    log(">>> [1/2] actual endpoint bill for the run window -> billing.json")
     if run("billing.py", "--results-dir", rdir).returncode != 0:
         log("    (billing pull failed — report will skip the ground-truth line)")
-    log(">>> [4/4] aggregate with the official grades -> report.html")
+    log(">>> [2/2] aggregate with the local grades -> report.html")
     run("aggregate.py", "--results-dir", rdir, "--rate", rate, "--no-open")
+
+
+def regrade(rdir, tasks_dir, cfg):
+    """--grade-only: regrade every non-errored run in an existing results dir via local docker (T3)."""
+    tasks = discover_tasks(tasks_dir)
+    manifest = os.path.join(rdir, "manifest.csv")
+    grades, jobs = {}, []
+    for row in csv.DictReader(open(manifest)):
+        task, outdir = row.get("task"), row.get("outdir")
+        if not task or not outdir or row.get("status") == "errored" or task not in tasks:
+            continue
+        outdir = outdir if os.path.isdir(outdir) else os.path.join(rdir, os.path.basename(outdir.rstrip("/")))
+        jobs.append((task, tasks[task], outdir, row))
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def work(j):
+        task, task_abs, outdir, row = j
+        meta = load_task_meta(task_abs)
+        verdict = grade_run(task, task_abs, meta, outdir, cfg)
+        with GRADE_LOCK:
+            grades[outdir] = {"task": task, "harness": row["harness"], "model": row["model"],
+                              "pv": row.get("prompt") or PROMPT_LABEL, "run": row["run"], "verdict": verdict}
+
+    with ThreadPoolExecutor(max_workers=cfg["jobs"]) as ex:
+        list(ex.map(work, jobs))
+    finalize_grades(rdir, grades)
 
 
 def main():
@@ -672,6 +864,7 @@ def main():
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--tasks", default=os.path.join(HERE, "deep-swe", "tasks"))
     ap.add_argument("--task", default="")
+    ap.add_argument("--limit", type=int, default=0, help="run only the first N discovered tasks (0 = all)")
     ap.add_argument("--models", default=",".join(DEFAULT_MODELS))
     ap.add_argument("--list", action="store_true",
                     help="discover tasks and exit; with --task also print its instruction.md + docker_image")
@@ -680,15 +873,19 @@ def main():
     ap.add_argument("--retries", type=int, default=2)
     ap.add_argument("--rate", default="50.7")
     ap.add_argument("--results-dir", default="")
-    ap.add_argument("--grade-only", default="", help="re-grade an existing results dir and exit")
+    ap.add_argument("--keep-images", action="store_true",
+                    help="don't docker rmi each task's agent image after grading (default prunes to bound disk)")
+    ap.add_argument("--grade-only", default="", help="re-grade an existing results dir (local docker) and exit")
     a = ap.parse_args()
 
     env_file = load_env()
 
     if a.grade_only:                       # re-grade a finished run, no generation
         modal_auth()
-        log(f">>> grade-only -> {a.grade_only}")
-        grade(a.grade_only, a.rate)
+        log(f">>> grade-only (local docker) -> {a.grade_only}")
+        runid = sanitize(os.path.basename(os.path.normpath(a.grade_only)))
+        regrade(a.grade_only, a.tasks, {"runid": runid, "jobs": a.jobs, "keep_images": a.keep_images})
+        report(a.grade_only, a.rate)
         log(f">>> done -> {a.grade_only}/report.html")
         return
 
@@ -734,7 +931,8 @@ def main():
     disp_timeout = a.timeout or 5400                              # monitor's ⚠ threshold only
     cfg = {"results_dir": rdir, "runid": runid, "bundle_vol": None, "network": f"bench-{runid}",
            "timeout": a.timeout, "retries": a.retries, "run_delay": 2, "runs": a.runs,
-           "tasks_dir": a.tasks, "only_task": a.task, "setups": setups}
+           "tasks_dir": a.tasks, "only_task": a.task, "setups": setups, "jobs": a.jobs,
+           "keep_images": a.keep_images, "counter": itertools.count()}
 
     manifest = os.path.join(rdir, "manifest.csv")
     with open(manifest, "w", newline="") as f:
@@ -762,21 +960,27 @@ def main():
         if glm and not warm_endpoint(glm.split("/", 1)[1]):
             sys.exit(f"GLM endpoint {os.environ['MODAL_ENDPOINT']} not ready")
 
-        queue = build_queue(cfg)
-        log(f">>> {len(queue)} jobs across {len(setups)} setups — pool of {a.jobs}, ordered modal-first")
+        tasks = discover_tasks(cfg["tasks_dir"])
+        if cfg["only_task"]:
+            if cfg["only_task"] not in tasks:
+                sys.exit(f"--task {cfg['only_task']!r} not found among {len(tasks)} deep-swe tasks")
+            tasks = {cfg["only_task"]: tasks[cfg["only_task"]]}
+        elif a.limit:
+            tasks = dict(sorted(tasks.items())[:a.limit])   # first N by task_id (discovery is sorted)
+        njobs = len(tasks) * len(setups) * a.runs
+        log(f">>> {len(tasks)} task(s) × {len(setups)} setups × {a.runs} run(s) = {njobs} generate jobs — "
+            f"pool of {a.jobs} task-workers (each owns a task: generate → grade → prune)")
 
         from concurrent.futures import ThreadPoolExecutor
         stop = threading.Event()
         mon = threading.Thread(target=monitor_loop,
-                               args=(stop, len(queue), disp_timeout, int(os.environ.get("STALL_SECS", "120")), time.time()))
+                               args=(stop, njobs, disp_timeout, int(os.environ.get("STALL_SECS", "120")), time.time()))
         mon.start()
         killed = []
         with ThreadPoolExecutor(max_workers=a.jobs) as ex:
-            futs = [ex.submit(run_one_job, j, cfg, manifest) for j in queue]
+            futs = [ex.submit(run_task, t, ta, cfg, manifest) for t, ta in sorted(tasks.items())]
             for fu in futs:
-                r = fu.result()
-                if r["killed"]:
-                    killed.append(r["id"])
+                killed.extend(fu.result())
         stop.set()
         mon.join()
         if killed:
@@ -787,7 +991,8 @@ def main():
         subprocess.run(["docker", "volume", "rm", "-f", cfg["bundle_vol"]], stdout=DEVNULL, stderr=DEVNULL)
         subprocess.run(["docker", "network", "rm", cfg["network"]], stdout=DEVNULL, stderr=DEVNULL)
 
-    grade(rdir, a.rate)   # always grade on Modal + bill + aggregate -> report.html
+    finalize_grades(rdir, GRADE)   # local grades -> resolved.json + manifest status (aggregate reads it)
+    report(rdir, a.rate)           # bill the run window + aggregate -> report.html
     log(f">>> done -> {host_display_path(rdir)}/report.html")
 
 

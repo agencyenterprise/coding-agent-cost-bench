@@ -1,5 +1,11 @@
 # deep-swe migration map
 
+> **STATUS: COMPLETE** (tickets T1–T5, `.docs/tickets/`). The orchestrator, tiers, local
+> docker grading, and the invocation contract all landed. This file is kept as the design
+> record; the current run instructions live in [README.md](README.md). References below to
+> `make_predictions.py` / `swe_eval_modal.py` describe the retired SWE-bench path — the grade
+> step is now local docker (`execute_bench.py: grade_run`), no Modal grading pass.
+
 Pivot the benchmark from SWE-bench Verified → **deep-swe** (datacurve-ai), keeping our
 Docker orchestrator + opencode/claude harnesses and the exact `report.html` +
 `results-details.csv` output. Verified against a clone of the repo (not the README).

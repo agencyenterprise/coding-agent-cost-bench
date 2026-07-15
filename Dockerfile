@@ -15,7 +15,11 @@
 #
 # Creds come ONLY from the environment at RUNTIME (never baked, never a mounted file): pass -e (as
 # above, forwarding from your shell) or --env-file with a plain KEY=value file.
-FROM node:22-bookworm-slim
+# Pinned to amd64: the deep-swe task images are amd64-only, and the read-only node+CLI bundle (Q6) is
+# mounted straight into them — so the bundle's node/opencode/claude ELFs MUST be amd64 too. Without this
+# pin, a build on Apple Silicon produces arm64 binaries that can't exec inside the amd64 task containers
+# ("exec .../opencode: no such file or directory"). On arm hosts this image runs under emulation.
+FROM --platform=linux/amd64 node:22-bookworm-slim
 
 # python 3.11 (bookworm) is a broad-compat sweet spot for the task repos — deliberately NOT the host's
 # 3.14 that broke old libs. git for clones; coreutils gives a real `timeout` + `stat`; sqlite3 for

@@ -381,8 +381,8 @@ def main():
         sys.exit(f"no manifest at {manifest} — run bench.sh first "
                  f"(or point --results-dir at the right folder, e.g. --results-dir results/app-8xH200)")
 
-    # Official SWE-bench grade (from grade_swe.sh / swe_eval_modal.py). If present, it overrides the
-    # host verify.sh pass/fail for SWE tasks — Docker-in-the-right-Python is the trustworthy signal.
+    # Task verifier grade (execute_bench.py grades each patch locally and writes resolved.json). If
+    # present it overrides any host pass/fail — the task's own upstream suite is the trustworthy signal.
     resolved_map = {}
     _rp = os.path.join(RESULTS_DIR, "resolved.json")
     if os.path.exists(_rp):
@@ -1224,18 +1224,18 @@ Each <b>setup</b> is a harness, a model, and a reasoning effort. This run is {ru
   <text x="81" y="121" text-anchor="middle" font-size="11" fill="var(--muted)">SWE-bench Verified</text>
   <rect x="176" y="54" width="170" height="92" {_box}/>
   <text x="190" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">1 · </tspan>Generate</text>
-  <text x="190" y="105" font-size="11" fill="var(--muted)">bench.sh · local</text>
+  <text x="190" y="105" font-size="11" fill="var(--muted)">agent · in-image</text>
   <text x="190" y="121" font-size="11" fill="var(--muted)">agent writes a fix</text>
   <text x="261" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">records GPU-seconds → cost</text>
   <rect x="366" y="54" width="170" height="92" {_box}/>
-  <text x="380" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">2 · </tspan>Harvest</text>
-  <text x="380" y="105" font-size="11" fill="var(--muted)">make_predictions</text>
-  <text x="380" y="121" font-size="11" fill="var(--muted)">collect the diffs</text>
+  <text x="380" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">2 · </tspan>Capture</text>
+  <text x="380" y="105" font-size="11" fill="var(--muted)">model.patch</text>
+  <text x="380" y="121" font-size="11" fill="var(--muted)">collect the diff</text>
   <rect x="556" y="54" width="170" height="92" {_box}/>
   <text x="570" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">3 · </tspan>Grade</text>
-  <text x="570" y="105" font-size="11" fill="var(--muted)">Modal · x86 Docker</text>
-  <text x="570" y="121" font-size="11" fill="var(--muted)">run project tests</text>
-  <text x="641" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">official pass / fail</text>
+  <text x="570" y="105" font-size="11" fill="var(--muted)">local Docker</text>
+  <text x="570" y="121" font-size="11" fill="var(--muted)">task's own verifier</text>
+  <text x="641" y="170" text-anchor="middle" font-size="10.5" fill="var(--good)">resolved / unresolved</text>
   <rect x="746" y="54" width="170" height="92" {_box}/>
   <text x="760" y="84" font-size="13.5" font-weight="700" fill="var(--fg)"><tspan fill="var(--accent)">4 · </tspan>Report</text>
   <text x="760" y="105" font-size="11" fill="var(--muted)">aggregate</text>
@@ -1246,19 +1246,18 @@ Each <b>setup</b> is a harness, a model, and a reasoning effort. This run is {ru
   <line x1="728" y1="100" x2="744" y2="100" stroke="var(--muted)" stroke-width="1.6" marker-end="url(#arw)"/>
 </svg>
 </div>
-<p class="note"><b>1 · Generate.</b> <code>bench.sh</code> hands each agent the bug report and the code,
-and it writes a fix. We track how many seconds the model spends generating; that time, at the GPU's
-hourly rate, is the cost. <b>2 · Harvest.</b> <code>make_predictions.py</code> pulls each attempt's
-change (a git diff). <b>3 · Grade (in the cloud).</b> <code>swe_eval_modal.py</code> runs each fix inside
-that project's official SWE-bench Docker image, which has the exact old Python and dependencies it needs,
-then runs the project's real test suite. A fix passes only if every target test <i>and</i> every
-already-passing test still pass. <b>4 · Report.</b> <code>aggregate.py</code> divides the cost by the
-fixes that actually worked.</p>
-<p class="note"><b>Why two machines?</b> Writing the fix needs the model, which is fast and runs on your
-laptop. Grading a years-old project needs its exact environment, and that only lives in the project's
-container, so grading runs in the cloud. It's the same approach the official SWE-bench uses, so our
-pass/fail matches the published standard. Every task also ships a known-good <i>gold</i> fix, and we
-check that the grader marks it as passing before we trust the task.</p>
+<p class="note"><b>1 · Generate.</b> Each agent runs inside the task's own Docker image, gets the bug
+report and the code, and writes a fix. We track how many seconds the model spends generating; that time,
+at the GPU's hourly rate, is the cost. <b>2 · Capture.</b> The agent's change is collected as a git diff
+(<code>model.patch</code>). <b>3 · Grade.</b> The patch is applied in a fresh container off the same
+image — a pristine copy of the project with the exact tools and dependencies it needs — and the task's
+own hidden verifier runs the project's real test suite. A fix is <i>resolved</i> only if every target
+test <i>and</i> every already-passing test still pass. <b>4 · Report.</b> <code>aggregate.py</code>
+divides the cost by the fixes that actually worked.</p>
+<p class="note"><b>Where grading runs.</b> The fix is written by the model, but grading a years-old
+project needs its exact environment — and that lives in the task's prebuilt image, so grading runs
+locally in a fresh container off that same image (no model, no cloud). Every task also ships a
+known-good <i>gold</i> fix, and we check that the grader marks it as passing before we trust the task.</p>
 <p class="note"><b>What we change:</b> the reasoning effort (default, high, off). Nothing else differs
 between models. <b>How cost is counted:</b> for self-hosted GLM it's GPU-seconds times the hourly rate;
 for Claude it's tokens times list price. <b>&ldquo;Sole&rdquo;</b> means one task at a time on the

@@ -10,7 +10,7 @@ set -euo pipefail
 
 NAME="${MODAL_ENDPOINT_NAME:-Modal-Auto-Endpoints}"
 MODEL="${GLM_MODEL:-zai-org/GLM-5.2-FP8}"
-VOLUME="${GLM_VOLUME:-/glm-5-2-weights}"
+VOLUME="${GLM_VOLUME:-glm-5-2-weights}"
 VOLUME_PATH="${GLM_VOLUME_PATH:-/zai-org/GLM-5.2-FP8}"
 ENV_NAME="${MODAL_ENV:-main}"
 ENV_FILE=".env"
