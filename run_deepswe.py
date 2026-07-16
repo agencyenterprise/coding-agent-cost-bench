@@ -177,31 +177,46 @@ def run_job(setup, task, run, args, env, out_dir, work_dir):
     t1 = time.time()
 
     trial = find_trial(jobdir)
+    # Every job keeps a small, readable <out>/<label>/ with just the essentials; the pier console
+    # log goes here too (the diagnostic when a job fails).
+    outdir = os.path.join(out_dir, label)
+    os.makedirs(outdir, exist_ok=True)
+    try:
+        shutil.copy(job_log, os.path.join(outdir, "pier.log"))
+    except OSError:
+        pass
+
     if trial is None:
-        try:
-            tail = Path(job_log).read_text().strip().splitlines()[-3:]
-        except Exception:
-            tail = []
+        tail = (Path(job_log).read_text().strip().splitlines()[-3:]
+                if os.path.exists(job_log) else [])
         log(f"[FAIL ] {label} — no trial produced ({t1 - t0:.0f}s): {' / '.join(tail)}")
         status, reward = "error", None
-        outdir = ""
     else:
         status, reward = read_reward(trial)
-        # copy the agent log to <out>/<label>/output.log so aggregate.py can parse it
-        outdir = os.path.join(out_dir, label)
-        os.makedirs(outdir, exist_ok=True)
         agent_logs = sorted(glob.glob(str(trial / "agent" / "*.txt")))
         if agent_logs:
-            shutil.copy(agent_logs[0], os.path.join(outdir, "output.log"))
+            shutil.copy(agent_logs[0], os.path.join(outdir, "output.log"))   # aggregate.py parses this
             if SETUPS[setup]["agent"] == "opencode":
                 usage = usage_from_opencode_log(os.path.join(outdir, "output.log"))
                 if usage:
                     with open(os.path.join(outdir, "usage.json"), "w") as f:
                         json.dump(usage, f)
-        # keep the reward + config next to the log for auditing
+        if (trial / "artifacts" / "model.patch").exists():   # small; the empty-patch diagnostic
+            shutil.copy(trial / "artifacts" / "model.patch", os.path.join(outdir, "model.patch"))
         if (trial / "verifier" / "reward.json").exists():
             shutil.copy(trial / "verifier" / "reward.json", os.path.join(outdir, "reward.json"))
         log(f"[done ] {label} — {status} (reward={reward}) {t1 - t0:.0f}s")
+
+    # Keep ONLY those copied artifacts. Delete pier's scratch: the bulky, permission-locked trial
+    # tree (task-container fs, agent sessions, verifier internals) plus the temp config/console log
+    # in work_dir. Runs as root in the image, so the container-owned session files are removable;
+    # ignore_errors covers the raw-on-host case.
+    shutil.rmtree(jobdir, ignore_errors=True)
+    for f in (cfg_path, job_log):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
 
     return {
         "task": task, "harness": SETUPS[setup]["harness"], "model": SETUPS[setup]["model"],

@@ -11,20 +11,24 @@ Pass/fail comes from each run's reward.json (reward == 1 => pass). Effort signal
 aggregate.task_complexity — the SAME min-max-normalized 0-10 score used elsewhere.
 
 Two tables:
-  * Per-model: Pass / Fail / Pass Rate + Avg Complexity (mean task complexity over
-    that model's runs — how hard, on average, the tasks it ran were).
+  * Per-model: Pass / Fail / Pass Rate, grouped by TASK — a task counts as a pass if the
+    model solved it in at least one run (pass@k over its runs), not per individual run.
   * Per-task:  Complexity + Pass / Fail / Pass Rate pooled across all models.
 
-Usage: python3 model_complexity_report.py [RUN_DIR]
-  RUN_DIR defaults to the newest folder under .docs/results/.
+Usage: python3 benchmark_progress_report.py [RUN_DIR] [--no-billing]
+  RUN_DIR defaults to the newest folder under results/. Runs billing.py first so the
+  cost column is the real GLM bill; pass --no-billing to skip that (uses modeled cost).
 """
 import json
 import os
+import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 import aggregate  # reuse claude_stats / log_stats / task_complexity
+
+HERE = Path(__file__).resolve().parent   # to locate billing.py alongside this script
 
 # dir-name model prefix -> display label (matches the report image)
 MODEL_LABEL = {
@@ -79,6 +83,19 @@ def is_pass(rundir):
         return False
 
 
+def glm_rate(run_dir):
+    """GLM $/hr for costing. Uses the REAL effective hourly from billing.json (the GLM-only actual
+    Modal bill ÷ GLM-active hours) when it exists; otherwise falls back to aggregate's modeled rate.
+    Returns (rate_per_hour, is_real)."""
+    try:
+        bj = json.load(open(os.path.join(run_dir, "billing.json")))
+        if bj.get("effective_hourly"):
+            return float(bj["effective_hourly"]), True
+    except Exception:
+        pass
+    return aggregate.GPU_HOURLY_USD, False
+
+
 def collect(run_dir):
     """Walk run_dir's top-level run folders -> per-run records, pooled task_stat, and a
     per-(task, model) [passes, total] cell map for the matrix."""
@@ -87,6 +104,7 @@ def collect(run_dir):
     task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0,
                                      "pass": 0, "cost": 0.0, "cost_n": 0})
     cell = defaultdict(lambda: [0, 0])   # (task, model) -> [passes, total]
+    rate_hr, cost_is_real = glm_rate(run_dir)   # real $/hr from billing.json when present
     for entry in sorted(os.listdir(run_dir)):
         rundir = os.path.join(run_dir, entry)
         if not os.path.isdir(rundir) or not os.path.exists(os.path.join(rundir, "reward.json")):
@@ -97,7 +115,7 @@ def collect(run_dir):
         dur = run_duration_s(rundir, is_claude)
         # Claude reports its own $ (None if the run was killed before its result event);
         # GLM is self-hosted -> $ = API-call seconds x GPU rate.
-        cost = pm.get("cost") if is_claude else aggregate.gpu_call_cost(pm["call_s"])
+        cost = pm.get("cost") if is_claude else (pm["call_s"] / 3600.0 * rate_hr)
         passed = is_pass(rundir)
         runs.append({"model": model, "task": task, "passed": passed})
         a = task_stat[task]
@@ -110,7 +128,7 @@ def collect(run_dir):
         c = cell[(task, model)]
         c[1] += 1
         c[0] += 1 if passed else 0
-    return runs, task_stat, cell
+    return runs, task_stat, cell, cost_is_real
 
 
 def _table(headers, rows, aligns):
@@ -178,11 +196,10 @@ def write_html(path, run_dir, runs, model_rows, comp, cell):
 
     # per-model rows
     mbody = ""
-    for label, p, f, rate, avgc in model_rows:
+    for label, p, f, rate in model_rows:
         frac = (p / (p + f)) if (p + f) else 0
         mbody += (f"<tr><td><b>{esc(label)}</b></td><td class=num>{p}</td><td class=num>{f}</td>"
-                  f"<td class=num>{esc(rate)}<span class=bar><i style='width:{frac*100:.0f}%'></i></span></td>"
-                  f"<td class=num>{esc(avgc)}</td></tr>")
+                  f"<td class=num>{esc(rate)}<span class=bar><i style='width:{frac*100:.0f}%'></i></span></td></tr>")
 
     # per-task rows
     tbody = ""
@@ -210,9 +227,9 @@ def write_html(path, run_dir, runs, model_rows, comp, cell):
 <h1>Benchmark progress <span style="color:var(--muted);font-weight:400">· interim</span></h1>
 <p class=sub>{esc(run_dir)} · {len(runs)} runs so far · {len(comp)} tasks</p>
 
-<h2>Per model — pass / fail and average task complexity</h2>
+<h2>Per model — tasks solved (passed in ≥1 run) / unsolved</h2>
 <div class=tw><table><thead><tr><th>Model</th><th class=num>Pass</th><th class=num>Fail</th>
-<th class=num>Pass rate</th><th class=num>Avg complexity</th></tr></thead><tbody>{mbody}</tbody></table></div>
+<th class=num>Pass rate</th></tr></thead><tbody>{mbody}</tbody></table></div>
 
 <h2>Per task — complexity (0–10, hardest first) and pass / fail across all models</h2>
 <div class=tw><table><thead><tr><th>Task</th><th class=num>Complexity</th><th class=num>Pass</th>
@@ -235,31 +252,43 @@ still be running). Generated by benchmark_progress_report.py.</footer>
 
 
 def main():
+    argv = [a for a in sys.argv[1:] if a != "--no-billing"]
+    no_billing = "--no-billing" in sys.argv
     default = None
     base = Path("results")
     if base.is_dir():
         subs = sorted((p for p in base.iterdir() if p.is_dir()), reverse=True)
         default = str(subs[0]) if subs else None
-    run_dir = sys.argv[1] if len(sys.argv) > 1 else default
+    run_dir = argv[0] if argv else default
     if not run_dir or not os.path.isdir(run_dir):
         sys.exit(f"run dir not found: {run_dir!r} — pass one as an argument")
 
-    runs, task_stat, cell = collect(run_dir)
+    # Refresh billing.json first so the cost column reflects the REAL GLM bill. Best-effort: needs
+    # modal + Modal creds (MODAL_TOKEN_ID/SECRET). Safe mid-run — it reads a manifest snapshot and
+    # bills only GLM-active time so far. On any failure the report falls back to modeled cost.
+    if not no_billing:
+        try:
+            subprocess.run([sys.executable, str(HERE / "billing.py"), "--results-dir", run_dir],
+                           check=False)
+        except Exception as e:
+            print(f"(billing refresh skipped: {e})")
+
+    runs, task_stat, cell, cost_is_real = collect(run_dir)
     if not runs:
         sys.exit(f"no run folders (with reward.json) under {run_dir}")
 
     comp = aggregate.task_complexity(task_stat)   # {task: {complexity, pass_rate, ...}}
-    task_complexity = {t: comp[t]["complexity"] for t in comp}
 
     print(f"\nRun: {run_dir}   ({len(runs)} runs, {len(task_stat)} tasks)\n")
 
-    # ---- per-model table ----
-    per_model = defaultdict(lambda: {"pass": 0, "fail": 0, "comp_sum": 0.0, "n": 0})
+    # ---- per-model table: pass@k — a TASK counts as pass if the model solved it in ANY of its runs
+    # (fail,fail,fail,pass -> pass; fail,fail,fail -> fail). So Pass/Fail count tasks, not runs. ----
+    solved = defaultdict(bool)   # (model, task) -> solved in at least one run
     for r in runs:
-        m = per_model[r["model"]]
-        m["pass" if r["passed"] else "fail"] += 1
-        m["comp_sum"] += task_complexity.get(r["task"], 0.0)
-        m["n"] += 1
+        solved[(r["model"], r["task"])] |= bool(r["passed"])
+    per_model = defaultdict(lambda: {"pass": 0, "fail": 0})
+    for (model, _task), ok in solved.items():
+        per_model[model]["pass" if ok else "fail"] += 1
     rows = []
     for model in MODEL_ORDER + [m for m in per_model if m not in MODEL_ORDER]:
         if model not in per_model:
@@ -269,10 +298,8 @@ def main():
         rows.append([
             MODEL_LABEL.get(model, model), s["pass"], s["fail"],
             f"{100 * s['pass'] / tot:.1f}%" if tot else "-",
-            f"{s['comp_sum'] / s['n']:.1f}" if s["n"] else "-",
         ])
-    _table(["Model", "Pass", "Fail", "Pass Rate", "Avg Complexity"], rows,
-           ["l", "r", "r", "r", "r"])
+    _table(["Model", "Pass", "Fail", "Pass Rate"], rows, ["l", "r", "r", "r"])
 
     # ---- per-task table (hardest first) ----
     print()
@@ -298,12 +325,13 @@ def main():
             w.writerow([task, comp[task]["complexity"], a["runs"], a["pass"],
                         round(100 * a["pass"] / max(a["runs"], 1), 1),
                         round(avg_cost, 2) if avg_cost != "" else ""])
-    print(f"csv:    {csv_path}")
+    _basis = "real (billing.json)" if cost_is_real else f"modeled {aggregate.GPU_HOURLY_USD:.1f}/hr"
+    print(f"csv:    {csv_path}  (avg_cost_usd basis: {_basis})")
 
-    # ---- HTML report (same three tables as the chat visualization) ----
-    out = os.path.join(run_dir, "report.html")
+    # ---- HTML report (its own filename so it never clobbers aggregate.py's report.html) ----
+    out = os.path.join(run_dir, "progress_report.html")
     write_html(out, run_dir, runs, rows, comp, cell)
-    print(f"report: {out}")
+    print(f"report: {out}")   # progress_report.html — separate from aggregate.py's report.html
     if sys.stdout.isatty():
         import webbrowser
         webbrowser.open(Path(out).resolve().as_uri())
