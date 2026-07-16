@@ -118,7 +118,10 @@ def collect(run_dir):
         # GLM is self-hosted -> $ = API-call seconds x GPU rate.
         cost = pm.get("cost") if is_claude else (pm["call_s"] / 3600.0 * rate_hr)
         passed = is_pass(rundir)
-        runs.append({"model": model, "task": task, "passed": passed, "cost": cost})
+        # per-run generation windows (GLM only) so main() can split the real bill by concurrency
+        ivs = [] if is_claude else aggregate.gen_intervals(rundir)
+        runs.append({"model": model, "task": task, "passed": passed, "cost": cost,
+                     "label": entry, "ivs": ivs})
         a = task_stat[task]
         a["runs"] += 1
         a["steps"] += pm["steps"]; a["tools"] += pm["tools"]; a["out"] += pm["out"]
@@ -303,36 +306,43 @@ def main():
     if not runs:
         sys.exit(f"no run folders (with reward.json) under {run_dir}")
 
-    # ---- rescale GLM runs to the REAL endpoint bill ----------------------------------------------
-    # collect() prices each GLM run "sole": its generation-seconds × the hourly GPU rate, as if it were
-    # alone on the endpoint. But the endpoint is SHARED — several GLM runs stream at once — so the sole
-    # sum over-counts the same GPU-seconds by the concurrency factor (~4–5×). The real Modal bill
-    # (billing.json `cost`, already prorated to GLM-active time) is the ground truth. Scale every GLM
-    # run by (real bill ÷ sole sum) so the per-setup Total $ reconcile to the actual bill; each run keeps
-    # its share of the generation. Opus is per-token (already the real charge) and is left untouched.
+    # ---- attribute the REAL endpoint bill to GLM runs by concurrency -----------------------------
+    # collect() priced each GLM run "sole" (its own generation-seconds × rate). But the endpoint is
+    # SHARED: several runs stream at once, and Modal bills the GPU wall-clock ONCE, not per concurrent
+    # request. So we re-price GLM the way aggregate.py does: split every generating second among the
+    # runs busy in that instant (attribute_cost) — a run that ran mostly alone keeps more of the bill
+    # than one buried in a pack; the sum over runs is exactly rate × union(generation windows), never
+    # double-counted for parallelism. The per-second rate is PINNED so the GLM total equals the real
+    # bill (billing.json `cost`) to the cent when it exists; otherwise it falls back to the modeled GPU
+    # rate (still concurrency-split). Opus is per-token (its own real charge) and is left untouched.
+    owned = [(s, e, r["label"]) for r in runs if r["model"] != "opus" for (s, e) in r["ivs"]]
+    gen_union = aggregate.union_seconds([(s, e) for (s, e, _o) in owned])
+    bill = None
     if cost_is_real:
-        bill = None
         try:
             with open(os.path.join(run_dir, "billing.json")) as bf:
                 bill = float(json.load(bf)["cost"])
         except Exception as e:
-            print(f"(billing.json cost not read — GLM costs left sole: {e})")
-        glm_sole = sum(r["cost"] for r in runs
-                       if r["model"] != "opus" and r.get("cost") is not None)
-        if bill and glm_sole > 0:
-            scale = bill / glm_sole
-            for r in runs:
-                if r["model"] != "opus" and r.get("cost") is not None:
-                    r["cost"] *= scale
-            # rebuild task_stat's per-task cost from the rescaled runs so the difficulty csv agrees
-            for a in task_stat.values():
-                a["cost"], a["cost_n"] = 0.0, 0
-            for r in runs:
-                if r.get("cost") is not None:
-                    a = task_stat[r["task"]]
-                    a["cost"] += r["cost"]; a["cost_n"] += 1
-            print(f"(GLM cost rescaled ×{scale:.3f}: sole ${glm_sole:.2f} → real ${bill:.2f} "
-                  f"— shared endpoint, from billing.json)")
+            print(f"(billing.json cost not read — using modeled rate: {e})")
+    if gen_union > 0:
+        rate_per_sec = (bill / gen_union) if bill else (aggregate.GPU_HOURLY_USD / 3600.0)
+        billed = aggregate.attribute_cost(owned, rate_per_sec)   # {run label: $}, sums to rate×gen_union
+        for r in runs:
+            if r["model"] != "opus":
+                r["cost"] = billed.get(r["label"], 0.0)
+        # rebuild task_stat's per-task cost from the attributed run costs so the difficulty csv agrees
+        for a in task_stat.values():
+            a["cost"], a["cost_n"] = 0.0, 0
+        for r in runs:
+            if r.get("cost") is not None:
+                a = task_stat[r["task"]]
+                a["cost"] += r["cost"]; a["cost_n"] += 1
+        _attr = sum(billed.values())
+        _src = f"real bill ${bill:.2f}" if bill else f"modeled ${aggregate.GPU_HOURLY_USD:.0f}/hr"
+        print(f"(GLM cost = {_src} split across runs by concurrency: {rate_per_sec*3600:.1f}/hr over "
+              f"{gen_union/3600:.2f}h generating → attributed ${_attr:.2f})")
+    else:
+        print("(no GLM generation windows parsed — keeping modeled sole cost)")
 
     comp = aggregate.task_complexity(task_stat)   # {task: {complexity, pass_rate, ...}}
 
