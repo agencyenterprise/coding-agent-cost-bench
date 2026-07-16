@@ -517,9 +517,12 @@ def write_html(path, run_dir, runs, model_rows, comp, cell, cost_is_real=False,
 
     # per-run rows (cost breakdown — every attempt, not grouped by task)
     rbody = ""
-    for label, n, p, fl, total, passc, failc, perpass in (run_rows or []):
+    for label, n, p, fl, passrate, total, passc, failc, perpass in (run_rows or []):
+        frac = (p / n) if n else 0
         rbody += (f"<tr><td><b>{esc(label)}</b></td><td class=num>{n}</td><td class=num>{p}</td>"
-                  f"<td class=num>{fl}</td><td class=num>{esc(total)}</td>"
+                  f"<td class=num>{fl}</td>"
+                  f"<td class=num>{esc(passrate)}<span class=bar><i style='width:{frac*100:.0f}%'></i></span></td>"
+                  f"<td class=num>{esc(total)}</td>"
                   f"<td class=num>{esc(passc)}</td><td class=num>{esc(failc)}</td>"
                   f"<td class=num>{esc(perpass)}</td></tr>")
 
@@ -552,13 +555,13 @@ def write_html(path, run_dir, runs, model_rows, comp, cell, cost_is_real=False,
 
 <h2>Per model — tasks solved (passed in ≥1 run) / unsolved + cost</h2>
 <div class=tw><table><thead><tr><th>Model</th><th class=num>Pass</th><th class=num>Fail</th>
-<th class=num>Pass rate</th><th class=num>Total $</th><th class=num>Avg $/run</th><th class=num>$/solve</th></tr></thead><tbody>{mbody}</tbody></table></div>
-<p style="color:var(--muted);font-size:12px;margin:8px 2px 0"><b>Total&nbsp;$</b> = sum over all its runs · <b>Avg&nbsp;$/run</b> = Total ÷ number of runs (mean cost of one attempt) · <b>$/solve</b> = Total ÷ tasks solved (pass@k) — so it folds in the failed attempts.</p>
+<th class=num>pass@k</th><th class=num>Total $</th><th class=num>Avg $/run</th><th class=num>$/solve</th></tr></thead><tbody>{mbody}</tbody></table></div>
+<p style="color:var(--muted);font-size:12px;margin:8px 2px 0"><b>pass@k</b> = tasks solved in ≥1 of their (≈4) runs ÷ total tasks — best-of-k, retries allowed · <b>Total&nbsp;$</b> = sum over all its runs · <b>Avg&nbsp;$/run</b> = Total ÷ number of runs (mean cost of one attempt) · <b>$/solve</b> = Total ÷ tasks solved (pass@k) — so it folds in the failed attempts.</p>
 
 <h2>Per model — per run: cost breakdown (every attempt, not grouped by task)</h2>
 <div class=tw><table><thead><tr><th>Model</th><th class=num>Runs</th><th class=num>Pass</th>
-<th class=num>Fail</th><th class=num>Total $</th><th class=num>$ pass</th><th class=num>$ fail</th><th class=num>$/pass&nbsp;run</th></tr></thead><tbody>{rbody}</tbody></table></div>
-<p style="color:var(--muted);font-size:12px;margin:8px 2px 0"><b>Total&nbsp;$</b> = all runs = <b>$&nbsp;pass</b> (spent on passing runs) + <b>$&nbsp;fail</b> (burned on failing runs) · <b>$/pass&nbsp;run</b> = Total ÷ passing runs — the all-in cost of one successful attempt, with the failed retries folded in.</p>
+<th class=num>Fail</th><th class=num>pass@1</th><th class=num>Total $</th><th class=num>$ pass</th><th class=num>$ fail</th><th class=num>$/pass&nbsp;run</th></tr></thead><tbody>{rbody}</tbody></table></div>
+<p style="color:var(--muted);font-size:12px;margin:8px 2px 0"><b>pass@1</b> = passing runs ÷ total runs — the single-shot success rate (each attempt scored on its own; this is the DeepSWE-comparable number) · <b>Total&nbsp;$</b> = all runs = <b>$&nbsp;pass</b> (spent on passing runs) + <b>$&nbsp;fail</b> (burned on failing runs) · <b>$/pass&nbsp;run</b> = Total ÷ passing runs — the all-in cost of one successful attempt, with the failed retries folded in.</p>
 
 <h2>Per task — complexity (0–10, hardest first) and pass / fail across all models</h2>
 <div class=tw><table><thead><tr><th>Task</th><th class=num>Complexity</th><th class=num>Pass</th>
@@ -699,6 +702,7 @@ def main():
         n, p = rs["runs"], rs["pass"]
         run_rows.append([
             MODEL_LABEL.get(model, model), n, p, n - p,
+            f"{100 * p / n:.1f}%" if n else "-",            # pass@1: passing runs ÷ runs (single-shot)
             f"${rs['total']:.2f}",                          # Total $ (all runs) = $ pass + $ fail
             f"${rs['pass_c']:.2f}",                         # $ that went into passing runs
             f"${rs['fail_c']:.2f}",                         # $ burned on failing runs
