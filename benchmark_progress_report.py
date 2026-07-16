@@ -79,6 +79,19 @@ def is_pass(rundir):
         return False
 
 
+def glm_rate(run_dir):
+    """GLM $/hr for costing. Uses the REAL effective hourly from billing.json (the GLM-only actual
+    Modal bill ÷ GLM-active hours) when it exists; otherwise falls back to aggregate's modeled rate.
+    Returns (rate_per_hour, is_real)."""
+    try:
+        bj = json.load(open(os.path.join(run_dir, "billing.json")))
+        if bj.get("effective_hourly"):
+            return float(bj["effective_hourly"]), True
+    except Exception:
+        pass
+    return aggregate.GPU_HOURLY_USD, False
+
+
 def collect(run_dir):
     """Walk run_dir's top-level run folders -> per-run records, pooled task_stat, and a
     per-(task, model) [passes, total] cell map for the matrix."""
@@ -87,6 +100,7 @@ def collect(run_dir):
     task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0,
                                      "pass": 0, "cost": 0.0, "cost_n": 0})
     cell = defaultdict(lambda: [0, 0])   # (task, model) -> [passes, total]
+    rate_hr, cost_is_real = glm_rate(run_dir)   # real $/hr from billing.json when present
     for entry in sorted(os.listdir(run_dir)):
         rundir = os.path.join(run_dir, entry)
         if not os.path.isdir(rundir) or not os.path.exists(os.path.join(rundir, "reward.json")):
@@ -97,7 +111,7 @@ def collect(run_dir):
         dur = run_duration_s(rundir, is_claude)
         # Claude reports its own $ (None if the run was killed before its result event);
         # GLM is self-hosted -> $ = API-call seconds x GPU rate.
-        cost = pm.get("cost") if is_claude else aggregate.gpu_call_cost(pm["call_s"])
+        cost = pm.get("cost") if is_claude else (pm["call_s"] / 3600.0 * rate_hr)
         passed = is_pass(rundir)
         runs.append({"model": model, "task": task, "passed": passed})
         a = task_stat[task]
@@ -110,7 +124,7 @@ def collect(run_dir):
         c = cell[(task, model)]
         c[1] += 1
         c[0] += 1 if passed else 0
-    return runs, task_stat, cell
+    return runs, task_stat, cell, cost_is_real
 
 
 def _table(headers, rows, aligns):
@@ -243,7 +257,7 @@ def main():
     if not run_dir or not os.path.isdir(run_dir):
         sys.exit(f"run dir not found: {run_dir!r} — pass one as an argument")
 
-    runs, task_stat, cell = collect(run_dir)
+    runs, task_stat, cell, cost_is_real = collect(run_dir)
     if not runs:
         sys.exit(f"no run folders (with reward.json) under {run_dir}")
 
@@ -295,12 +309,13 @@ def main():
             w.writerow([task, comp[task]["complexity"], a["runs"], a["pass"],
                         round(100 * a["pass"] / max(a["runs"], 1), 1),
                         round(avg_cost, 2) if avg_cost != "" else ""])
-    print(f"csv:    {csv_path}")
+    _basis = "real (billing.json)" if cost_is_real else f"modeled {aggregate.GPU_HOURLY_USD:.1f}/hr"
+    print(f"csv:    {csv_path}  (avg_cost_usd basis: {_basis})")
 
-    # ---- HTML report (same three tables as the chat visualization) ----
-    out = os.path.join(run_dir, "report.html")
+    # ---- HTML report (its own filename so it never clobbers aggregate.py's report.html) ----
+    out = os.path.join(run_dir, "progress_report.html")
     write_html(out, run_dir, runs, rows, comp, cell)
-    print(f"report: {out}")
+    print(f"report: {out}")   # progress_report.html — separate from aggregate.py's report.html
     if sys.stdout.isatty():
         import webbrowser
         webbrowser.open(Path(out).resolve().as_uri())
