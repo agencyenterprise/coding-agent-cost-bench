@@ -24,6 +24,7 @@ import json
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 
@@ -37,6 +38,21 @@ from pathlib import Path
 # when billing.json is absent (measured $50.7/hr from a single-run bill). Real runs override this with
 # the effective hourly derived from billing.json.
 GPU_HOURLY_USD = 50.7
+
+
+def load_usage(outdir):
+    """(tokens_in, tokens_out, ccusage_cost) for a run from usage.json. tokens_in TOTAL = fresh input
+    + cache-creation + cache-read (comparable across providers). Returns (0, 0, 0.0) if absent."""
+    try:
+        with open(os.path.join(outdir, "usage.json")) as f:
+            sessions = json.load(f).get("sessions", [])
+    except Exception:
+        return 0, 0, 0.0
+    tin = sum(int(s.get("inputTokens", 0) or 0) + int(s.get("cacheCreationTokens", 0) or 0)
+              + int(s.get("cacheReadTokens", 0) or 0) for s in sessions)
+    tout = sum(int(s.get("outputTokens", 0) or 0) for s in sessions)
+    cost = sum(float(s.get("totalCost", 0) or 0) for s in sessions)
+    return tin, tout, cost
 
 
 def log_stats(outdir):
@@ -417,8 +433,12 @@ def collect(run_dir):
         passed = is_pass(rundir)
         # per-run generation windows (GLM only) so main() can split the real bill by concurrency
         ivs = [] if is_claude else gen_intervals(rundir)
-        runs.append({"model": model, "task": task, "passed": passed, "cost": cost,
-                     "label": entry, "ivs": ivs})
+        tin = pm["tin"] if is_claude else load_usage(rundir)[0]   # tokens_in (opus native / GLM ccusage)
+        runs.append({"model": model, "task": task, "run": _run, "passed": passed, "cost": cost,
+                     "label": entry, "ivs": ivs,
+                     # 'sole' = this run priced ALONE (before the concurrency split overwrites 'cost');
+                     # keeps the per_run.csv sole_usd column and the summary sole totals.
+                     "sole": cost, "elapsed": dur, "steps": pm["steps"], "tin": tin, "tout": pm["out"]})
         a = task_stat[task]
         a["runs"] += 1
         a["steps"] += pm["steps"]; a["tools"] += pm["tools"]; a["out"] += pm["out"]
@@ -432,20 +452,9 @@ def collect(run_dir):
     return runs, task_stat, cell, cost_is_real
 
 
-def _table(headers, rows, aligns):
-    """Minimal fixed-width text table. aligns: 'l' or 'r' per column."""
-    cols = list(zip(*([headers] + rows))) if rows else [[h] for h in headers]
-    widths = [max(len(str(c)) for c in col) for col in cols]
-
-    def fmt(cells):
-        return "  ".join(
-            str(c).ljust(w) if al == "l" else str(c).rjust(w)
-            for c, w, al in zip(cells, widths, aligns))
-    line = "-" * (sum(widths) + 2 * (len(widths) - 1))
-    print(fmt(headers))
-    print(line)
-    for r in rows:
-        print(fmt(r))
+def _step(i, n, msg):
+    """One-line console progress: [ date ] i/n msg (done)."""
+    print(f"[ {datetime.now():%Y-%m-%d %H:%M:%S} ] {i}/{n} {msg} (done)", flush=True)
 
 
 _HTML_CSS = """
@@ -589,21 +598,22 @@ def main():
     if not run_dir or not os.path.isdir(run_dir):
         sys.exit(f"run dir not found: {run_dir!r} — pass one as an argument")
 
+    STEPS = 5  # billing → collect → costs → csv → html  (tables live in HTML only)
+
     # Refresh billing.json first so the cost column reflects the REAL GLM bill. Best-effort: needs
     # modal + Modal creds (MODAL_TOKEN_ID/SECRET). Safe mid-run — it reads a manifest snapshot and
     # bills only GLM-active time so far. On any failure the report falls back to modeled cost.
     if not no_billing:
         try:
-            b = refresh_billing(run_dir)
-            if b:
-                print(f"GLM endpoint billed for GLM-active time: ${b['cost']:.2f} over "
-                      f"{b['window_hours']:.2f}h (~${b['effective_hourly']}/hr while serving)")
-        except Exception as e:
-            print(f"(billing refresh skipped: {e})")
+            refresh_billing(run_dir)
+        except Exception:
+            pass
+    _step(1, STEPS, "billing")
 
     runs, task_stat, cell, cost_is_real = collect(run_dir)
     if not runs:
         sys.exit(f"no run folders (with reward.json) under {run_dir}")
+    _step(2, STEPS, f"collect {len(runs)} runs / {len(task_stat)} tasks")
 
     # ---- attribute the REAL endpoint bill to GLM runs by concurrency -----------------------------
     # collect() priced each GLM run "sole" (its own generation-seconds × rate). But the endpoint is
@@ -621,8 +631,8 @@ def main():
         try:
             with open(os.path.join(run_dir, "billing.json")) as bf:
                 bill = float(json.load(bf)["cost"])
-        except Exception as e:
-            print(f"(billing.json cost not read — using modeled rate: {e})")
+        except Exception:
+            pass
     if gen_union > 0:
         rate_per_sec = (bill / gen_union) if bill else (GPU_HOURLY_USD / 3600.0)
         billed = attribute_cost(owned, rate_per_sec)   # {run label: $}, sums to rate×gen_union
@@ -636,16 +646,9 @@ def main():
             if r.get("cost") is not None:
                 a = task_stat[r["task"]]
                 a["cost"] += r["cost"]; a["cost_n"] += 1
-        _attr = sum(billed.values())
-        _src = f"real bill ${bill:.2f}" if bill else f"modeled ${GPU_HOURLY_USD:.0f}/hr"
-        print(f"(GLM cost = {_src} split across runs by concurrency: {rate_per_sec*3600:.1f}/hr over "
-              f"{gen_union/3600:.2f}h generating → attributed ${_attr:.2f})")
-    else:
-        print("(no GLM generation windows parsed — keeping modeled sole cost)")
+    _step(3, STEPS, "attribute costs")
 
     comp = task_complexity(task_stat)   # {task: {complexity, pass_rate, ...}}
-
-    print(f"\nRun: {run_dir}   ({len(runs)} runs, {len(task_stat)} tasks)\n")
 
     # ---- per-model table: pass@k — a TASK counts as pass if the model solved it in ANY of its runs
     # (fail,fail,fail,pass -> pass; fail,fail,fail -> fail). So Pass/Fail count tasks, not runs. ----
@@ -676,10 +679,6 @@ def main():
             f"${cost / nruns:.2f}" if nruns else "-",           # $/Run: mean per attempt
             f"${cost / s['pass']:.2f}" if s["pass"] else "-",   # $/Solved: total ÷ tasks solved (pass@k)
         ])
-    _table(["Model", "Pass", "Fail", "Pass Rate", "Total $", "Avg $/run", "$/solve"], rows,
-           ["l", "r", "r", "r", "r", "r", "r"])
-    print("  Total $ = all runs · Avg $/run = Total ÷ runs (mean attempt) · "
-          "$/solve = Total ÷ tasks solved")
 
     # ---- per-model, per RUN (ungrouped): cost breakdown — where the money went, and $ per pass ----
     run_stat = defaultdict(lambda: {"runs": 0, "pass": 0, "total": 0.0, "pass_c": 0.0, "fail_c": 0.0})
@@ -705,22 +704,6 @@ def main():
             f"${rs['fail_c']:.2f}",                         # $ burned on failing runs
             f"${rs['total'] / p:.2f}" if p else "-",        # $/pass = Total ÷ passing runs
         ])
-    print()
-    _table(["Model", "Runs", "Pass", "Fail", "Total $", "$ pass", "$ fail", "$/pass run"], run_rows,
-           ["l", "r", "r", "r", "r", "r", "r", "r"])
-    print("  per RUN: Total $ = $ pass + $ fail · $/pass run = Total ÷ passing runs (all-in cost of one successful attempt, retries included)")
-
-    # ---- per-task table (hardest first) ----
-    print()
-    trows = []
-    for task in sorted(comp, key=lambda t: -comp[t]["complexity"]):
-        c = comp[task]
-        p = int(round(c["pass_rate"] * c["runs"]))
-        trows.append([task, f"{c['complexity']:.1f}", p, c["runs"] - p,
-                      f"{100 * c['pass_rate']:.1f}%"])
-    _table(["Task", "Complexity", "Pass", "Fail", "Pass Rate"], trows,
-           ["l", "r", "r", "r", "r"])
-    print()
 
     # ---- deepswe_task_difficulty.csv (into the run folder), hardest first ----
     csv_path = os.path.join(run_dir, "deepswe_task_difficulty.csv")
@@ -733,8 +716,47 @@ def main():
             w.writerow([task, comp[task]["complexity"], a["runs"], a["pass"],
                         round(100 * a["pass"] / max(a["runs"], 1), 1),
                         round(avg_cost, 2) if avg_cost != "" else ""])
-    _basis = "real (billing.json)" if cost_is_real else f"modeled {GPU_HOURLY_USD:.1f}/hr"
-    print(f"csv:    {csv_path}  (avg_cost_usd basis: {_basis})")
+
+    # ---- per_run.csv + summary.csv --------------------------------------------------------------
+    # Regenerated from THESE verified numbers, so they match the HTML tables and reconcile to the real
+    # bill (billed_usd sums to billing.json). 'billed_usd' = concurrency-split real cost; 'sole_usd' =
+    # the same run priced alone (the old inflated basis) — kept for comparison.
+    def _mord(m):
+        return MODEL_ORDER.index(m) if m in MODEL_ORDER else len(MODEL_ORDER)
+    pr_path = os.path.join(run_dir, "per_run.csv")
+    with open(pr_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["task", "setup", "run", "passed", "billed_usd", "sole_usd",
+                    "elapsed_s", "steps", "tokens_in", "tokens_out"])
+        for r in sorted(runs, key=lambda r: (_mord(r["model"]), r["task"], r["run"])):
+            w.writerow([r["task"], r["model"], r["run"], int(r["passed"]),
+                        "" if r["cost"] is None else round(r["cost"], 4),
+                        "" if r["sole"] is None else round(r["sole"], 4),
+                        round(r["elapsed"], 1), r["steps"], r["tin"], r["tout"]])
+    sole_tot = defaultdict(float)
+    for r in runs:
+        if r["sole"] is not None:
+            sole_tot[r["model"]] += r["sole"]
+    sm_path = os.path.join(run_dir, "summary.csv")
+    with open(sm_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["setup", "runs", "pass_runs", "run_pass_rate_pct", "tasks_solved", "tasks_total",
+                    "task_pass_rate_pct", "total_usd", "avg_usd_per_run", "usd_per_pass_run",
+                    "usd_per_task_solved", "total_sole_usd", "cost_basis"])
+        for m in MODEL_ORDER + [x for x in run_stat if x not in MODEL_ORDER]:
+            if m not in run_stat:
+                continue
+            rs = run_stat[m]
+            n, pr = rs["runs"], rs["pass"]
+            solved_t, tot_t = per_model[m]["pass"], per_model[m]["pass"] + per_model[m]["fail"]
+            tot = model_cost.get(m, 0.0)
+            basis = "claude_code" if m == "opus" else ("real" if cost_is_real else "modeled")
+            w.writerow([m, n, pr, round(100 * pr / n, 1) if n else "",
+                        solved_t, tot_t, round(100 * solved_t / tot_t, 1) if tot_t else "",
+                        round(tot, 4), round(tot / n, 4) if n else "",
+                        round(tot / pr, 4) if pr else "", round(tot / solved_t, 4) if solved_t else "",
+                        round(sole_tot.get(m, 0.0), 4), basis])
+    _step(4, STEPS, "write csv")
 
     # ---- concurrency: how many runs overlapped in time (packing on the shared box/endpoint) ----
     ivals = []
@@ -772,16 +794,15 @@ def main():
             takeaway += f" — {rel} than {MODEL_LABEL['opus']} (${o['ps']:.2f}/solve, {o['rate']:.0f}%)."
         else:
             takeaway += "."
-        print(f"\n{takeaway}")
-    print(f"concurrency: peak {peak_c} runs, avg {avg_c}× over the run")
 
     # ---- HTML report (its own filename so it never clobbers aggregate.py's report.html) ----
     out = os.path.join(run_dir, "progress_report.html")
     write_html(out, run_dir, runs, rows, comp, cell, cost_is_real, peak_c, avg_c, takeaway, run_rows)
-    print(f"report: {out}")   # progress_report.html — separate from aggregate.py's report.html
+    _step(5, STEPS, f"html → {out}")
     if sys.stdout.isatty():
         import webbrowser
         webbrowser.open(Path(out).resolve().as_uri())
+
 
 
 if __name__ == "__main__":

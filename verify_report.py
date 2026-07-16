@@ -125,6 +125,27 @@ def test_against_report(run_dir):
     opus_costs = [r["cost"] for r in runs if r["model"] == "opus" and r["cost"] is not None]
     check("opus costs present and non-negative", all(c >= -EPS for c in opus_costs) and opus_costs != [])
 
+    # 2e. exported CSVs (if the report has run) must reconcile to the bill and to each other
+    pr = os.path.join(run_dir, "per_run.csv")
+    sm = os.path.join(run_dir, "summary.csv")
+    if os.path.exists(pr) and os.path.exists(sm):
+        prows = list(csv.DictReader(open(pr)))
+        glm_billed = sum(float(r["billed_usd"]) for r in prows
+                         if r["setup"] != "opus" and r["billed_usd"] != "")
+        if bill:
+            check("per_run.csv GLM billed_usd sums to the bill", abs(glm_billed - bill) < CENT,
+                  f"csv ${glm_billed:.2f} vs bill ${bill:.2f}")
+        # summary.total_usd per setup == sum of that setup's per_run billed_usd
+        by_setup = defaultdict(float)
+        for r in prows:
+            if r["billed_usd"] != "":
+                by_setup[r["setup"]] += float(r["billed_usd"])
+        ok = True
+        for r in csv.DictReader(open(sm)):
+            if abs(float(r["total_usd"]) - by_setup.get(r["setup"], 0.0)) > CENT:
+                ok = False
+        check("summary.csv total_usd == per_run.csv sum, per setup", ok)
+
 
 def main():
     run_dir = sys.argv[1] if len(sys.argv) > 1 else None
