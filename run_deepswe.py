@@ -287,7 +287,12 @@ def main():
         futs = {ex.submit(run_job, s, t, r, args, env, run_dir, work_dir): (s, t, r)
                 for (s, t, r) in jobs}
         for fut in as_completed(futs):
-            row = fut.result()
+            s, t, r = futs[fut]
+            try:
+                row = fut.result()
+            except Exception as e:   # one job's failure (disk, docker, etc.) must never kill the run
+                log(f"[ERROR] {s}__{t}__run{r} — {type(e).__name__}: {e} (job dropped, run continues)")
+                row = None
             if row:
                 record(row)
             done += 1
