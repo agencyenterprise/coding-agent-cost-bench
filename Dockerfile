@@ -39,9 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        docker-ce-cli docker-compose-plugin docker-buildx-plugin \
     && rm -rf /var/lib/apt/lists/*
 
-# pier (DeepSWE runner + agent injector) and modal (real endpoint billing) — from requirements.txt
-# so the deps have one source of truth. Copied first for layer caching. pier pulls its own deps
-# (rich, typer, pyyaml, httpx, tenacity, …); run_deepswe.py / aggregate.py are stdlib-only.
+# pier (DeepSWE runner + agent injector) — from requirements.txt so the deps have one source of
+# truth. Copied first for layer caching. pier pulls its own deps (rich, typer, pyyaml, httpx,
+# tenacity, …); run_deepswe.py is stdlib-only. (Reporting + Modal billing run locally, not in-image,
+# via benchmark_progress_report.py.)
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
@@ -52,7 +53,7 @@ WORKDIR /app
 RUN curl -sL https://github.com/datacurve-ai/deep-swe/archive/refs/heads/main.tar.gz | tar xz
 ENV TASKS_DIR=/app/deep-swe-main/tasks
 
-COPY run_deepswe.py reasoning_proxy.py aggregate.py billing.py entrypoint.sh /app/
+COPY run_deepswe.py reasoning_proxy.py entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
 # Runs as root: needs the docker socket and to bind :80 for the sidecar. The agent (incl. Claude
