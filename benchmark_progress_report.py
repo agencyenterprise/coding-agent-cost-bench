@@ -19,6 +19,7 @@ Usage: python3 benchmark_progress_report.py [RUN_DIR] [--no-billing]
   RUN_DIR defaults to the newest folder under results/. Runs billing.py first so the
   cost column is the real GLM bill; pass --no-billing to skip that (uses modeled cost).
 """
+import csv
 import json
 import os
 import subprocess
@@ -117,7 +118,7 @@ def collect(run_dir):
         # GLM is self-hosted -> $ = API-call seconds x GPU rate.
         cost = pm.get("cost") if is_claude else (pm["call_s"] / 3600.0 * rate_hr)
         passed = is_pass(rundir)
-        runs.append({"model": model, "task": task, "passed": passed})
+        runs.append({"model": model, "task": task, "passed": passed, "cost": cost})
         a = task_stat[task]
         a["runs"] += 1
         a["steps"] += pm["steps"]; a["tools"] += pm["tools"]; a["out"] += pm["out"]
@@ -175,6 +176,7 @@ td.c{text-align:center}
 .bar>i{display:block;height:100%;background:#2a78d6}
 .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin:10px 2px 0}
 .sw{width:12px;height:12px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-2px}
+.take{background:var(--g-bg);color:var(--g-fg);border-radius:10px;padding:11px 15px;font-size:13.5px;font-weight:600;margin:0 0 18px}
 footer{color:var(--muted);font-size:12px;margin-top:40px}
 """
 
@@ -187,7 +189,8 @@ def _cell_cls(passes, total):
     return cls, f"{passes}/{total}"
 
 
-def write_html(path, run_dir, runs, model_rows, comp, cell):
+def write_html(path, run_dir, runs, model_rows, comp, cell, cost_is_real=False,
+               peak_c=0, avg_c=0.0, takeaway="", run_rows=None):
     """Self-contained report.html — the same three tables as the chat visualization."""
     import html as _h
     esc = lambda x: _h.escape(str(x))
@@ -196,10 +199,20 @@ def write_html(path, run_dir, runs, model_rows, comp, cell):
 
     # per-model rows
     mbody = ""
-    for label, p, f, rate in model_rows:
+    for label, p, f, rate, cost, per_run, per_solve in model_rows:
         frac = (p / (p + f)) if (p + f) else 0
         mbody += (f"<tr><td><b>{esc(label)}</b></td><td class=num>{p}</td><td class=num>{f}</td>"
-                  f"<td class=num>{esc(rate)}<span class=bar><i style='width:{frac*100:.0f}%'></i></span></td></tr>")
+                  f"<td class=num>{esc(rate)}<span class=bar><i style='width:{frac*100:.0f}%'></i></span></td>"
+                  f"<td class=num>{esc(cost)}</td><td class=num>{esc(per_run)}</td>"
+                  f"<td class=num>{esc(per_solve)}</td></tr>")
+
+    # per-run rows (cost breakdown — every attempt, not grouped by task)
+    rbody = ""
+    for label, n, p, fl, total, passc, failc, perpass in (run_rows or []):
+        rbody += (f"<tr><td><b>{esc(label)}</b></td><td class=num>{n}</td><td class=num>{p}</td>"
+                  f"<td class=num>{fl}</td><td class=num>{esc(total)}</td>"
+                  f"<td class=num>{esc(passc)}</td><td class=num>{esc(failc)}</td>"
+                  f"<td class=num>{esc(perpass)}</td></tr>")
 
     # per-task rows
     tbody = ""
@@ -225,11 +238,18 @@ def write_html(path, run_dir, runs, model_rows, comp, cell):
 <title>Benchmark progress — {esc(os.path.basename(run_dir))}</title>
 <style>{_HTML_CSS}</style></head><body><div class=wrap>
 <h1>Benchmark progress <span style="color:var(--muted);font-weight:400">· interim</span></h1>
-<p class=sub>{esc(run_dir)} · {len(runs)} runs so far · {len(comp)} tasks</p>
+<p class=sub>{esc(run_dir)} · {len(runs)} runs so far · {len(comp)} tasks · peak {peak_c} concurrent · avg {avg_c}×</p>
+{f'<p class=take>{esc(takeaway)}</p>' if takeaway else ''}
 
-<h2>Per model — tasks solved (passed in ≥1 run) / unsolved</h2>
+<h2>Per model — tasks solved (passed in ≥1 run) / unsolved + cost</h2>
 <div class=tw><table><thead><tr><th>Model</th><th class=num>Pass</th><th class=num>Fail</th>
-<th class=num>Pass rate</th></tr></thead><tbody>{mbody}</tbody></table></div>
+<th class=num>Pass rate</th><th class=num>Total $</th><th class=num>Avg $/run</th><th class=num>$/solve</th></tr></thead><tbody>{mbody}</tbody></table></div>
+<p style="color:var(--muted);font-size:12px;margin:8px 2px 0"><b>Total&nbsp;$</b> = sum over all its runs · <b>Avg&nbsp;$/run</b> = Total ÷ number of runs (mean cost of one attempt) · <b>$/solve</b> = Total ÷ tasks solved (pass@k) — so it folds in the failed attempts.</p>
+
+<h2>Per model — per run: cost breakdown (every attempt, not grouped by task)</h2>
+<div class=tw><table><thead><tr><th>Model</th><th class=num>Runs</th><th class=num>Pass</th>
+<th class=num>Fail</th><th class=num>Total $</th><th class=num>$ pass</th><th class=num>$ fail</th><th class=num>$/pass&nbsp;run</th></tr></thead><tbody>{rbody}</tbody></table></div>
+<p style="color:var(--muted);font-size:12px;margin:8px 2px 0"><b>Total&nbsp;$</b> = all runs = <b>$&nbsp;pass</b> (spent on passing runs) + <b>$&nbsp;fail</b> (burned on failing runs) · <b>$/pass&nbsp;run</b> = Total ÷ passing runs — the all-in cost of one successful attempt, with the failed retries folded in.</p>
 
 <h2>Per task — complexity (0–10, hardest first) and pass / fail across all models</h2>
 <div class=tw><table><thead><tr><th>Task</th><th class=num>Complexity</th><th class=num>Pass</th>
@@ -242,9 +262,15 @@ def write_html(path, run_dir, runs, model_rows, comp, cell):
 <span><span class="sw a"></span>45–75%</span><span><span class="sw r"></span>&lt;45%</span>
 <span><span class="sw" style="background:var(--border)"></span>no runs</span></div>
 
-<footer>Complexity: min-max-normalized effort (steps, tools, output tokens, duration) pooled across
-all runs, scaled 0–10 — relative to this task set. Interim progress report (benchmark may
-still be running). Generated by benchmark_progress_report.py.</footer>
+<footer><b>$ total</b> = a model's spend across all its runs. <b>$/run</b> = that ÷ its runs (mean cost
+of one attempt — <i>mean is outlier-sensitive: a few long max/no-think runs pull it up</i>).
+<b>$/solved</b> = total ÷ tasks solved (pass@k) — what it costs to land a task, retries and unsolved-task
+spend included. They chain: $/solved = $/run × runs ÷ solved. Cost basis:
+{"real — the actual Modal bill from billing.json (GLM) / Claude Code's reported $ (Opus)" if cost_is_real
+ else f"modeled ~${aggregate.GPU_HOURLY_USD:.0f}/hr for GLM (no billing.json) / Claude Code's reported $ for Opus"}.
+Complexity: min-max-normalized effort (steps, tools, output tokens, duration) pooled across all runs,
+scaled 0–10 — relative to this task set. Interim progress report (benchmark may still be running).
+Generated by benchmark_progress_report.py.</footer>
 </div></body></html>"""
     with open(path, "w") as f:
         f.write(doc)
@@ -277,15 +303,51 @@ def main():
     if not runs:
         sys.exit(f"no run folders (with reward.json) under {run_dir}")
 
+    # ---- rescale GLM runs to the REAL endpoint bill ----------------------------------------------
+    # collect() prices each GLM run "sole": its generation-seconds × the hourly GPU rate, as if it were
+    # alone on the endpoint. But the endpoint is SHARED — several GLM runs stream at once — so the sole
+    # sum over-counts the same GPU-seconds by the concurrency factor (~4–5×). The real Modal bill
+    # (billing.json `cost`, already prorated to GLM-active time) is the ground truth. Scale every GLM
+    # run by (real bill ÷ sole sum) so the per-setup Total $ reconcile to the actual bill; each run keeps
+    # its share of the generation. Opus is per-token (already the real charge) and is left untouched.
+    if cost_is_real:
+        bill = None
+        try:
+            with open(os.path.join(run_dir, "billing.json")) as bf:
+                bill = float(json.load(bf)["cost"])
+        except Exception as e:
+            print(f"(billing.json cost not read — GLM costs left sole: {e})")
+        glm_sole = sum(r["cost"] for r in runs
+                       if r["model"] != "opus" and r.get("cost") is not None)
+        if bill and glm_sole > 0:
+            scale = bill / glm_sole
+            for r in runs:
+                if r["model"] != "opus" and r.get("cost") is not None:
+                    r["cost"] *= scale
+            # rebuild task_stat's per-task cost from the rescaled runs so the difficulty csv agrees
+            for a in task_stat.values():
+                a["cost"], a["cost_n"] = 0.0, 0
+            for r in runs:
+                if r.get("cost") is not None:
+                    a = task_stat[r["task"]]
+                    a["cost"] += r["cost"]; a["cost_n"] += 1
+            print(f"(GLM cost rescaled ×{scale:.3f}: sole ${glm_sole:.2f} → real ${bill:.2f} "
+                  f"— shared endpoint, from billing.json)")
+
     comp = aggregate.task_complexity(task_stat)   # {task: {complexity, pass_rate, ...}}
 
     print(f"\nRun: {run_dir}   ({len(runs)} runs, {len(task_stat)} tasks)\n")
 
     # ---- per-model table: pass@k — a TASK counts as pass if the model solved it in ANY of its runs
     # (fail,fail,fail,pass -> pass; fail,fail,fail -> fail). So Pass/Fail count tasks, not runs. ----
-    solved = defaultdict(bool)   # (model, task) -> solved in at least one run
+    solved = defaultdict(bool)        # (model, task) -> solved in at least one run
+    model_cost = defaultdict(float)   # total $ each model spent across ALL its runs (incl. fails)
+    model_runs = defaultdict(int)     # graded runs (attempts) per model
     for r in runs:
         solved[(r["model"], r["task"])] |= bool(r["passed"])
+        model_runs[r["model"]] += 1
+        if r.get("cost") is not None:
+            model_cost[r["model"]] += r["cost"]
     per_model = defaultdict(lambda: {"pass": 0, "fail": 0})
     for (model, _task), ok in solved.items():
         per_model[model]["pass" if ok else "fail"] += 1
@@ -295,11 +357,49 @@ def main():
             continue
         s = per_model[model]
         tot = s["pass"] + s["fail"]
+        cost = model_cost.get(model, 0.0)
+        nruns = model_runs.get(model, 0)
+        # all three share $Total so they reconcile: $/Solved = $/Run × (runs ÷ solved).
         rows.append([
             MODEL_LABEL.get(model, model), s["pass"], s["fail"],
             f"{100 * s['pass'] / tot:.1f}%" if tot else "-",
+            f"${cost:.2f}",                                     # $ Total: all spend
+            f"${cost / nruns:.2f}" if nruns else "-",           # $/Run: mean per attempt
+            f"${cost / s['pass']:.2f}" if s["pass"] else "-",   # $/Solved: total ÷ tasks solved (pass@k)
         ])
-    _table(["Model", "Pass", "Fail", "Pass Rate"], rows, ["l", "r", "r", "r"])
+    _table(["Model", "Pass", "Fail", "Pass Rate", "Total $", "Avg $/run", "$/solve"], rows,
+           ["l", "r", "r", "r", "r", "r", "r"])
+    print("  Total $ = all runs · Avg $/run = Total ÷ runs (mean attempt) · "
+          "$/solve = Total ÷ tasks solved")
+
+    # ---- per-model, per RUN (ungrouped): cost breakdown — where the money went, and $ per pass ----
+    run_stat = defaultdict(lambda: {"runs": 0, "pass": 0, "total": 0.0, "pass_c": 0.0, "fail_c": 0.0})
+    for r in runs:
+        rs = run_stat[r["model"]]
+        rs["runs"] += 1
+        c = r.get("cost") or 0.0
+        rs["total"] += c
+        if r["passed"]:
+            rs["pass"] += 1; rs["pass_c"] += c
+        else:
+            rs["fail_c"] += c
+    run_rows = []
+    for model in MODEL_ORDER + [m for m in run_stat if m not in MODEL_ORDER]:
+        if model not in run_stat:
+            continue
+        rs = run_stat[model]
+        n, p = rs["runs"], rs["pass"]
+        run_rows.append([
+            MODEL_LABEL.get(model, model), n, p, n - p,
+            f"${rs['total']:.2f}",                          # Total $ (all runs) = $ pass + $ fail
+            f"${rs['pass_c']:.2f}",                         # $ that went into passing runs
+            f"${rs['fail_c']:.2f}",                         # $ burned on failing runs
+            f"${rs['total'] / p:.2f}" if p else "-",        # $/pass = Total ÷ passing runs
+        ])
+    print()
+    _table(["Model", "Runs", "Pass", "Fail", "Total $", "$ pass", "$ fail", "$/pass run"], run_rows,
+           ["l", "r", "r", "r", "r", "r", "r", "r"])
+    print("  per RUN: Total $ = $ pass + $ fail · $/pass run = Total ÷ passing runs (all-in cost of one successful attempt, retries included)")
 
     # ---- per-task table (hardest first) ----
     print()
@@ -314,7 +414,6 @@ def main():
     print()
 
     # ---- deepswe_task_difficulty.csv (into the run folder), hardest first ----
-    import csv
     csv_path = os.path.join(run_dir, "deepswe_task_difficulty.csv")
     with open(csv_path, "w", newline="") as f:
         w = csv.writer(f)
@@ -328,9 +427,48 @@ def main():
     _basis = "real (billing.json)" if cost_is_real else f"modeled {aggregate.GPU_HOURLY_USD:.1f}/hr"
     print(f"csv:    {csv_path}  (avg_cost_usd basis: {_basis})")
 
+    # ---- concurrency: how many runs overlapped in time (packing on the shared box/endpoint) ----
+    ivals = []
+    mpath = os.path.join(run_dir, "manifest.csv")
+    if os.path.exists(mpath):
+        with open(mpath) as mf:
+            for row in csv.DictReader(mf):
+                try:
+                    ivals.append((float(row["start"]), float(row["end"])))
+                except (TypeError, ValueError, KeyError):
+                    pass
+    peak_c = aggregate.peak_concurrency(ivals) if ivals else 0
+    avg_c = round(aggregate.avg_concurrency(ivals), 1) if ivals else 0.0
+
+    # ---- takeaway: cheapest GLM tier per solved task vs Opus (factual, from the numbers above) ----
+    def _stat(m):
+        s = per_model.get(m, {"pass": 0, "fail": 0})
+        n = s["pass"] + s["fail"]
+        return {"rate": (100 * s["pass"] / n) if n else 0.0,
+                "ps": (model_cost.get(m, 0.0) / s["pass"]) if s["pass"] else None}
+    _glm = {m: _stat(m) for m in ("glm-default", "glm-high", "glm-nothink") if m in per_model}
+    _best = min((m for m in _glm if _glm[m]["ps"] is not None), key=lambda m: _glm[m]["ps"], default=None)
+    takeaway = ""
+    if _best:
+        g, o = _glm[_best], _stat("opus")
+        takeaway = (f"Cheapest per solved task: {MODEL_LABEL.get(_best, _best)} at "
+                    f"${g['ps']:.2f}/solve ({g['rate']:.0f}% of tasks solved)")
+        if o["ps"] and g["ps"]:
+            ratio = o["ps"] / g["ps"]                       # >1 => GLM cheaper than Opus
+            if ratio >= 1:
+                rel = f"{ratio:.1f}× cheaper" if ratio >= 2 else f"{(ratio - 1) * 100:.0f}% cheaper"
+            else:
+                inv = 1 / ratio
+                rel = f"{inv:.1f}× pricier" if inv >= 2 else f"{(inv - 1) * 100:.0f}% pricier"
+            takeaway += f" — {rel} than {MODEL_LABEL['opus']} (${o['ps']:.2f}/solve, {o['rate']:.0f}%)."
+        else:
+            takeaway += "."
+        print(f"\n{takeaway}")
+    print(f"concurrency: peak {peak_c} runs, avg {avg_c}× over the run")
+
     # ---- HTML report (its own filename so it never clobbers aggregate.py's report.html) ----
     out = os.path.join(run_dir, "progress_report.html")
-    write_html(out, run_dir, runs, rows, comp, cell)
+    write_html(out, run_dir, runs, rows, comp, cell, cost_is_real, peak_c, avg_c, takeaway, run_rows)
     print(f"report: {out}")   # progress_report.html — separate from aggregate.py's report.html
     if sys.stdout.isatty():
         import webbrowser

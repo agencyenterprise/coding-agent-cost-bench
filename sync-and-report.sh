@@ -11,7 +11,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 [ -f "$HERE/.env" ] && { set -a; . "$HERE/.env"; set +a; }
 
-REMOTE="${REMOTE:-ubuntu@ec2-98-80-82-162.compute-1.amazonaws.com}"
+REMOTE="${REMOTE}"
 REMOTE_RESULTS="${REMOTE_RESULTS:-results}"
 LOCAL_RESULTS="$HERE/results"
 
@@ -24,17 +24,34 @@ fi
 [ -n "$RUN" ] || { echo "no run id" >&2; exit 1; }
 echo "run: $RUN"
 
+TARBALL="$LOCAL_RESULTS/results.tar.gz"
 mkdir -p "$LOCAL_RESULTS"
 # Stream the tarball from the remote: cd into the results dir, tar just RUN so archive paths
-# are RUN/... (decoupled from the remote dir name). --ignore-failed-read tolerates the
-# root-owned agent/sessions files (Permission denied) without aborting the whole archive.
+# are RUN/... (decoupled from the remote dir name). EXCLUDE pier-jobs — it's live pier scratch
+# (task-container fs / root-owned agent sessions) the report never reads; pulling it mid-run is
+# what triggered the "Permission denied" warnings and shipped GBs of scratch. Excluding it means
+# there's nothing unreadable left to tar, so the sync is clean and small.
 echo "downloading ..."
-ssh "$REMOTE" "tar czf - --ignore-failed-read -C $REMOTE_RESULTS '$RUN'" > "$HERE/results.tar.gz"
+# Byte counter on stderr so you can see the stream moving (no pv required).
+ssh "$REMOTE" "tar czf - --exclude='$RUN/pier-jobs' --ignore-failed-read -C $REMOTE_RESULTS '$RUN'" \
+  | python3 -c '
+import sys
+n = 0
+while True:
+    b = sys.stdin.buffer.read(1 << 20)
+    if not b:
+        break
+    sys.stdout.buffer.write(b)
+    n += len(b)
+    sys.stderr.write(f"\r  {n / (1 << 20):.1f} MB")
+    sys.stderr.flush()
+sys.stderr.write("\n")
+' > "$TARBALL"
 
 # replace: drop the old copy, then extract fresh
 rm -rf "$LOCAL_RESULTS/$RUN"
-tar xzf "$HERE/results.tar.gz" -C "$LOCAL_RESULTS"
-rm -f "$HERE/results.tar.gz"
+tar xzf "$TARBALL" -C "$LOCAL_RESULTS"
+rm -f "$TARBALL"
 echo "extracted -> $LOCAL_RESULTS/$RUN"
 
 python3 "$HERE/benchmark_progress_report.py" "$LOCAL_RESULTS/$RUN"
