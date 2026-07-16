@@ -486,6 +486,14 @@ td.c{text-align:center}
 .legend{display:flex;gap:14px;font-size:12px;color:var(--muted);margin:10px 2px 0}
 .sw{width:12px;height:12px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:-2px}
 .take{background:var(--g-bg);color:var(--g-fg);border-radius:10px;padding:11px 15px;font-size:13.5px;font-weight:600;margin:0 0 18px}
+.explain{border:1px solid var(--border);background:var(--card);border-radius:12px;padding:14px 17px;margin:0 0 26px;font-size:13px;line-height:1.55}
+.explain b{color:var(--fg)}
+.explain ul{margin:9px 0 0;padding-left:0;list-style:none}
+.explain li{margin:7px 0;color:var(--muted)}
+.explain li b{font-family:var(--mono)}
+.explain .eg{margin:8px 0 2px;color:var(--muted)}
+.explain .eg code{font-family:var(--mono);font-size:14px;letter-spacing:2px;background:var(--head);padding:2px 8px;border-radius:6px;margin-left:6px}
+.explain .read{display:block;margin-top:11px;color:var(--fg);font-weight:600}
 footer{color:var(--muted);font-size:12px;margin-top:40px}
 """
 
@@ -552,6 +560,16 @@ def write_html(path, run_dir, runs, model_rows, comp, cell, cost_is_real=False,
 <h1>Benchmark progress <span style="color:var(--muted);font-weight:400">· interim</span></h1>
 <p class=sub>{esc(run_dir)} · {len(runs)} runs so far · {len(comp)} tasks · peak {peak_c} concurrent · avg {avg_c}×</p>
 {f'<p class=take>{esc(takeaway)}</p>' if takeaway else ''}
+
+<div class=explain>
+<b>Two success rates — how to read them.</b> Every task is attempted up to 4 times (independent runs).
+<div class=eg>Example — one task, its 4 attempts: <code>✗ ✗ ✗ ✓</code></div>
+<ul>
+<li><b>pass@1</b> — <b>single-shot</b> success: the share of <i>individual attempts</i> that pass. This task = 1 of 4 = <b>25%</b>. Pooled over every attempt it gives the <i>per-run</i> table below. This is the number leaderboards (SWE-bench, DeepSWE) usually report.</li>
+<li><b>pass@k</b> — <b>best-of-k</b>: whether the model solved the task in <i>at least one</i> of its attempts. This task = solved ✓ (it passed once). Pooled over tasks it gives the <i>per-task</i> table below. Higher, because retries are folded in.</li>
+</ul>
+<span class=read>Read it as: “with 4 attempts GLM-5.2 (high) solves 81% of tasks (pass@k); a single attempt succeeds 47% of the time (pass@1).”</span>
+</div>
 
 <h2>Per model — tasks solved (passed in ≥1 run) / unsolved + cost</h2>
 <div class=tw><table><thead><tr><th>Model</th><th class=num>Pass</th><th class=num>Fail</th>
