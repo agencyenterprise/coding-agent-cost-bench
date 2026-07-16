@@ -11,8 +11,8 @@ Pass/fail comes from each run's reward.json (reward == 1 => pass). Effort signal
 aggregate.task_complexity — the SAME min-max-normalized 0-10 score used elsewhere.
 
 Two tables:
-  * Per-model: Pass / Fail / Pass Rate + Avg Complexity (mean task complexity over
-    that model's runs — how hard, on average, the tasks it ran were).
+  * Per-model: Pass / Fail / Pass Rate, grouped by TASK — a task counts as a pass if the
+    model solved it in at least one run (pass@k over its runs), not per individual run.
   * Per-task:  Complexity + Pass / Fail / Pass Rate pooled across all models.
 
 Usage: python3 model_complexity_report.py [RUN_DIR]
@@ -178,11 +178,10 @@ def write_html(path, run_dir, runs, model_rows, comp, cell):
 
     # per-model rows
     mbody = ""
-    for label, p, f, rate, avgc in model_rows:
+    for label, p, f, rate in model_rows:
         frac = (p / (p + f)) if (p + f) else 0
         mbody += (f"<tr><td><b>{esc(label)}</b></td><td class=num>{p}</td><td class=num>{f}</td>"
-                  f"<td class=num>{esc(rate)}<span class=bar><i style='width:{frac*100:.0f}%'></i></span></td>"
-                  f"<td class=num>{esc(avgc)}</td></tr>")
+                  f"<td class=num>{esc(rate)}<span class=bar><i style='width:{frac*100:.0f}%'></i></span></td></tr>")
 
     # per-task rows
     tbody = ""
@@ -210,9 +209,9 @@ def write_html(path, run_dir, runs, model_rows, comp, cell):
 <h1>Benchmark progress <span style="color:var(--muted);font-weight:400">· interim</span></h1>
 <p class=sub>{esc(run_dir)} · {len(runs)} runs so far · {len(comp)} tasks</p>
 
-<h2>Per model — pass / fail and average task complexity</h2>
+<h2>Per model — tasks solved (passed in ≥1 run) / unsolved</h2>
 <div class=tw><table><thead><tr><th>Model</th><th class=num>Pass</th><th class=num>Fail</th>
-<th class=num>Pass rate</th><th class=num>Avg complexity</th></tr></thead><tbody>{mbody}</tbody></table></div>
+<th class=num>Pass rate</th></tr></thead><tbody>{mbody}</tbody></table></div>
 
 <h2>Per task — complexity (0–10, hardest first) and pass / fail across all models</h2>
 <div class=tw><table><thead><tr><th>Task</th><th class=num>Complexity</th><th class=num>Pass</th>
@@ -249,17 +248,17 @@ def main():
         sys.exit(f"no run folders (with reward.json) under {run_dir}")
 
     comp = aggregate.task_complexity(task_stat)   # {task: {complexity, pass_rate, ...}}
-    task_complexity = {t: comp[t]["complexity"] for t in comp}
 
     print(f"\nRun: {run_dir}   ({len(runs)} runs, {len(task_stat)} tasks)\n")
 
-    # ---- per-model table ----
-    per_model = defaultdict(lambda: {"pass": 0, "fail": 0, "comp_sum": 0.0, "n": 0})
+    # ---- per-model table: pass@k — a TASK counts as pass if the model solved it in ANY of its runs
+    # (fail,fail,fail,pass -> pass; fail,fail,fail -> fail). So Pass/Fail count tasks, not runs. ----
+    solved = defaultdict(bool)   # (model, task) -> solved in at least one run
     for r in runs:
-        m = per_model[r["model"]]
-        m["pass" if r["passed"] else "fail"] += 1
-        m["comp_sum"] += task_complexity.get(r["task"], 0.0)
-        m["n"] += 1
+        solved[(r["model"], r["task"])] |= bool(r["passed"])
+    per_model = defaultdict(lambda: {"pass": 0, "fail": 0})
+    for (model, _task), ok in solved.items():
+        per_model[model]["pass" if ok else "fail"] += 1
     rows = []
     for model in MODEL_ORDER + [m for m in per_model if m not in MODEL_ORDER]:
         if model not in per_model:
@@ -269,10 +268,8 @@ def main():
         rows.append([
             MODEL_LABEL.get(model, model), s["pass"], s["fail"],
             f"{100 * s['pass'] / tot:.1f}%" if tot else "-",
-            f"{s['comp_sum'] / s['n']:.1f}" if s["n"] else "-",
         ])
-    _table(["Model", "Pass", "Fail", "Pass Rate", "Avg Complexity"], rows,
-           ["l", "r", "r", "r", "r"])
+    _table(["Model", "Pass", "Fail", "Pass Rate"], rows, ["l", "r", "r", "r"])
 
     # ---- per-task table (hardest first) ----
     print()
