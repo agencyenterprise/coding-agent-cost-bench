@@ -11,8 +11,8 @@ prove the concurrency split (attribute_cost) is exact.
 import csv, json, os, sys
 from collections import defaultdict
 
-import aggregate
 import benchmark_progress_report as R
+aggregate = R  # engine is now inlined into the single report file; keep the name for the checks below
 
 CENT = 0.01
 EPS = 1e-6

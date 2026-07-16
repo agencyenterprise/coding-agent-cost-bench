@@ -8,7 +8,7 @@ built straight from a run folder's output.log + reward.json files.
 
 Pass/fail comes from each run's reward.json (reward == 1 => pass). Effort signals
 (steps, tool calls, output tokens, duration) come from output.log and feed
-aggregate.task_complexity — the SAME min-max-normalized 0-10 score used elsewhere.
+task_complexity — the SAME min-max-normalized 0-10 score used elsewhere.
 
 Two tables:
   * Per-model: Pass / Fail / Pass Rate, grouped by TASK — a task counts as a pass if the
@@ -16,20 +16,317 @@ Two tables:
   * Per-task:  Complexity + Pass / Fail / Pass Rate pooled across all models.
 
 Usage: python3 benchmark_progress_report.py [RUN_DIR] [--no-billing]
-  RUN_DIR defaults to the newest folder under results/. Runs billing.py first so the
-  cost column is the real GLM bill; pass --no-billing to skip that (uses modeled cost).
+  RUN_DIR defaults to the newest folder under results/. Refreshes billing.json first so
+  the cost column is the real GLM bill; pass --no-billing to skip that (uses modeled cost).
 """
 import csv
 import json
 import os
-import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-import aggregate  # reuse claude_stats / log_stats / task_complexity
 
-HERE = Path(__file__).resolve().parent   # to locate billing.py alongside this script
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+# Vendored engine — log parsing, concurrency-aware cost attribution, complexity, and Modal billing.
+# Previously split across aggregate.py / billing.py; inlined here so this is the SINGLE report file.
+# Same math (guarded by verify_report.py). These produce the money numbers — edit with care.
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+# Hourly run-rate of the 8×B200 auto-endpoint while actively serving — the MODELED fallback used only
+# when billing.json is absent (measured $50.7/hr from a single-run bill). Real runs override this with
+# the effective hourly derived from billing.json.
+GPU_HOURLY_USD = 50.7
+
+
+def log_stats(outdir):
+    """Parse output.log (opencode JSON-lines) into work/efficiency metrics for a run:
+      call_s  - endpoint generation time: sum over steps of (step_finish - step_start), the FULL
+                request->response wall-clock per call INCLUDING token streaming, excluding local
+                tool/script gaps between steps (pip/pytest/git).
+      steps/tools/prose/reason/out - assistant turns, tool calls, prose chars, reasoning/output tokens."""
+    log = os.path.join(outdir, "output.log")
+    m = {"call_s": 0.0, "steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0}
+    if not os.path.exists(log):
+        return m
+    call_ms = 0
+    start = None
+    for line in open(log):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        t, ts, p = ev.get("type"), ev.get("timestamp"), ev.get("part", {})
+        if t == "step_start":
+            start, m["steps"] = ts, m["steps"] + 1
+        elif t == "tool_use":
+            m["tools"] += 1
+        elif t == "text":
+            m["prose"] += len(p.get("text", "") or "")
+        elif t == "step_finish":
+            tk = p.get("tokens", {}) or {}
+            m["out"] += tk.get("output", 0) or 0
+            m["reason"] += tk.get("reasoning", 0) or 0
+            if start is not None and ts is not None:
+                call_ms += ts - start
+            start = None
+    m["call_s"] = call_ms / 1000.0
+    return m
+
+
+def claude_stats(outdir):
+    """Parse a Claude Code run's stream-json output.log: native cost/usage/turns (from the final
+    `result` event) plus tool-call and prose counts. A killed/timed-out run never emits `result`,
+    so cost is left None (unknown), not zero."""
+    log = os.path.join(outdir, "output.log")
+    m = {"cost": 0.0, "tin": 0, "tout": 0, "call_s": 0.0,
+         "steps": 0, "tools": 0, "prose": 0, "reason": 0, "out": 0}
+    if not os.path.exists(log):
+        return m
+    for line in open(log):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        t = ev.get("type")
+        if t == "assistant":
+            m["steps"] += 1
+            for b in ev.get("message", {}).get("content", []) or []:
+                bt = b.get("type")
+                if bt == "tool_use":
+                    m["tools"] += 1
+                elif bt == "text":
+                    m["prose"] += len(b.get("text", "") or "")
+        elif t == "result":
+            u = ev.get("usage", {}) or {}
+            m["tin"] = sum(int(u.get(k, 0) or 0) for k in
+                           ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            m["tout"] = m["out"] = int(u.get("output_tokens", 0) or 0)
+            m["cost"] = float(ev.get("total_cost_usd", 0) or 0)
+            m["call_s"] = (ev.get("duration_api_ms", 0) or 0) / 1000.0
+            m["has_result"] = True
+            if ev.get("num_turns"):
+                m["steps"] = ev["num_turns"]
+    if not m.get("has_result"):
+        m["cost"] = None
+    return m
+
+
+def gen_intervals(outdir):
+    """Absolute-epoch (start, end) windows the model spent GENERATING, per step (step_start ->
+    step_finish = full request->response incl. streaming), from an opencode output.log. Unioning
+    these across concurrent runs gives concurrency-correct generation wall-clock."""
+    log = os.path.join(outdir, "output.log")
+    out = []
+    if not os.path.exists(log):
+        return out
+    start = None
+    for line in open(log):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        t, ts = ev.get("type"), ev.get("timestamp")
+        if t == "step_start":
+            start = ts
+        elif t == "step_finish" and start is not None and ts is not None:
+            out.append((start / 1000.0, ts / 1000.0))
+            start = None
+    return out
+
+
+def union_seconds(intervals):
+    """Wall-clock seconds covered by the union of (start, end) intervals — overlapping/parallel runs
+    merged, so 3 runs sharing a 3-min window count as 3 min, not 9 (you pay for GPU uptime)."""
+    total = 0.0
+    cur_s = cur_e = None
+    for s, e in sorted(intervals):
+        if cur_s is None:
+            cur_s, cur_e = s, e
+        elif s <= cur_e:
+            cur_e = max(cur_e, e)
+        else:
+            total += cur_e - cur_s
+            cur_s, cur_e = s, e
+    if cur_s is not None:
+        total += cur_e - cur_s
+    return total
+
+
+def attribute_cost(owned_intervals, rate_per_sec):
+    """Split an endpoint bill across the calls that ran on it, by who was busy when.
+
+    Every instant costs `rate_per_sec`, split EQUALLY among the calls active right then: a call alone
+    for 10s at $1/s costs $10; two calls sharing 10s cost $5 each ($10 total, not $20). The sum over
+    owners always equals rate × union(windows) — never double-counted for parallelism.
+    Returns {owner: dollars}. Sweep line over interval endpoints (exact, not per-second)."""
+    ivs = [(s, e, o) for (s, e, o) in owned_intervals if e > s]
+    out = defaultdict(float)
+    if not ivs:
+        return out
+    pts = sorted({s for s, _e, _o in ivs} | {e for _s, e, _o in ivs})
+    for a, b in zip(pts, pts[1:]):
+        dur = b - a
+        if dur <= 0:
+            continue
+        active = [o for (s, e, o) in ivs if s < b and e > a]
+        if not active:
+            continue
+        share = dur * rate_per_sec / len(active)
+        for o in active:
+            out[o] += share
+    return out
+
+
+def task_complexity(task_stat):
+    """Empirical, RELATIVE complexity per task from observed effort pooled across all runs/models:
+    mean steps, tool calls, output tokens, duration — each min-max normalized across the set,
+    averaged, scaled to 0-10. pass_rate reported alongside (outcome, kept separate)."""
+    tasks = {}
+    for t, a in task_stat.items():
+        n = max(a["runs"], 1)
+        tasks[t] = {"runs": a["runs"], "pass_rate": round(a["pass"] / n, 3),
+                    "avg_steps": a["steps"] / n, "avg_tools": a["tools"] / n,
+                    "avg_out": a["out"] / n, "avg_dur": a["dur"] / n}
+    sig = ["avg_steps", "avg_tools", "avg_out", "avg_dur"]
+    lo = {s: min(tasks[t][s] for t in tasks) for s in sig} if tasks else {}
+    hi = {s: max(tasks[t][s] for t in tasks) for s in sig} if tasks else {}
+    for t in tasks:
+        norm = [(tasks[t][s] - lo[s]) / (hi[s] - lo[s]) if hi[s] > lo[s] else 0.0 for s in sig]
+        tasks[t]["complexity"] = round(10 * sum(norm) / len(norm), 1)
+    return tasks
+
+
+def peak_concurrency(ivals):
+    """Max generation windows open at the same instant (sweep line). Touching intervals (one ends
+    exactly as the next starts) do NOT count as overlapping."""
+    ev = []
+    for s, e in ivals:
+        if s is None or e is None or e < s:
+            continue
+        ev.append((s, 1)); ev.append((e, -1))
+    ev.sort(key=lambda x: (x[0], x[1]))
+    cur = peak = 0
+    for _, d in ev:
+        cur += d
+        peak = max(peak, cur)
+    return peak
+
+
+def avg_concurrency(ivals):
+    """Time-weighted mean concurrent generation windows over the union wall-clock."""
+    ev = []
+    for s, e in ivals:
+        if s is None or e is None or e < s:
+            continue
+        ev.append((s, 1)); ev.append((e, -1))
+    if not ev:
+        return 0.0
+    ev.sort(key=lambda x: (x[0], x[1]))
+    cur = 0
+    prev = None
+    area = 0.0
+    for t, d in ev:
+        if prev is not None and cur > 0 and t > prev:
+            area += cur * (t - prev)
+        cur += d
+        prev = t
+    wall = union_seconds(ivals)
+    return area / wall if wall else 0.0
+
+
+# ---- Modal billing (inlined from billing.py) — the REAL endpoint $ over GLM-active time -----------
+def _bill_is_self_hosted(model):
+    return (model or "").lower().split("/")[0].startswith("modal")
+
+
+def _bill_glm_intervals(results_dir):
+    """Absolute-epoch (start, end) windows of self-hosted (GLM) jobs only, from manifest.csv."""
+    ivs = []
+    with open(os.path.join(results_dir, "manifest.csv")) as f:
+        for r in csv.DictReader(f):
+            if not _bill_is_self_hosted(r.get("model")):
+                continue
+            try:
+                s, e = float(r["start"]), float(r["end"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if e > s:
+                ivs.append((s, e))
+    return ivs
+
+
+def _bill_merge(ivs):
+    out = []
+    for s, e in sorted(ivs):
+        if out and s <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def _bill_covered_seconds(merged, a, b):
+    tot = 0.0
+    for s, e in merged:
+        lo, hi = max(a, s), min(b, e)
+        if hi > lo:
+            tot += hi - lo
+    return tot
+
+
+def refresh_billing(results_dir, app="ep-Modal-Auto-Endpoints"):
+    """Pull the ACTUAL Modal bill for the GLM endpoint, counting ONLY GLM-active time (union of GLM
+    job windows), and write <results_dir>/billing.json. Best-effort: needs `modal` + Modal creds
+    (MODAL_TOKEN_ID/SECRET). Returns the dict, or None if there are no GLM windows / on failure."""
+    from datetime import datetime, timedelta, timezone
+    import modal
+    ivs = _bill_glm_intervals(results_dir)
+    if not ivs:
+        return None
+    merged = _bill_merge(ivs)
+    s, e = merged[0][0], merged[-1][1]
+    start = datetime.fromtimestamp(s, tz=timezone.utc)
+    end = datetime.fromtimestamp(e, tz=timezone.utc)
+    q0 = start.replace(minute=0, second=0, microsecond=0)
+    q1 = end.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    rep = modal.Workspace.from_context().billing.report(start=q0, end=q1, resolution="h")
+    total, active_s, by_hour = 0.0, 0.0, []
+    for it in rep:
+        if it.description != app:
+            continue
+        h0 = it.interval_start
+        if h0.tzinfo is None:
+            h0 = h0.replace(tzinfo=timezone.utc)
+        h1 = h0 + timedelta(hours=1)
+        cov = _bill_covered_seconds(merged, h0.timestamp(), h1.timestamp())
+        if cov <= 0:
+            continue
+        frac = cov / 3600.0
+        hour_cost = float(it.cost or 0)
+        billed = hour_cost * frac
+        total += billed
+        active_s += cov
+        by_hour.append({"hour": h0.isoformat(), "hour_cost": round(hour_cost, 4),
+                        "glm_seconds_in_hour": round(cov), "billed": round(billed, 4)})
+    active_h = active_s / 3600.0
+    out = {"app": app, "window_start": start.isoformat(), "window_end": end.isoformat(),
+           "window_hours": round(active_h, 3), "cost": round(total, 4),
+           "effective_hourly": round(total / active_h, 4) if active_h else None, "by_hour": by_hour}
+    with open(os.path.join(results_dir, "billing.json"), "w") as f:
+        json.dump(out, f, indent=2)
+    return out
+
+# ══════════════════════════════════════════════════════════════════════════════════════════════════
 
 # dir-name model prefix -> display label (matches the report image)
 MODEL_LABEL = {
@@ -94,14 +391,14 @@ def glm_rate(run_dir):
             return float(bj["effective_hourly"]), True
     except Exception:
         pass
-    return aggregate.GPU_HOURLY_USD, False
+    return GPU_HOURLY_USD, False
 
 
 def collect(run_dir):
     """Walk run_dir's top-level run folders -> per-run records, pooled task_stat, and a
     per-(task, model) [passes, total] cell map for the matrix."""
     runs = []
-    # task_stat shape expected by aggregate.task_complexity, keyed by task here (no prompt dim)
+    # task_stat shape expected by task_complexity, keyed by task here (no prompt dim)
     task_stat = defaultdict(lambda: {"runs": 0, "steps": 0, "tools": 0, "out": 0, "dur": 0.0,
                                      "pass": 0, "cost": 0.0, "cost_n": 0})
     cell = defaultdict(lambda: [0, 0])   # (task, model) -> [passes, total]
@@ -112,14 +409,14 @@ def collect(run_dir):
             continue
         model, task, _run = parse_dirname(entry)
         is_claude = model == "opus"
-        pm = aggregate.claude_stats(rundir) if is_claude else aggregate.log_stats(rundir)
+        pm = claude_stats(rundir) if is_claude else log_stats(rundir)
         dur = run_duration_s(rundir, is_claude)
         # Claude reports its own $ (None if the run was killed before its result event);
         # GLM is self-hosted -> $ = API-call seconds x GPU rate.
         cost = pm.get("cost") if is_claude else (pm["call_s"] / 3600.0 * rate_hr)
         passed = is_pass(rundir)
         # per-run generation windows (GLM only) so main() can split the real bill by concurrency
-        ivs = [] if is_claude else aggregate.gen_intervals(rundir)
+        ivs = [] if is_claude else gen_intervals(rundir)
         runs.append({"model": model, "task": task, "passed": passed, "cost": cost,
                      "label": entry, "ivs": ivs})
         a = task_stat[task]
@@ -270,7 +567,7 @@ of one attempt — <i>mean is outlier-sensitive: a few long max/no-think runs pu
 <b>$/solved</b> = total ÷ tasks solved (pass@k) — what it costs to land a task, retries and unsolved-task
 spend included. They chain: $/solved = $/run × runs ÷ solved. Cost basis:
 {"real — the actual Modal bill from billing.json (GLM) / Claude Code's reported $ (Opus)" if cost_is_real
- else f"modeled ~${aggregate.GPU_HOURLY_USD:.0f}/hr for GLM (no billing.json) / Claude Code's reported $ for Opus"}.
+ else f"modeled ~${GPU_HOURLY_USD:.0f}/hr for GLM (no billing.json) / Claude Code's reported $ for Opus"}.
 Complexity: min-max-normalized effort (steps, tools, output tokens, duration) pooled across all runs,
 scaled 0–10 — relative to this task set. Interim progress report (benchmark may still be running).
 Generated by benchmark_progress_report.py.</footer>
@@ -297,8 +594,10 @@ def main():
     # bills only GLM-active time so far. On any failure the report falls back to modeled cost.
     if not no_billing:
         try:
-            subprocess.run([sys.executable, str(HERE / "billing.py"), "--results-dir", run_dir],
-                           check=False)
+            b = refresh_billing(run_dir)
+            if b:
+                print(f"GLM endpoint billed for GLM-active time: ${b['cost']:.2f} over "
+                      f"{b['window_hours']:.2f}h (~${b['effective_hourly']}/hr while serving)")
         except Exception as e:
             print(f"(billing refresh skipped: {e})")
 
@@ -316,7 +615,7 @@ def main():
     # bill (billing.json `cost`) to the cent when it exists; otherwise it falls back to the modeled GPU
     # rate (still concurrency-split). Opus is per-token (its own real charge) and is left untouched.
     owned = [(s, e, r["label"]) for r in runs if r["model"] != "opus" for (s, e) in r["ivs"]]
-    gen_union = aggregate.union_seconds([(s, e) for (s, e, _o) in owned])
+    gen_union = union_seconds([(s, e) for (s, e, _o) in owned])
     bill = None
     if cost_is_real:
         try:
@@ -325,8 +624,8 @@ def main():
         except Exception as e:
             print(f"(billing.json cost not read — using modeled rate: {e})")
     if gen_union > 0:
-        rate_per_sec = (bill / gen_union) if bill else (aggregate.GPU_HOURLY_USD / 3600.0)
-        billed = aggregate.attribute_cost(owned, rate_per_sec)   # {run label: $}, sums to rate×gen_union
+        rate_per_sec = (bill / gen_union) if bill else (GPU_HOURLY_USD / 3600.0)
+        billed = attribute_cost(owned, rate_per_sec)   # {run label: $}, sums to rate×gen_union
         for r in runs:
             if r["model"] != "opus":
                 r["cost"] = billed.get(r["label"], 0.0)
@@ -338,13 +637,13 @@ def main():
                 a = task_stat[r["task"]]
                 a["cost"] += r["cost"]; a["cost_n"] += 1
         _attr = sum(billed.values())
-        _src = f"real bill ${bill:.2f}" if bill else f"modeled ${aggregate.GPU_HOURLY_USD:.0f}/hr"
+        _src = f"real bill ${bill:.2f}" if bill else f"modeled ${GPU_HOURLY_USD:.0f}/hr"
         print(f"(GLM cost = {_src} split across runs by concurrency: {rate_per_sec*3600:.1f}/hr over "
               f"{gen_union/3600:.2f}h generating → attributed ${_attr:.2f})")
     else:
         print("(no GLM generation windows parsed — keeping modeled sole cost)")
 
-    comp = aggregate.task_complexity(task_stat)   # {task: {complexity, pass_rate, ...}}
+    comp = task_complexity(task_stat)   # {task: {complexity, pass_rate, ...}}
 
     print(f"\nRun: {run_dir}   ({len(runs)} runs, {len(task_stat)} tasks)\n")
 
@@ -434,7 +733,7 @@ def main():
             w.writerow([task, comp[task]["complexity"], a["runs"], a["pass"],
                         round(100 * a["pass"] / max(a["runs"], 1), 1),
                         round(avg_cost, 2) if avg_cost != "" else ""])
-    _basis = "real (billing.json)" if cost_is_real else f"modeled {aggregate.GPU_HOURLY_USD:.1f}/hr"
+    _basis = "real (billing.json)" if cost_is_real else f"modeled {GPU_HOURLY_USD:.1f}/hr"
     print(f"csv:    {csv_path}  (avg_cost_usd basis: {_basis})")
 
     # ---- concurrency: how many runs overlapped in time (packing on the shared box/endpoint) ----
@@ -447,8 +746,8 @@ def main():
                     ivals.append((float(row["start"]), float(row["end"])))
                 except (TypeError, ValueError, KeyError):
                     pass
-    peak_c = aggregate.peak_concurrency(ivals) if ivals else 0
-    avg_c = round(aggregate.avg_concurrency(ivals), 1) if ivals else 0.0
+    peak_c = peak_concurrency(ivals) if ivals else 0
+    avg_c = round(avg_concurrency(ivals), 1) if ivals else 0.0
 
     # ---- takeaway: cheapest GLM tier per solved task vs Opus (factual, from the numbers above) ----
     def _stat(m):

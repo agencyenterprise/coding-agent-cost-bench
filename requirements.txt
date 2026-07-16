@@ -1,4 +1,5 @@
-# DeepSWE cost benchmark — image deps. run_deepswe.py, reasoning_proxy.py and aggregate.py are
-# stdlib-only; only these two need installing (pier pulls rich/typer/pyyaml/httpx/tenacity itself).
+# DeepSWE cost benchmark deps. run_deepswe.py / reasoning_proxy.py are stdlib-only; pier pulls
+# rich/typer/pyyaml/httpx/tenacity itself. modal is used by the LOCAL report (benchmark_progress_
+# report.py -> refresh_billing) for the real endpoint $, not by the in-image runner.
 datacurve-pier   # pier: DeepSWE/Harbor task runner — builds each task image, injects the agent CLI, grades
-modal            # billing.py — real Modal endpoint $ over the run window (needs MODAL_TOKEN_ID/SECRET)
+modal            # local report billing — real Modal endpoint $ over the run window (needs MODAL_TOKEN_ID/SECRET)

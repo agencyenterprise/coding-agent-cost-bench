@@ -125,7 +125,8 @@ Dockerfile              one-`docker run` image
 entrypoint.sh           starts the reasoning-proxy sidecar, then the orchestrator
 run_deepswe.py          orchestrator: fans pier over (setup × task × run), then reports
 reasoning_proxy.py      GLM reasoning-tier sidecar (router mode)
-aggregate.py            report.html + per_run.csv + summary.csv
-billing.py              real Modal endpoint bill for the run window
+benchmark_progress_report.py  the single report — pass@k + per-run cost, real bill split
+                              by concurrency, Modal billing refresh (run locally on results/)
+verify_report.py        correctness gate for the report's numbers (run before trusting a report)
 setup_auto_endpoint.sh  provision the GLM Modal auto-endpoint
 ```
