@@ -107,12 +107,14 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
 
 
 def find_trial(jobdir):
-    """The single trial dir under a per-job jobs dir (identified by its verifier or agent output)."""
+    """The trial dir under a per-job jobs dir (identified by its verifier or agent output). Picks the
+    NEWEST match, so a resumed/retried job reads its fresh trial, not a stale one left by an earlier
+    interrupted attempt in the same jobdir."""
     for pat in ("*/*/verifier/reward.json", "*/*/agent/*.txt", "*/*/trial.log"):
-        hits = glob.glob(os.path.join(jobdir, pat))
+        hits = sorted(glob.glob(os.path.join(jobdir, pat)), key=os.path.getmtime)
         if hits:
             # <jobdir>/<job>/<trial>/(verifier|agent)/...  -> the <trial> dir
-            p = Path(hits[0])
+            p = Path(hits[-1])
             return p.parent.parent
     return None
 
@@ -227,7 +229,8 @@ def main():
     ap.add_argument("--work-dir", default=os.environ.get("WORK_DIR", ""),
                     help="pier job tree dir [default: <out>/<run-id>/pier-jobs]")
     ap.add_argument("--run-id", default=os.environ.get("RUN_ID", ""),
-                    help="name for this run's subfolder under --out [default: timestamp]")
+                    help="name for this run's subfolder under --out [default: timestamp]. "
+                         "Reuse an existing run-id to RESUME it (skips jobs already recorded pass/fail).")
     ap.add_argument("--host-ip", default=os.environ.get("HOST_IP", ""),
                     help="address Squid uses to reach the reasoning-proxy sidecar (box private IP)")
     ap.add_argument("--pier", default=os.environ.get("PIER", "pier"), help="pier executable [%(default)s]")
@@ -275,27 +278,45 @@ def main():
     # each tier in flight instead of N concurrent max-reasoning streams saturating the GPU — and
     # (b) surfaces a full cross-setup comparison on the first tasks early, instead of hours in.
     jobs = [(s, t, r) for t in tasks for r in range(1, args.runs + 1) for s in setups]
-    log(f"DeepSWE bench: {len(setups)} setups × {len(tasks)} tasks × {args.runs} runs "
-        f"= {len(jobs)} pier runs, {args.jobs} parallel → {run_dir}")
 
+    # Resume: if this run_dir already has a manifest (same --run-id, or a reused folder), skip jobs
+    # already recorded as pass/fail and append to it. Errored/missing jobs are retried. This turns a
+    # crash/reboot/--jobs change mid-run into "pick up where it left off" instead of redoing everything.
     manifest_path = os.path.join(run_dir, "manifest.csv")
-    with open(manifest_path, "w", newline="") as f:
-        csv.DictWriter(f, fieldnames=MANIFEST_FIELDS).writeheader()
+    done_labels = set()
+    if os.path.exists(manifest_path) and os.path.getsize(manifest_path) > 0:
+        with open(manifest_path) as f:
+            for row in csv.DictReader(f):
+                if row.get("status") in ("pass", "fail") and row.get("outdir"):
+                    done_labels.add(os.path.basename(row["outdir"].rstrip("/")))
+        jobs = [(s, t, r) for (s, t, r) in jobs if f"{s}__{t}__run{r}" not in done_labels]
+        log(f"resume: {len(done_labels)} completed jobs in {manifest_path} — skipping; {len(jobs)} left to run")
+    else:
+        with open(manifest_path, "w", newline="") as f:
+            csv.DictWriter(f, fieldnames=MANIFEST_FIELDS).writeheader()
+
+    log(f"DeepSWE bench: {len(setups)} setups × {len(tasks)} tasks × {args.runs} runs "
+        f"= {len(jobs)} pier runs to do, {args.jobs} parallel → {run_dir}")
 
     def record(row):
         with _manifest_lock, open(manifest_path, "a", newline="") as f:
             csv.DictWriter(f, fieldnames=MANIFEST_FIELDS).writerow(row)
 
-    done = 0
+    finished = 0
     with ThreadPoolExecutor(max_workers=args.jobs) as ex:
         futs = {ex.submit(run_job, s, t, r, args, env, run_dir, work_dir): (s, t, r)
                 for (s, t, r) in jobs}
         for fut in as_completed(futs):
-            row = fut.result()
+            s, t, r = futs[fut]
+            try:
+                row = fut.result()
+            except Exception as e:   # one job's failure (disk, docker, etc.) must never kill the run
+                log(f"[ERROR] {s}__{t}__run{r} — {type(e).__name__}: {e} (job dropped, run continues)")
+                row = None
             if row:
                 record(row)
-            done += 1
-            log(f"  progress: {done}/{len(jobs)}")
+            finished += 1
+            log(f"  progress: {finished}/{len(jobs)}")
 
     if need_glm and not args.no_billing:
         try:
