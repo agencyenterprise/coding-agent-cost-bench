@@ -7,8 +7,9 @@
 #   -p 80:80                                        publish the sidecar so pier's Squid (a host
 #                                                   container) can reach it at $HOST_IP:80
 #   -v /var/run/docker.sock:/var/run/docker.sock    pier drives the HOST docker daemon
-#   -v "$DIR:$DIR"  -e OUT_DIR="$DIR"               ONE host-aligned data dir: report.html, csvs, and
-#                                                   the pier job tree all land under $DIR/<timestamp>/.
+#   -v "$DIR:$DIR"  -e OUT_DIR="$DIR"               ONE host-aligned data dir: per-run results,
+#                                                   manifest.csv, and the pier job tree all land under
+#                                                   $DIR/<timestamp>/ (report generated locally after).
 #                                                   Same-path mount is required — the host daemon
 #                                                   bind-mounts the job tree into task containers by
 #                                                   literal path (docker-out-of-docker).

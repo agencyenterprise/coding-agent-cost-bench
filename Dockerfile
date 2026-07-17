@@ -1,5 +1,6 @@
 # DeepSWE cost benchmark — one `docker run` fans pier over (setup × task × run) on contamination-free
-# DeepSWE tasks and writes report.html + per_run.csv + summary.csv to /out.
+# DeepSWE tasks and writes raw per-run results + manifest.csv to /out. The report (progress_report.html
+# + CSVs) is generated locally afterward with benchmark_progress_report.py — not by this image.
 #
 # pier drives the HOST docker (via the mounted socket) to build & run each task's own container and
 # inject the agent CLI into it — so this image ships only python + the docker CLI + pier + the
@@ -13,10 +14,11 @@
 #     --env-file .env \
 #     ghcr.io/agencyenterprise/coding-agent-cost-bench \
 #     --setups glm-default,glm-high,glm-nothink,opus --runs 4 --jobs 8
-#   # -> $DIR/<timestamp>/report.html (+ per_run.csv, summary.csv, pier-jobs/)
+#   # -> $DIR/<timestamp>/ : per-run folders (output.log, reward.json, usage.json) + manifest.csv
+#   #    (+ pier-jobs/). Then locally: python3 benchmark_progress_report.py $DIR/<timestamp>
 #
 # ONE data mount, mounted at the SAME path inside and out (-v "$DIR:$DIR"): everything for a run —
-# report, csvs, and the pier job tree — lands under $DIR/<timestamp>/. The same-path mount is required
+# per-run results, manifest.csv, and the pier job tree — lands under $DIR/<timestamp>/. The mount is required
 # because pier drives the HOST daemon, which bind-mounts the job tree into task containers by literal
 # path (docker-out-of-docker), so the path must resolve identically on both sides. Each invocation
 # gets its own timestamped subfolder, so repeated runs never clobber.
