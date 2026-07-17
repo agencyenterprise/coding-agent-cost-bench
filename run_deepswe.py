@@ -14,12 +14,13 @@ The GLM tiers share ONE reasoning-proxy sidecar on http://<HOST_IP>:80 (pier's S
 ports 80/443, so tiers are distinguished by URL path, not port). --host-ip is the address Squid uses
 to reach the sidecar (the box's private IP; the entrypoint fills it from $HOST_IP).
 
-Output mirrors the shape aggregate.py/billing.py already expect, so they run unchanged:
+This produces RAW results only; reporting is a separate LOCAL step (benchmark_progress_report.py):
   <out>/manifest.csv                 one row per run (task,harness,model,prompt,run,status,start,end,...)
   <out>/<label>/output.log           the agent's JSON-lines log (copied from pier's agent/*.txt)
   <out>/<label>/usage.json           token totals derived from the log (opencode setups)
-Then: billing.py (real Modal AEP bill over the window) -> aggregate.py -> report.html + per_run.csv
-+ summary.csv.
+  <out>/<label>/reward.json          the task's grading result (reward==1 => solved)
+Then, locally: `python3 benchmark_progress_report.py <out>` -> progress_report.html + CSVs + billing.json
+(it pulls the real Modal bill; needs the Modal account token). `verify_report.py` checks the numbers.
 """
 import argparse
 import csv
@@ -35,12 +36,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-
 GLM_MODEL = "zai-org/GLM-5.2-FP8"   # opencode provider model id (the tier lives in the baseURL, not here)
 
-# setup -> how to configure pier. model/harness are REPORTING labels (aggregate.py keys off the
-# `modal*` prefix for self-hosted GPU billing and `claude` for the Anthropic token path).
+# setup -> how to configure pier. model/harness are REPORTING labels (benchmark_progress_report.py keys
+# off the `modal*` prefix for self-hosted GPU billing and `claude` for the Anthropic token path).
 SETUPS = {
     "glm-default": {"agent": "opencode", "harness": "opencode", "tier": None,
                     "model": f"modal/{GLM_MODEL}"},
@@ -195,7 +194,7 @@ def run_job(setup, task, run, args, env, out_dir, work_dir):
         status, reward = read_reward(trial)
         agent_logs = sorted(glob.glob(str(trial / "agent" / "*.txt")))
         if agent_logs:
-            shutil.copy(agent_logs[0], os.path.join(outdir, "output.log"))   # aggregate.py parses this
+            shutil.copy(agent_logs[0], os.path.join(outdir, "output.log"))   # the report parses this
             if SETUPS[setup]["agent"] == "opencode":
                 usage = usage_from_opencode_log(os.path.join(outdir, "output.log"))
                 if usage:
@@ -252,8 +251,6 @@ def main():
     ap.add_argument("--timeout-mult", type=float, default=float(os.environ.get("TIMEOUT_MULT", "1.0")),
                     help="pier agent_timeout_multiplier [%(default)s]")
     ap.add_argument("--list-tasks", action="store_true", help="print available tasks and exit")
-    ap.add_argument("--no-billing", action="store_true", help="skip the Modal AEP billing pull")
-    ap.add_argument("--no-aggregate", action="store_true", help="skip report generation")
     args = ap.parse_args()
 
     if args.list_tasks:
@@ -333,17 +330,8 @@ def main():
             finished += 1
             log(f"  progress: {finished}/{len(jobs)}")
 
-    if need_glm and not args.no_billing:
-        try:
-            log("billing: pulling the Modal AEP bill for the run window…")
-            subprocess.run([sys.executable, str(HERE / "billing.py"), "--results-dir", run_dir],
-                           env=env, check=False)
-        except Exception as e:
-            log(f"billing skipped: {e}")
-
-    if not args.no_aggregate:
-        subprocess.run([sys.executable, str(HERE / "aggregate.py"), "--results-dir", run_dir, "--no-open"],
-                       env=env, check=False)
+    log(f"done: {finished} runs -> {run_dir}")
+    log("report locally:  python3 benchmark_progress_report.py " + run_dir)
 
 
 if __name__ == "__main__":

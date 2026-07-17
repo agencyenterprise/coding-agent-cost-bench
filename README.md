@@ -3,7 +3,7 @@
 Compare coding agents on the metric that matters for self-hosting: **cost per solved task**.
 
 The benchmark runs the same contamination-free [DeepSWE](https://github.com/datacurve-ai/deep-swe)
-tasks through each agent setup, grades every attempt with the task's own tests, and generates a
+tasks through each agent setup, grades every attempt with the task's own tests, and produces a
 report comparing success rate and cost. It's built to weigh **self-hosted GLM-5.2 (on Modal, 8×B200)**
 against **Claude Opus** across GLM's reasoning tiers.
 
@@ -21,63 +21,117 @@ either `high` or `max` (max = the default when unset), plus `enable_thinking:fal
 opencode can't set `chat_template_kwargs` itself, so a small reasoning-proxy sidecar injects the tier
 and forwards to the endpoint (see [Reasoning tiers](#reasoning-tiers)).
 
-## How it runs
+## Pipeline at a glance
 
-Everything is one `docker run`. [pier](https://pypi.org/project/datacurve-pier/) drives the **host**
-Docker daemon (via the mounted socket) to build and run each task's own container, inject the agent
-CLI into it, and grade it. The image ships only python + the Docker CLI + pier + the orchestrator —
-the agent CLIs (opencode / claude-code) are installed by pier inside each task container.
+1. **Provision** the GLM auto-endpoint on Modal — once — with `./setup_auto_endpoint.sh`. *(GLM setups only.)*
+2. **Run** the benchmark — one `docker run` — which writes raw per-run results + `manifest.csv` to `results/<run-id>/`.
+3. **Report** — `python3 benchmark_progress_report.py results/<run-id>` — locally, producing `progress_report.html` + CSVs.
+
+## 1. Provision the GLM endpoint (Modal)
+
+The GLM setups send inference to a **GLM-5.2-FP8 auto-endpoint on Modal (8×B200)**. Provision it once:
+
+```bash
+pip install modal && modal setup          # authenticate the Modal CLI (writes ~/.modal.toml)
+./setup_auto_endpoint.sh                  # idempotent: create the endpoint only if missing
+```
+
+`setup_auto_endpoint.sh`:
+- ensures the Modal CLI is installed and authenticated (`modal setup`);
+- enforces exactly **one proxy token** (`wk-…/ws-…`) that matches your `.env` — if none exists it
+  creates one and prints the pair to copy into `.env`, then you re-run;
+- creates the auto-endpoint for `zai-org/GLM-5.2-FP8`, **reusing the pre-downloaded weights volume**
+  (`glm-5-2-weights`) so there's no multi-hundred-GB re-download;
+- waits for provisioning (8×B200 cold start ≈ a few minutes);
+- confirms `MODAL_ENDPOINT` — copy the endpoint URL from the [Modal dashboard](https://modal.com/endpoints/)
+  and use `<url>/v1`.
+
+It's safe to re-run any time (reuses an existing endpoint + volume). Options: `--name`, `--model`,
+`--volume`, `--wait-tries` (see `./setup_auto_endpoint.sh --help`). An **Opus-only** run needs no Modal
+endpoint — only `ANTHROPIC_API_KEY`.
+
+## 2. Run the benchmark (`docker run`)
+
+[pier](https://pypi.org/project/datacurve-pier/) drives the **host** Docker daemon (via the mounted
+socket) to build and run each task's own container, inject the agent CLI into it, and grade it. The
+image ships only python + the Docker CLI + pier + the orchestrator — the agent CLIs (opencode /
+claude-code) are installed by pier inside each task container.
 
 ```bash
 docker pull ghcr.io/agencyenterprise/coding-agent-cost-bench:latest
 
-sudo mkdir -p /work && sudo chmod 777 /work        # host-aligned pier job tree (see note below)
-
+DIR="$PWD/results"                          # host-aligned dir: holds results + the pier job tree
 docker run --rm -p 80:80 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /work:/work \
-  -v "$PWD/results:/out" \
+  -v "$DIR:$DIR" -e OUT_DIR="$DIR" \
   -e HOST_IP="$(hostname -I | awk '{print $1}')" \
   --env-file .env \
   ghcr.io/agencyenterprise/coding-agent-cost-bench:latest \
   --setups glm-default,glm-high,glm-nothink,opus \
   --tasks ytt-jsonpath-query-api \
-  --runs 4 --jobs 8
+  --runs 4 --jobs 10
 ```
 
-Results land in `results/`; open `report.html`.
+Raw results land under `results/<run-id>/`: one folder per run
+(`<setup>__<task>__runN/` with `output.log`, `reward.json`, `usage.json`, `model.patch`) plus
+`manifest.csv`. Turn these into a report in step 3.
 
 ### Required `docker run` wiring
 
 | Flag | Why |
 |------|-----|
 | `-v /var/run/docker.sock:/var/run/docker.sock` | pier builds & runs task containers on the host daemon |
-| `-v /work:/work` | pier's job tree at a **host-aligned** path — see below |
-| `-v "$PWD/results:/out"` | where `report.html` + CSVs are written |
-| `-p 80:80` | publishes the reasoning-proxy sidecar so pier's egress proxy can reach it (only needed for `glm-high` / `glm-nothink`) |
+| `-v "$DIR:$DIR" -e OUT_DIR="$DIR"` | results **and** the pier job tree at a **host-aligned** path — see below |
+| `-p 80:80` | publishes the reasoning-proxy sidecar so pier's egress proxy can reach it (only for `glm-high` / `glm-nothink`) |
 | `-e HOST_IP=<box private ip>` | address the egress proxy uses to reach the sidecar (only for `glm-high` / `glm-nothink`) |
 | `--env-file .env` | credentials (below) |
 
-**Why the host-aligned `/work`:** pier runs *inside* this container but tells the *host* daemon to
-bind-mount its job tree into each task container. Those paths must exist at the same location inside
-and outside the container, so `/work` must map to a host `/work` (docker-out-of-docker). `/out` needs
-no alignment — only the orchestrator touches it.
+**Why the host-aligned `$DIR`:** pier runs *inside* this container but tells the *host* daemon to
+bind-mount its job tree (under `$DIR/<run-id>/pier-jobs`) into each task container. Those paths must
+exist at the same location inside and outside the container (docker-out-of-docker), so mounting `$DIR`
+to the **same path** and pointing `OUT_DIR` at it keeps results and the job tree aligned in one mount.
+
+## 3. Generate the report (local)
+
+Reporting is a **local** post-processing step — it reads the raw run folders, and pulls your real
+Modal bill (which needs your Modal account token), so it's kept out of the benchmark image:
+
+```bash
+python3 benchmark_progress_report.py results/<run-id>     # → progress_report.html + CSVs
+python3 verify_report.py             results/<run-id>     # correctness gate (recommended)
+```
+
+`benchmark_progress_report.py` is self-contained (stdlib + `modal` for the bill). `--no-billing` skips
+the Modal bill pull and falls back to the modeled GPU rate. `verify_report.py` re-derives every number
+from the raw files and fails loudly on any mismatch.
+
+**Pulling from a remote box?** `./sync-and-report.sh [RUN_ID]` SSH-pulls the run dir and runs the
+report in one step. Configure `REMOTE` / `REMOTE_RESULTS` in `.env`.
+
+### Output (written next to the run, in `results/<run-id>/`)
+
+- `progress_report.html` — **pass@k** (task solved in ≥1 run) + **pass@1** (per-run) success, and cost per solved task, per setup
+- `per_run.csv` — one row per run (task, setup, passed, `billed_usd`/`sole_usd`, tokens, steps)
+- `summary.csv` — per-setup rollup
+- `deepswe_task_difficulty.csv` — per-task complexity + pass rate
+- `billing.json` — the actual Modal endpoint bill over the GLM-active window (unless `--no-billing`)
 
 ## Credentials
 
-All from `.env` (`--env-file`); nothing is baked into the image. Copy `.env.example` and fill in:
+All from `.env` (`--env-file`); nothing is baked into the image (`.env` is git- and docker-ignored).
+Copy `.env.example` and fill in:
 
-```
-MODAL_ENDPOINT        # GLM auto-endpoint URL (…/v1)      — GLM setups
-MODAL_KEY             # proxy token (wk-…)                — GLM setups
-MODAL_SECRET          # proxy token (ws-…)                — GLM setups
-MODAL_TOKEN_ID        # Modal account token (ak-…)        — real billing
-MODAL_TOKEN_SECRET    # Modal account token (as-…)        — real billing
-ANTHROPIC_API_KEY     # Claude Opus                       — opus setup
-```
+| Var | For |
+|-----|-----|
+| `MODAL_ENDPOINT` | GLM auto-endpoint URL (`…/v1`) — GLM setups |
+| `MODAL_KEY` / `MODAL_SECRET` | proxy token (`wk-…` / `ws-…`) authenticating requests **to** the endpoint — GLM setups |
+| `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` | Modal account token (`ak-…` / `as-…`) — provisioning + real billing |
+| `ANTHROPIC_API_KEY` | Claude Opus — `opus` setup |
+| `REMOTE` / `REMOTE_RESULTS` | *(optional)* SSH target for `sync-and-report.sh` |
 
-The GLM endpoint must already be running. Provision it once with `./setup_auto_endpoint.sh` (needs
-the Modal CLI authenticated); it's idempotent and reuses the pre-downloaded weights volume.
+Create the **proxy token** with `modal workspace proxy-tokens create` (or let `setup_auto_endpoint.sh`
+print one). Create the **account token** at [modal.com/settings/tokens](https://modal.com/settings/tokens)
+or `modal token new`.
 
 ## Reasoning tiers
 
@@ -88,7 +142,7 @@ the Modal CLI authenticated); it's idempotent and reuses the pre-downloaded weig
 directly (no proxy). A single sidecar serves every tier by URL path because the task egress proxy
 only permits ports 80/443.
 
-## Common flags
+## Common flags (`run_deepswe.py`, passed after the image name)
 
 | Flag | Description |
 |------|-------------|
@@ -96,24 +150,17 @@ only permits ports 80/443.
 | `--tasks` | comma list of task names, or `all` |
 | `--runs` | attempts per (setup, task) |
 | `--jobs` | parallel pier runs |
+| `--run-id` | reuse/resume a run folder — skips runs already recorded in its `manifest.csv` |
 | `--timeout-mult` | scale pier's agent timeout (`1.0` = full; smaller = faster smoke) |
-| `--no-billing` | skip the real Modal bill pull (report uses the modeled GPU rate) |
 | `--list-tasks` | print the baked DeepSWE task names and exit |
-
-## Output
-
-Written to `results/` (i.e. the mounted `/out`):
-
-- `report.html` — success rate + cost per solved task per setup
-- `per_run.csv` — one row per run (task, setup, passed, cost, tokens, steps)
-- `summary.csv` — per-setup rollup
-- `billing.json` — the actual Modal endpoint bill over the run window (unless `--no-billing`)
 
 ## Cost model
 
 - **Claude Opus** — priced from reported token usage.
-- **GLM (self-hosted)** — generation-seconds × the endpoint's hourly rate, reconciled against the
-  **actual** Modal bill for the auto-endpoint over the run window (`billing.json`).
+- **GLM (self-hosted)** — the **actual** Modal bill for the auto-endpoint over the GLM-active window
+  (`billing.json`), split across GLM runs by **concurrency**: each generating second is shared among
+  the runs in flight then, so the per-setup totals reconcile to the real bill (never double-counted
+  for parallelism). Without `billing.json` it falls back to a modeled hourly rate.
 
 The report normalizes everything to **cost per solved task**, making the API model and the
 self-hosted tiers directly comparable.
@@ -121,12 +168,12 @@ self-hosted tiers directly comparable.
 ## Project layout
 
 ```
-Dockerfile              one-`docker run` image
-entrypoint.sh           starts the reasoning-proxy sidecar, then the orchestrator
-run_deepswe.py          orchestrator: fans pier over (setup × task × run), then reports
-reasoning_proxy.py      GLM reasoning-tier sidecar (router mode)
-benchmark_progress_report.py  the single report — pass@k + per-run cost, real bill split
-                              by concurrency, Modal billing refresh (run locally on results/)
-verify_report.py        correctness gate for the report's numbers (run before trusting a report)
-setup_auto_endpoint.sh  provision the GLM Modal auto-endpoint
+Dockerfile                    one-`docker run` benchmark image (orchestrator + sidecar)
+entrypoint.sh                 starts the reasoning-proxy sidecar, then the orchestrator
+run_deepswe.py                orchestrator: fans pier over (setup × task × run) → raw results + manifest.csv
+reasoning_proxy.py            GLM reasoning-tier sidecar (router mode)
+setup_auto_endpoint.sh        provision the GLM-5.2 Modal auto-endpoint (idempotent)
+benchmark_progress_report.py  the report (run locally): pass@k / pass@1 + cost, real bill split by concurrency
+verify_report.py              correctness gate for the report's numbers
+sync-and-report.sh            pull a run from a remote box, then run the report
 ```

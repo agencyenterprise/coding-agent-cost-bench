@@ -508,7 +508,7 @@ def _cell_cls(passes, total):
 
 def write_html(path, run_dir, runs, model_rows, comp, cell, cost_is_real=False,
                peak_c=0, avg_c=0.0, takeaway="", run_rows=None):
-    """Self-contained report.html — the same three tables as the chat visualization."""
+    """Self-contained progress_report.html — the same three tables as the chat visualization."""
     import html as _h
     esc = lambda x: _h.escape(str(x))
     models = [m for m in MODEL_ORDER if any(k[1] == m for k in cell)]
@@ -639,7 +639,7 @@ def main():
     # ---- attribute the REAL endpoint bill to GLM runs by concurrency -----------------------------
     # collect() priced each GLM run "sole" (its own generation-seconds × rate). But the endpoint is
     # SHARED: several runs stream at once, and Modal bills the GPU wall-clock ONCE, not per concurrent
-    # request. So we re-price GLM the way aggregate.py does: split every generating second among the
+    # request. So we re-price GLM by concurrency: split every generating second among the
     # runs busy in that instant (attribute_cost) — a run that ran mostly alone keeps more of the bill
     # than one buried in a pack; the sum over runs is exactly rate × union(generation windows), never
     # double-counted for parallelism. The per-second rate is PINNED so the GLM total equals the real
@@ -817,7 +817,7 @@ def main():
         else:
             takeaway += "."
 
-    # ---- HTML report (its own filename so it never clobbers aggregate.py's report.html) ----
+    # ---- HTML report ----
     out = os.path.join(run_dir, "progress_report.html")
     write_html(out, run_dir, runs, rows, comp, cell, cost_is_real, peak_c, avg_c, takeaway, run_rows)
     _step(5, STEPS, f"html → {out}")
