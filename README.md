@@ -111,7 +111,7 @@ report in one step. Configure `REMOTE` / `REMOTE_RESULTS` in `.env`.
 ### Output (written next to the run, in `results/<run-id>/`)
 
 - `progress_report.html` — **pass@k** (task solved in ≥1 run) + **pass@1** (per-run) success, and cost per solved task, per setup
-- `per_run.csv` — one row per run (task, setup, passed, `billed_usd`/`sole_usd`, tokens, steps)
+- `per_run.csv` — one row per run: `orchestration_s` (full job) ⊇ `session_s` (agent session) ⊇ `generation_s` (GPU/API generation = cost basis), plus `billed_usd`/`sole_usd`, tokens, steps
 - `summary.csv` — per-setup rollup
 - `deepswe_task_difficulty.csv` — per-task complexity + pass rate
 - `billing.json` — the actual Modal endpoint bill over the GLM-active window (unless `--no-billing`)

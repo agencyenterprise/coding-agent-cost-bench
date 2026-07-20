@@ -438,7 +438,9 @@ def collect(run_dir):
                      "label": entry, "ivs": ivs,
                      # 'sole' = this run priced ALONE (before the concurrency split overwrites 'cost');
                      # keeps the per_run.csv sole_usd column and the summary sole totals.
-                     "sole": cost, "elapsed": dur, "steps": pm["steps"], "tin": tin, "tout": pm["out"]})
+                     # three nested times: elapsed (agent session) ⊇ generation (GPU/API gen = cost basis).
+                     "sole": cost, "elapsed": dur, "generation": pm.get("call_s", 0.0),
+                     "steps": pm["steps"], "tin": tin, "tout": pm["out"]})
         a = task_stat[task]
         a["runs"] += 1
         a["steps"] += pm["steps"]; a["tools"] += pm["tools"]; a["out"] += pm["out"]
@@ -742,19 +744,31 @@ def main():
     # ---- per_run.csv + summary.csv --------------------------------------------------------------
     # Regenerated from THESE verified numbers, so they match the HTML tables and reconcile to the real
     # bill (billed_usd sums to billing.json). 'billed_usd' = concurrency-split real cost; 'sole_usd' =
-    # the same run priced alone (the old inflated basis) — kept for comparison.
+    # the same run priced alone (the old inflated basis) — kept for comparison. Three nested times per
+    # run: orchestration_s (full pier job: build+agent+grade+teardown) ⊇ session_s (agent session,
+    # first→last log event) ⊇ generation_s (GPU/API generation = Σ step_start→step_finish = the COST
+    # BASIS). billed_usd is derived from generation_s split by concurrency, not from the wall-clocks.
     def _mord(m):
         return MODEL_ORDER.index(m) if m in MODEL_ORDER else len(MODEL_ORDER)
+    man = {}   # label -> manifest row, for orchestration_s + start/end (the job wall-clock)
+    mpath = os.path.join(run_dir, "manifest.csv")
+    if os.path.exists(mpath):
+        for row in csv.DictReader(open(mpath)):
+            man[os.path.basename((row.get("outdir") or "").rstrip("/"))] = row
     pr_path = os.path.join(run_dir, "per_run.csv")
     with open(pr_path, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["task", "setup", "run", "passed", "billed_usd", "sole_usd",
-                    "elapsed_s", "steps", "tokens_in", "tokens_out"])
+        w.writerow(["task", "setup", "run", "passed", "start", "end",
+                    "orchestration_s", "session_s", "generation_s",
+                    "billed_usd", "sole_usd", "steps", "tokens_in", "tokens_out"])
         for r in sorted(runs, key=lambda r: (_mord(r["model"]), r["task"], r["run"])):
+            m = man.get(r["label"], {})
             w.writerow([r["task"], r["model"], r["run"], int(r["passed"]),
+                        m.get("start", ""), m.get("end", ""), m.get("duration_s", ""),
+                        round(r["elapsed"], 1), round(r["generation"], 1),
                         "" if r["cost"] is None else round(r["cost"], 4),
                         "" if r["sole"] is None else round(r["sole"], 4),
-                        round(r["elapsed"], 1), r["steps"], r["tin"], r["tout"]])
+                        r["steps"], r["tin"], r["tout"]])
     sole_tot = defaultdict(float)
     for r in runs:
         if r["sole"] is not None:
