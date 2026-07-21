@@ -1,0 +1,124 @@
+{
+  "app": "ep-Modal-Auto-Endpoints",
+  "window_start": "2026-07-15T18:36:25.367000+00:00",
+  "window_end": "2026-07-16T22:59:53.325000+00:00",
+  "window_hours": 16.626,
+  "cost": 875.0725,
+  "effective_hourly": 52.6323,
+  "by_hour": [
+    {
+      "hour": "2026-07-15T18:00:00+00:00",
+      "hour_cost": 50.9211,
+      "glm_seconds_in_hour": 1415,
+      "billed": 20.0096
+    },
+    {
+      "hour": "2026-07-15T19:00:00+00:00",
+      "hour_cost": 51.021,
+      "glm_seconds_in_hour": 3600,
+      "billed": 51.021
+    },
+    {
+      "hour": "2026-07-15T20:00:00+00:00",
+      "hour_cost": 51.1065,
+      "glm_seconds_in_hour": 3600,
+      "billed": 51.1065
+    },
+    {
+      "hour": "2026-07-15T21:00:00+00:00",
+      "hour_cost": 51.1852,
+      "glm_seconds_in_hour": 3600,
+      "billed": 51.1852
+    },
+    {
+      "hour": "2026-07-15T22:00:00+00:00",
+      "hour_cost": 51.2586,
+      "glm_seconds_in_hour": 3600,
+      "billed": 51.2586
+    },
+    {
+      "hour": "2026-07-15T23:00:00+00:00",
+      "hour_cost": 51.3537,
+      "glm_seconds_in_hour": 3600,
+      "billed": 51.3537
+    },
+    {
+      "hour": "2026-07-16T00:00:00+00:00",
+      "hour_cost": 51.3959,
+      "glm_seconds_in_hour": 126,
+      "billed": 1.8058
+    },
+    {
+      "hour": "2026-07-16T11:00:00+00:00",
+      "hour_cost": 51.4507,
+      "glm_seconds_in_hour": 1456,
+      "billed": 20.8083
+    },
+    {
+      "hour": "2026-07-16T12:00:00+00:00",
+      "hour_cost": 55.5319,
+      "glm_seconds_in_hour": 3600,
+      "billed": 55.5319
+    },
+    {
+      "hour": "2026-07-16T13:00:00+00:00",
+      "hour_cost": 61.4499,
+      "glm_seconds_in_hour": 3600,
+      "billed": 61.4499
+    },
+    {
+      "hour": "2026-07-16T14:00:00+00:00",
+      "hour_cost": 50.8465,
+      "glm_seconds_in_hour": 2904,
+      "billed": 41.0176
+    },
+    {
+      "hour": "2026-07-16T15:00:00+00:00",
+      "hour_cost": 50.9276,
+      "glm_seconds_in_hour": 3560,
+      "billed": 50.3574
+    },
+    {
+      "hour": "2026-07-16T16:00:00+00:00",
+      "hour_cost": 50.9949,
+      "glm_seconds_in_hour": 3600,
+      "billed": 50.9949
+    },
+    {
+      "hour": "2026-07-16T17:00:00+00:00",
+      "hour_cost": 62.5739,
+      "glm_seconds_in_hour": 3600,
+      "billed": 62.5739
+    },
+    {
+      "hour": "2026-07-16T18:00:00+00:00",
+      "hour_cost": 50.8241,
+      "glm_seconds_in_hour": 3600,
+      "billed": 50.8241
+    },
+    {
+      "hour": "2026-07-16T19:00:00+00:00",
+      "hour_cost": 50.8755,
+      "glm_seconds_in_hour": 3600,
+      "billed": 50.8755
+    },
+    {
+      "hour": "2026-07-16T20:00:00+00:00",
+      "hour_cost": 50.9282,
+      "glm_seconds_in_hour": 3600,
+      "billed": 50.9282
+    },
+    {
+      "hour": "2026-07-16T21:00:00+00:00",
+      "hour_cost": 51.0105,
+      "glm_seconds_in_hour": 3600,
+      "billed": 51.0105
+    },
+    {
+      "hour": "2026-07-16T22:00:00+00:00",
+      "hour_cost": 51.0543,
+      "glm_seconds_in_hour": 3593,
+      "billed": 50.9597
+    }
+  ]
+}
