@@ -9,7 +9,7 @@ against **Claude Opus** across GLM's reasoning tiers.
 
 ## Results
 
-Our study — **4 runs × 33 DeepSWE v1.1 tasks** — is in [`study/deepswe-v1.1-33task/`](study/deepswe-v1.1-33task/)
+Our study — **4 runs × 33 DeepSWE v1.1 tasks** — is in [`results/deepswe-v1.1-33task/`](results/deepswe-v1.1-33task/)
 (task list, per-run CSVs, billing, and the rendered report). Headline, under the observed concurrency:
 
 | Setup | pass@k (tasks solved) | $/attempt | $/completed task |
@@ -190,5 +190,7 @@ setup_auto_endpoint.sh        provision the GLM-5.2 Modal auto-endpoint (idempot
 benchmark_progress_report.py  the report (run locally): pass@k / pass@1 + cost, real bill split by concurrency
 verify_report.py              correctness gate for the report's numbers
 sync-and-report.sh            pull a run from a remote box, then run the report
-study/                        frozen study results (task list + CSVs + billing + report)
+create_study.sh               name a run (study/<name>/, local) and freeze it into results/<name>/
+results/<name>/               committed study: task list + CSVs + billing + rendered report
+study/                        local scratch — raw per-run runs (gitignored)
 ```
