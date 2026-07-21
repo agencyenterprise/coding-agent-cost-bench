@@ -7,6 +7,20 @@ tasks through each agent setup, grades every attempt with the task's own tests, 
 report comparing success rate and cost. It's built to weigh **self-hosted GLM-5.2 (on Modal, 8×B200)**
 against **Claude Opus** across GLM's reasoning tiers.
 
+## Results
+
+Our study — **4 runs × 33 DeepSWE v1.1 tasks** — is in [`study/deepswe-v1.1-33task/`](study/deepswe-v1.1-33task/)
+(task list, per-run CSVs, billing, and the rendered report). Headline, under the observed concurrency:
+
+| Setup | pass@k (tasks solved) | $/attempt | $/completed task |
+|---|---|---|---|
+| Claude Opus 4.8 · Claude Code | 24/33 | $6.68 | $36.72 |
+| GLM-5.2 · high reasoning · Modal | 23/33 | **$1.88** | **$10.77** |
+
+GLM-5.2 (high) finished the same work at **~72% lower cost** while solving nearly as many tasks —
+when the endpoint stays busy (a task alone on the GPU is ~$9). Full numbers and method in the study
+folder.
+
 ## Setups
 
 | Setup | Harness | Model / tier |
@@ -176,4 +190,5 @@ setup_auto_endpoint.sh        provision the GLM-5.2 Modal auto-endpoint (idempot
 benchmark_progress_report.py  the report (run locally): pass@k / pass@1 + cost, real bill split by concurrency
 verify_report.py              correctness gate for the report's numbers
 sync-and-report.sh            pull a run from a remote box, then run the report
+study/                        frozen study results (task list + CSVs + billing + report)
 ```
