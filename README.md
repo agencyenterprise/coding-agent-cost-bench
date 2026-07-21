@@ -119,7 +119,7 @@ python3 verify_report.py             runs/<run-id>     # correctness gate (recom
 the Modal bill pull and falls back to the modeled GPU rate. `verify_report.py` re-derives every number
 from the raw files and fails loudly on any mismatch.
 
-**Pulling from a remote box?** `./sync-and-report.sh [RUN_ID]` SSH-pulls the run dir and runs the
+**Pulling from a remote box?** `./pull_run_from_server.sh [RUN_ID]` SSH-pulls the run dir and runs the
 report in one step. Configure `REMOTE` / `REMOTE_RUNS` in `.env`.
 
 ### Output (written next to the run, in `runs/<run-id>/`)
@@ -141,7 +141,7 @@ Copy `.env.example` and fill in:
 | `MODAL_KEY` / `MODAL_SECRET` | proxy token (`wk-…` / `ws-…`) authenticating requests **to** the endpoint — GLM setups |
 | `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` | Modal account token (`ak-…` / `as-…`) — provisioning + real billing |
 | `ANTHROPIC_API_KEY` | Claude Opus — `opus` setup |
-| `REMOTE` / `REMOTE_RUNS` | *(optional)* SSH target for `sync-and-report.sh` |
+| `REMOTE` / `REMOTE_RUNS` | *(optional)* SSH target for `pull_run_from_server.sh` |
 
 Create the **proxy token** with `modal workspace proxy-tokens create` (or let `setup_auto_endpoint.sh`
 print one). Create the **account token** at [modal.com/settings/tokens](https://modal.com/settings/tokens)
@@ -189,7 +189,7 @@ reasoning_proxy.py            GLM reasoning-tier sidecar (router mode)
 setup_auto_endpoint.sh        provision the GLM-5.2 Modal auto-endpoint (idempotent)
 benchmark_progress_report.py  the report (run locally): pass@k / pass@1 + cost, real bill split by concurrency
 verify_report.py              correctness gate for the report's numbers
-sync-and-report.sh            pull a run from a remote box, then run the report
+pull_run_from_server.sh       pull a run from the server, then run the report
 create_result.sh              name a run (runs/<name>/, local) and freeze it into results/<name>/
 results/<name>/               committed result: task list + CSVs + billing + rendered report
 runs/                         local scratch — raw per-run runs (gitignored)

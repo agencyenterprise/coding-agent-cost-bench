@@ -2,7 +2,7 @@
 # Pull a benchmark run from the AWS box, replace the local copy under ./runs/, and
 # render the interim progress report — safe to run while the benchmark is still going.
 #
-# Usage:  ./sync-and-report.sh [RUN_ID]
+# Usage:  ./pull_run_from_server.sh [RUN_ID]
 #   RUN_ID  runs-folder name on the remote (default: newest dir under the remote runs/).
 # Config comes from .env (REMOTE, REMOTE_RUNS); env vars override.
 set -euo pipefail
