@@ -14,7 +14,7 @@ The GLM tiers share ONE reasoning-proxy sidecar on http://<HOST_IP>:80 (pier's S
 ports 80/443, so tiers are distinguished by URL path, not port). --host-ip is the address Squid uses
 to reach the sidecar (the box's private IP; the entrypoint fills it from $HOST_IP).
 
-This produces RAW results only; reporting is a separate LOCAL step (benchmark_progress_report.py):
+This produces RAW per-run output only; reporting is a separate LOCAL step (benchmark_progress_report.py):
   <out>/manifest.csv                 one row per run (task,harness,model,prompt,run,status,start,end,...)
   <out>/<label>/output.log           the agent's JSON-lines log (copied from pier's agent/*.txt)
   <out>/<label>/usage.json           token totals derived from the log (opencode setups)
@@ -238,8 +238,8 @@ def main():
     ap.add_argument("--runs", type=int, default=1, help="attempts per (setup, task) [%(default)s]")
     ap.add_argument("--jobs", type=int, default=4, help="parallel pier runs [%(default)s]")
     ap.add_argument("--tasks-dir", default=os.environ.get("TASKS_DIR", "deep-swe-main/tasks"))
-    ap.add_argument("--out", default=os.environ.get("OUT_DIR", "results"),
-                    help="results dir (report + csvs land here) [%(default)s]")
+    ap.add_argument("--out", default=os.environ.get("OUT_DIR", "runs"),
+                    help="dir raw per-run output lands under (as <out>/<run-id>/) [%(default)s]")
     ap.add_argument("--work-dir", default=os.environ.get("WORK_DIR", ""),
                     help="pier job tree dir [default: <out>/<run-id>/pier-jobs]")
     ap.add_argument("--run-id", default=os.environ.get("RUN_ID", ""),

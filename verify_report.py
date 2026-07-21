@@ -6,7 +6,7 @@ INDEPENDENT recomputation from the raw files (manifest.csv, reward.json, billing
 not against the report's own internals. Also runs a synthetic fixture with a hand-computed answer to
 prove the concurrency split (attribute_cost) is exact.
 
-    python3 verify_report.py results/<run>        # exits non-zero (and prints FAIL) on any mismatch
+    python3 verify_report.py runs/<run-id>        # exits non-zero (and prints FAIL) on any mismatch
 """
 import csv, json, os, sys
 from collections import defaultdict
@@ -150,7 +150,7 @@ def test_against_report(run_dir):
 def main():
     run_dir = sys.argv[1] if len(sys.argv) > 1 else None
     if not run_dir or not os.path.isdir(run_dir):
-        sys.exit("usage: python3 verify_report.py results/<run>")
+        sys.exit("usage: python3 verify_report.py runs/<run-id>")
     print("== synthetic fixture ==")
     test_fixture()
     print(f"\n== against {run_dir} ==")

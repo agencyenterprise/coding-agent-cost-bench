@@ -38,7 +38,7 @@ and forwards to the endpoint (see [Reasoning tiers](#reasoning-tiers)).
 ## Pipeline at a glance
 
 1. **Provision** the GLM auto-endpoint on Modal — once — with `./setup_auto_endpoint.sh`. *(GLM setups only.)*
-2. **Run** the benchmark — one `docker run` — which writes raw per-run results + `manifest.csv` to `runs/<run-id>/`.
+2. **Run** the benchmark — one `docker run` — which writes raw per-run output + `manifest.csv` to `runs/<run-id>/`.
 3. **Report** — `python3 benchmark_progress_report.py runs/<run-id>` — locally, producing `progress_report.html` + CSVs.
 
 ## 1. Provision the GLM endpoint (Modal)
@@ -86,7 +86,7 @@ docker run --rm -p 80:80 \
   --runs 4 --jobs 10
 ```
 
-Raw results land under `runs/<run-id>/`: one folder per run
+Raw per-run output lands under `runs/<run-id>/`: one folder per run
 (`<setup>__<task>__runN/` with `output.log`, `reward.json`, `usage.json`, `model.patch`) plus
 `manifest.csv`. Turn these into a report in step 3.
 

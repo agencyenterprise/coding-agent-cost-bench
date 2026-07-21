@@ -1,5 +1,5 @@
 # DeepSWE cost benchmark — one `docker run` fans pier over (setup × task × run) on contamination-free
-# DeepSWE tasks and writes raw per-run results + manifest.csv to /out. The report (progress_report.html
+# DeepSWE tasks and writes raw per-run output + manifest.csv to /out. The report (progress_report.html
 # + CSVs) is generated locally afterward with benchmark_progress_report.py — not by this image.
 #
 # pier drives the HOST docker (via the mounted socket) to build & run each task's own container and
@@ -18,7 +18,7 @@
 #   #    (+ pier-jobs/). Then locally: python3 benchmark_progress_report.py $DIR/<timestamp>
 #
 # ONE data mount, mounted at the SAME path inside and out (-v "$DIR:$DIR"): everything for a run —
-# per-run results, manifest.csv, and the pier job tree — lands under $DIR/<timestamp>/. The mount is required
+# per-run output, manifest.csv, and the pier job tree — lands under $DIR/<timestamp>/. The mount is required
 # because pier drives the HOST daemon, which bind-mounts the job tree into task containers by literal
 # path (docker-out-of-docker), so the path must resolve identically on both sides. Each invocation
 # gets its own timestamped subfolder, so repeated runs never clobber.
