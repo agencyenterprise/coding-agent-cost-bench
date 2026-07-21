@@ -560,7 +560,7 @@ def write_html(path, run_dir, runs, model_rows, comp, cell, cost_is_real=False,
 <title>Benchmark progress — {esc(os.path.basename(run_dir))}</title>
 <style>{_HTML_CSS}</style></head><body><div class=wrap>
 <h1>Benchmark progress <span style="color:var(--muted);font-weight:400">· interim</span></h1>
-<p class=sub>{esc(run_dir)} · {len(runs)} runs so far · {len(comp)} tasks · peak {peak_c} concurrent · avg {avg_c}×</p>
+<p class=sub>{esc(os.path.basename(os.path.normpath(run_dir)))} · {len(runs)} runs so far · {len(comp)} tasks · peak {peak_c} concurrent · avg {avg_c}×</p>
 {f'<p class=take>{esc(takeaway)}</p>' if takeaway else ''}
 
 <div class=explain>

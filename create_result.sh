@@ -47,6 +47,24 @@ for f in manifest.csv per_run.csv summary.csv deepswe_task_difficulty.csv billin
   if [ -f "$RUN/$f" ]; then cp "$RUN/$f" "$DST/"; else echo "  (missing, skipped: $f)"; fi
 done
 
+# sanitize manifest.csv 'outdir' -> basename, so the committed copy never leaks the absolute
+# server/local path (e.g. /home/ubuntu/... or /Users/...). The report only uses the basename anyway.
+if [ -f "$DST/manifest.csv" ]; then
+  python3 - "$DST/manifest.csv" <<'PY'
+import csv, os, sys
+p = sys.argv[1]
+rows = list(csv.reader(open(p)))
+hdr = rows[0]
+if "outdir" in hdr:
+    i = hdr.index("outdir")
+    for r in rows[1:]:
+        if len(r) > i:
+            r[i] = os.path.basename(r[i].rstrip("/"))
+    csv.writer(open(p, "w", newline="")).writerows(rows)
+    print("  manifest.csv: outdir -> basename")
+PY
+fi
+
 # tasks.txt — the task names actually run, from the manifest
 python3 - "$RUN/manifest.csv" "$DST/tasks.txt" <<'PY'
 import csv, sys
