@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Pull a benchmark run from the AWS box, replace the local copy under ./study/, and
+# Pull a benchmark run from the AWS box, replace the local copy under ./runs/, and
 # render the interim progress report — safe to run while the benchmark is still going.
 #
 # Usage:  ./sync-and-report.sh [RUN_ID]
-#   RUN_ID  study-folder name on the remote (default: newest dir under the remote study/).
-# Config comes from .env (REMOTE, REMOTE_STUDY); env vars override.
+#   RUN_ID  runs-folder name on the remote (default: newest dir under the remote runs/).
+# Config comes from .env (REMOTE, REMOTE_RUNS); env vars override.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 [ -f "$HERE/.env" ] && { set -a; . "$HERE/.env"; set +a; }
 
 REMOTE="${REMOTE}"
-REMOTE_STUDY="${REMOTE_STUDY:-study}"
-LOCAL_STUDY="$HERE/study"
+REMOTE_RUNS="${REMOTE_RUNS:-runs}"
+LOCAL_RUNS="$HERE/runs"
 STEPS=3
 
 step() {
@@ -22,14 +22,14 @@ step() {
 
 RUN="${1:-}"
 if [ -z "$RUN" ]; then
-  RUN="$(ssh "$REMOTE" "ls -1dt $REMOTE_STUDY/*/ 2>/dev/null | head -1 | xargs -n1 basename")"
+  RUN="$(ssh "$REMOTE" "ls -1dt $REMOTE_RUNS/*/ 2>/dev/null | head -1 | xargs -n1 basename")"
 fi
 [ -n "$RUN" ] || { echo "no run id" >&2; exit 1; }
 step 1 "resolve $RUN"
 
-TARBALL="$LOCAL_STUDY/$RUN.tar.gz"
-mkdir -p "$LOCAL_STUDY"
-# Stream the tarball from the remote: cd into the study dir, tar just RUN so archive paths
+TARBALL="$LOCAL_RUNS/$RUN.tar.gz"
+mkdir -p "$LOCAL_RUNS"
+# Stream the tarball from the remote: cd into the runs dir, tar just RUN so archive paths
 # are RUN/... (decoupled from the remote dir name). EXCLUDE pier-jobs — it's live pier scratch
 # (task-container fs / root-owned agent sessions) the report never reads; pulling it mid-run is
 # what triggered the "Permission denied" warnings and shipped GBs of scratch. Excluding it means
@@ -38,7 +38,7 @@ mkdir -p "$LOCAL_STUDY"
 # Mid-run: tar may warn "file changed as we read it" (bench still writing) and exit 1 — that's OK.
 # Progress MB uses \r; tar warnings are forced onto their own line so they don't glue to it.
 set +e
-ssh "$REMOTE" "tar czf - --exclude='$RUN/pier-jobs' --ignore-failed-read -C $REMOTE_STUDY '$RUN'" \
+ssh "$REMOTE" "tar czf - --exclude='$RUN/pier-jobs' --ignore-failed-read -C $REMOTE_RUNS '$RUN'" \
   2> >(while IFS= read -r line || [ -n "$line" ]; do printf '\r\033[K%s\n' "$line" >&2; done) \
   | python3 -c '
 import sys
@@ -61,9 +61,9 @@ MB="$(python3 -c "import os; print(f'{os.path.getsize(\"$TARBALL\") / (1 << 20):
 step 2 "download ${MB} MB"
 
 # replace: drop the old copy, then extract fresh
-rm -rf "$LOCAL_STUDY/$RUN"
-tar xzf "$TARBALL" -C "$LOCAL_STUDY"
+rm -rf "$LOCAL_RUNS/$RUN"
+tar xzf "$TARBALL" -C "$LOCAL_RUNS"
 rm -f "$TARBALL"
-step 3 "extract → $LOCAL_STUDY/$RUN"
+step 3 "extract → $LOCAL_RUNS/$RUN"
 
-python3 "$HERE/benchmark_progress_report.py" "$LOCAL_STUDY/$RUN"
+python3 "$HERE/benchmark_progress_report.py" "$LOCAL_RUNS/$RUN"

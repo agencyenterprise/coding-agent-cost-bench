@@ -1,4 +1,4 @@
-# The 33 DeepSWE v1.1 tasks in this study (of the benchmark's 113).
+# The 33 DeepSWE v1.1 tasks in this run (of the benchmark's 113).
 # Selection: the first 18 in list order (alphabetical) + 15 more sampled across the remainder.
 # One task per line. Reproduce with:
 #   --tasks "$(paste -sd, tasks.txt | tr -d ' ')"   (skips these comment lines if you grep -v '^#')

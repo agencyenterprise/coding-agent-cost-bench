@@ -1,4 +1,4 @@
-# Study: GLM-5.2 on Modal vs Claude Opus — 33 DeepSWE v1.1 tasks
+# GLM-5.2 on Modal vs Claude Opus — 33 DeepSWE v1.1 tasks
 
 Frozen results for the cost-per-solved-task comparison. **4 runs × 33 tasks** per setup
 (132 attempts each), graded by each task's own tests. GLM-5.2-FP8 on an 8×B200 Modal Auto
@@ -46,7 +46,7 @@ by re-running the benchmark, or ask for the archive.
 TASKS=$(grep -v '^#' tasks.txt | paste -sd, -)
 docker run --rm ... ghcr.io/agencyenterprise/coding-agent-cost-bench:latest \
   --setups glm-default,glm-high,glm-nothink,opus --tasks "$TASKS" --runs 4 --jobs 10
-python3 benchmark_progress_report.py results/<run-id>   # -> these CSVs + report
+python3 benchmark_progress_report.py runs/<run-id>   # -> these CSVs + report
 ```
 
 See the repo root README for full setup (Modal endpoint, credentials, wiring).

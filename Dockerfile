@@ -6,7 +6,7 @@
 # inject the agent CLI into it — so this image ships only python + the docker CLI + pier + the
 # orchestrator, NOT node/opencode/claude-code (pier installs those inside each task image).
 #
-#   DIR="$PWD/study-deepswe"; mkdir -p "$DIR"
+#   DIR="$PWD/runs-deepswe"; mkdir -p "$DIR"
 #   docker run --rm -p 80:80 \
 #     -v /var/run/docker.sock:/var/run/docker.sock \
 #     -v "$DIR:$DIR" -e OUT_DIR="$DIR" \

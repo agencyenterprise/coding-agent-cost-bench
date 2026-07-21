@@ -1,6 +1,6 @@
 .git
 results
-study
+runs
 .cache
 **/.venv
 node_modules
