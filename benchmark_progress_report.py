@@ -16,7 +16,7 @@ Two tables:
   * Per-task:  Complexity + Pass / Fail / Pass Rate pooled across all models.
 
 Usage: python3 benchmark_progress_report.py [RUN_DIR] [--no-billing]
-  RUN_DIR defaults to the newest folder under results/. Refreshes billing.json first so
+  RUN_DIR defaults to the newest folder under runs/. Refreshes billing.json first so
   the cost column is the real GLM bill; pass --no-billing to skip that (uses modeled cost).
 """
 import csv
@@ -265,10 +265,10 @@ def _bill_is_self_hosted(model):
     return (model or "").lower().split("/")[0].startswith("modal")
 
 
-def _bill_glm_intervals(results_dir):
+def _bill_glm_intervals(run_dir):
     """Absolute-epoch (start, end) windows of self-hosted (GLM) jobs only, from manifest.csv."""
     ivs = []
-    with open(os.path.join(results_dir, "manifest.csv")) as f:
+    with open(os.path.join(run_dir, "manifest.csv")) as f:
         for r in csv.DictReader(f):
             if not _bill_is_self_hosted(r.get("model")):
                 continue
@@ -300,13 +300,13 @@ def _bill_covered_seconds(merged, a, b):
     return tot
 
 
-def refresh_billing(results_dir, app="ep-Modal-Auto-Endpoints"):
+def refresh_billing(run_dir, app="ep-Modal-Auto-Endpoints"):
     """Pull the ACTUAL Modal bill for the GLM endpoint, counting ONLY GLM-active time (union of GLM
-    job windows), and write <results_dir>/billing.json. Best-effort: needs `modal` + Modal creds
+    job windows), and write <run_dir>/billing.json. Best-effort: needs `modal` + Modal creds
     (MODAL_TOKEN_ID/SECRET). Returns the dict, or None if there are no GLM windows / on failure."""
     from datetime import datetime, timedelta, timezone
     import modal
-    ivs = _bill_glm_intervals(results_dir)
+    ivs = _bill_glm_intervals(run_dir)
     if not ivs:
         return None
     merged = _bill_merge(ivs)
@@ -338,7 +338,7 @@ def refresh_billing(results_dir, app="ep-Modal-Auto-Endpoints"):
     out = {"app": app, "window_start": start.isoformat(), "window_end": end.isoformat(),
            "window_hours": round(active_h, 3), "cost": round(total, 4),
            "effective_hourly": round(total / active_h, 4) if active_h else None, "by_hour": by_hour}
-    with open(os.path.join(results_dir, "billing.json"), "w") as f:
+    with open(os.path.join(run_dir, "billing.json"), "w") as f:
         json.dump(out, f, indent=2)
     return out
 
@@ -560,7 +560,7 @@ def write_html(path, run_dir, runs, model_rows, comp, cell, cost_is_real=False,
 <title>Benchmark progress — {esc(os.path.basename(run_dir))}</title>
 <style>{_HTML_CSS}</style></head><body><div class=wrap>
 <h1>Benchmark progress <span style="color:var(--muted);font-weight:400">· interim</span></h1>
-<p class=sub>{esc(run_dir)} · {len(runs)} runs so far · {len(comp)} tasks · peak {peak_c} concurrent · avg {avg_c}×</p>
+<p class=sub>{esc(os.path.basename(os.path.normpath(run_dir)))} · {len(runs)} runs so far · {len(comp)} tasks · peak {peak_c} concurrent · avg {avg_c}×</p>
 {f'<p class=take>{esc(takeaway)}</p>' if takeaway else ''}
 
 <div class=explain>
@@ -613,7 +613,7 @@ def main():
     argv = [a for a in sys.argv[1:] if a != "--no-billing"]
     no_billing = "--no-billing" in sys.argv
     default = None
-    base = Path("results")
+    base = Path("runs")
     if base.is_dir():
         subs = sorted((p for p in base.iterdir() if p.is_dir()), reverse=True)
         default = str(subs[0]) if subs else None

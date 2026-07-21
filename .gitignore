@@ -8,5 +8,5 @@ tasks/*
 !tasks/demo-*/
 .cache/
 out/
-results/
+runs/
 .DS_Store
