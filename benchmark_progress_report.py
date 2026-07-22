@@ -207,55 +207,48 @@ def attribute_cost(owned_intervals, rate_per_sec):
     return out
 
 
-# Runs on the shared endpoint can fall in DISJOINT episodes (e.g. a re-run days later). Pricing them
-# all against one global rate lets an expensive (autoscaled) hour in a later episode inflate earlier
-# runs' cost — and a run leaving one episode shifts the split for setups that only ran in another.
-# So we attribute PER EPISODE: activity separated by more than this gap is billed independently,
-# each episode against only the bill incurred during it. 24h cleanly separates same-session pauses
-# (hours) from separate-day re-runs, and keeps a multi-hour mid-study idle gap in one episode.
-EPISODE_GAP_S = 24 * 3600.0
-
-
-def _episode_clusters(owned, gap=EPISODE_GAP_S):
-    """[(start, end), ...] activity episodes: generation windows merged across gaps <= `gap`."""
-    clusters = []
-    for s, e in sorted((s, e) for s, e, _o in owned):
-        if clusters and s - clusters[-1][1] <= gap:
-            clusters[-1][1] = max(clusters[-1][1], e)
-        else:
-            clusters.append([s, e])
-    return clusters
-
-
 def _hour_ts(iso):
     from datetime import datetime
     return datetime.fromisoformat(iso).timestamp()
 
 
-def attribute_by_episode(owned, by_hour, fallback_rate, gap=EPISODE_GAP_S):
-    """Concurrency attribution done PER EPISODE. Returns (billed, sole): {label: $}.
-      billed — real bill split by who was generating when, WITHIN each episode (so a later isolated
-               run can't re-price earlier runs through one blended rate). Each episode's rate is its
-               own real cost (sum of its billing.json hours) ÷ its generation-union; sum over labels
-               == sum of by_hour 'billed' (the real bill). Without by_hour, falls back to
-               `fallback_rate` (modeled) per episode → sum == fallback_rate × total union.
-      sole   — each run's as-if-alone cost at ITS episode's rate (generation-seconds × rate), so the
-               'concurrency only ever discounts' invariant (billed <= sole) holds per episode."""
+def attribute_by_billing_hour(owned, by_hour, fallback_rate):
+    """Cost attribution by CONCURRENCY INTERVAL, priced per billing hour — the endpoint's real bill
+    split among the runs that used it, hour by hour.
+
+    The timeline is implicitly cut at every task start, task end, AND hourly rate change; each slice's
+    cost is shared equally among the runs active in it. We do it one billing hour at a time: each
+    hour's REAL cost (billing.json 'billed') is split by concurrency (attribute_cost) among the runs
+    generating during that hour. Because every hour carries its OWN rate, an expensive (autoscaled)
+    hour is charged only to whoever actually ran in it — a later run can never re-price an earlier
+    hour, and setups that ran only in cheap hours are untouched by pricey ones elsewhere.
+
+    Returns (billed, sole):
+      billed — concurrency-shared real cost; sums to Σ by_hour 'billed' == the real Modal bill.
+      sole   — each run's as-if-alone cost at each hour's rate (its generation-seconds × that hour's
+               rate), so the 'concurrency only ever discounts' invariant (billed <= sole) holds.
+    Without by_hour (no real bill), one flat `fallback_rate` over everything (still concurrency-split)."""
     billed, sole = defaultdict(float), defaultdict(float)
-    for cs, ce in _episode_clusters(owned, gap):
-        cown = [(s, e, o) for (s, e, o) in owned if e > cs and s < ce]
-        u = union_seconds([(s, e) for (s, e, _o) in cown])
+    if not by_hour:
+        for o, v in attribute_cost(owned, fallback_rate).items():
+            billed[o] += v
+        for s, e, o in owned:
+            sole[o] += (e - s) * fallback_rate
+        return billed, sole
+    for h in by_hour:
+        cost_h = float(h.get("billed", 0) or 0)
+        if cost_h <= 0:
+            continue
+        h0 = _hour_ts(h["hour"])
+        h1 = h0 + 3600.0
+        clip = [(max(s, h0), min(e, h1), o) for (s, e, o) in owned if min(e, h1) > max(s, h0)]
+        u = union_seconds([(s, e) for (s, e, _o) in clip])
         if u <= 0:
             continue
-        if by_hour:
-            cbill = sum(float(h.get("billed", 0) or 0) for h in by_hour
-                        if _hour_ts(h["hour"]) < ce and _hour_ts(h["hour"]) + 3600.0 > cs)
-            rate = cbill / u
-        else:
-            rate = fallback_rate
-        for o, v in attribute_cost(cown, rate).items():
+        rate = cost_h / u                    # this hour's real $/active-second (its own rate)
+        for o, v in attribute_cost(clip, rate).items():
             billed[o] += v
-        for s, e, o in cown:          # a run sits in one episode; its clipped ivs sum to its gen-seconds
+        for s, e, o in clip:
             sole[o] += (e - s) * rate
     return billed, sole
 
@@ -724,7 +717,7 @@ def main():
             pass
     if gen_union > 0:
         fallback_rate = (bill / gen_union) if bill else (GPU_HOURLY_USD / 3600.0)
-        billed, sole = attribute_by_episode(owned, by_hour, fallback_rate)   # per-episode, sums to bill
+        billed, sole = attribute_by_billing_hour(owned, by_hour, fallback_rate)   # per hour, sums to bill
         for r in runs:
             if r["model"] != "opus":
                 r["cost"] = billed.get(r["label"], 0.0)

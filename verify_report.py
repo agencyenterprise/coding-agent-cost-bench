@@ -40,6 +40,57 @@ def test_fixture():
     check("fixture sum == rate×union ($20)", abs(sum(got.values()) - 20.0) < EPS, f"{sum(got.values())}")
 
 
+# ---- 1b. Per-hour fixture: concurrency attribution across a rate change ----
+#
+# This is the case an episode-wide blended rate gets wrong.
+#
+# Four tasks share one endpoint. The effective infrastructure rate is:
+#   09:00–10:00: $50/hour
+#   10:00–11:00: $100/hour
+#
+# Allocation must split the timeline at every task boundary and billing-hour
+# boundary. The cost of each resulting segment is divided equally among the
+# distinct tasks active during that segment.
+#
+# Tasks:
+#   A: 09:50:00–10:10:00
+#   B: 09:55:00–10:05:00
+#   C: 09:59:30–10:00:30
+#   D: 10:00:00–10:20:00
+#
+# Expected allocation:
+#   09:50:00–09:55:00  $50/hr   A          $4.1667  / 1 = $4.1667
+#   09:55:00–09:59:30  $50/hr   A,B        $3.7500  / 2 = $1.8750 each
+#   09:59:30–10:00:00  $50/hr   A,B,C      $0.4167  / 3 = $0.1389 each
+#   10:00:00–10:00:30  $100/hr  A,B,C,D    $0.8333  / 4 = $0.2083 each
+#   10:00:30–10:05:00  $100/hr  A,B,D      $7.5000  / 3 = $2.5000 each
+#   10:05:00–10:10:00  $100/hr  A,D        $8.3333  / 2 = $4.1667 each
+#   10:10:00–10:20:00  $100/hr  D          $16.6667 / 1 = $16.6667
+#
+# Final:
+#   A     = $13.0556
+#   B     = $4.7222
+#   C     = $0.3472
+#   D     = $23.5417
+#   Total = $41.6667
+def test_billing_hour_fixture():
+    import datetime as _dt
+    base = _dt.datetime(2000, 1, 1, 9, 0, 0, tzinfo=_dt.timezone.utc)
+    b = base.timestamp()                                    # align owned to the by_hour epoch
+    owned = [(b + 3000, b + 4200, "A"), (b + 3300, b + 3900, "B"),
+             (b + 3570, b + 3630, "C"), (b + 3600, b + 4800, "D")]
+    by_hour = [{"hour": base.isoformat(), "billed": 50.0 / 3600 * 600},                 # 9:00 hr, 600s active
+               {"hour": (base + _dt.timedelta(hours=1)).isoformat(), "billed": 100.0 / 3600 * 1200}]  # 10:00 hr
+    billed, sole = R.attribute_by_billing_hour(owned, by_hour, 0.0)
+    exp = {"A": 13.0556, "B": 4.7222, "C": 0.3472, "D": 23.5417}
+    for k, v in exp.items():
+        check(f"rate-change fixture {k} == ${v}", abs(billed.get(k, 0) - v) < 0.01, f"{billed.get(k)}")
+    check("rate-change fixture sum == $41.6667", abs(sum(billed.values()) - 41.6667) < 0.01,
+          f"{sum(billed.values())}")
+    check("rate-change fixture billed <= sole (concurrency only discounts)",
+          all(billed[k] <= sole[k] + EPS for k in exp))
+
+
 # ---- 2. independent recompute of pass counts from reward.json (not the manifest, not the report) --
 def truth_from_disk(run_dir):
     """Per-model: runs, passing runs (reward==1), distinct tasks solved (pass@k), + raw manifest pass."""
@@ -153,6 +204,7 @@ def main():
         sys.exit("usage: python3 verify_report.py runs/<run-id>")
     print("== synthetic fixture ==")
     test_fixture()
+    test_billing_hour_fixture()
     print(f"\n== against {run_dir} ==")
     test_against_report(run_dir)
     print()
