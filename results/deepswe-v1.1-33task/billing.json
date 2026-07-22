@@ -1,10 +1,10 @@
 {
   "app": "ep-Modal-Auto-Endpoints",
   "window_start": "2026-07-15T18:36:25.367000+00:00",
-  "window_end": "2026-07-16T22:59:53.325000+00:00",
-  "window_hours": 16.626,
-  "cost": 875.0725,
-  "effective_hourly": 52.6323,
+  "window_end": "2026-07-21T23:08:53.062000+00:00",
+  "window_hours": 17.942,
+  "cost": 1005.234,
+  "effective_hourly": 56.0281,
   "by_hour": [
     {
       "hour": "2026-07-15T18:00:00+00:00",
@@ -119,6 +119,24 @@
       "hour_cost": 51.0543,
       "glm_seconds_in_hour": 3593,
       "billed": 50.9597
+    },
+    {
+      "hour": "2026-07-21T21:00:00+00:00",
+      "hour_cost": 52.7675,
+      "glm_seconds_in_hour": 603,
+      "billed": 8.8318
+    },
+    {
+      "hour": "2026-07-21T22:00:00+00:00",
+      "hour_cost": 119.3605,
+      "glm_seconds_in_hour": 3600,
+      "billed": 119.3605
+    },
+    {
+      "hour": "2026-07-21T23:00:00+00:00",
+      "hour_cost": 13.2988,
+      "glm_seconds_in_hour": 533,
+      "billed": 1.9692
     }
   ]
 }

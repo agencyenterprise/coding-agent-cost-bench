@@ -1,5 +1,5 @@
 setup,runs,pass_runs,run_pass_rate_pct,tasks_solved,tasks_total,task_pass_rate_pct,total_usd,avg_usd_per_run,usd_per_pass_run,usd_per_task_solved,total_sole_usd,cost_basis
 opus,132,60,45.5,24,33,72.7,881.3831,6.6771,14.6897,36.7243,881.3831,claude_code
-glm-default,132,45,34.1,22,33,66.7,404.3888,3.0636,8.9864,18.3813,1863.1655,real
-glm-high,132,56,42.4,23,33,69.7,247.7513,1.8769,4.4241,10.7718,1218.1,real
-glm-nothink,132,24,18.2,15,33,45.5,222.9323,1.6889,9.2888,14.8622,1097.9963,real
+glm-default,132,45,34.1,22,33,66.7,514.3469,3.8966,11.4299,23.3794,2718.6317,real
+glm-high,132,56,42.4,23,33,69.7,259.238,1.9639,4.6292,11.2712,1268.3068,real
+glm-nothink,132,24,18.2,15,33,45.5,231.6489,1.7549,9.652,15.4433,1138.7201,real
