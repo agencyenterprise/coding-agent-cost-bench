@@ -86,6 +86,10 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
         cfg["agents"] = [{
             "name": "opencode",
             "model_name": f"modal/{GLM_MODEL}",
+            # opencode hard-clamps output to OUTPUT_TOKEN_MAX (32000) via Math.min(limit.output, MAX);
+            # the ONLY way to lift it is this experimental env var. Without it, long GLM generations get
+            # cut at 32k with reason:length. 131072 = GLM-5.2's real output limit (endpoint imposes none).
+            "env": {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "131072"},
             "kwargs": {"opencode_config": {"provider": {"modal": {
                 "npm": "@ai-sdk/openai-compatible",
                 "options": {
@@ -93,7 +97,7 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
                     "apiKey": "dummy",
                     "headers": {"Modal-Key": env["MODAL_KEY"], "Modal-Secret": env["MODAL_SECRET"]},
                 },
-                "models": {GLM_MODEL: {}},
+                "models": {GLM_MODEL: {"limit": {"context": 262144, "output": 131072}}},
             }}}},
         }]
     else:  # claude-code (Opus)
