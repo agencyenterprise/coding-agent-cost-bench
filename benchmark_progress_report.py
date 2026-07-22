@@ -189,18 +189,75 @@ def attribute_cost(owned_intervals, rate_per_sec):
     out = defaultdict(float)
     if not ivs:
         return out
-    pts = sorted({s for s, _e, _o in ivs} | {e for _s, e, _o in ivs})
+    # Exact sweep in O(n log n): instead of touching every active owner in every segment (O(n^2)),
+    # build a prefix integral F(t) = ∫ rate / active_count(t) dt over the endpoints, then each owner
+    # interval's cost is F(end) - F(start). Sum over owners = rate × union(windows), same as before.
+    delta = defaultdict(int)
+    for s, e, _o in ivs:
+        delta[s] += 1
+        delta[e] -= 1
+    pts = sorted(delta)
+    F = {pts[0]: 0.0}
+    count = 0
     for a, b in zip(pts, pts[1:]):
-        dur = b - a
-        if dur <= 0:
-            continue
-        active = [o for (s, e, o) in ivs if s < b and e > a]
-        if not active:
-            continue
-        share = dur * rate_per_sec / len(active)
-        for o in active:
-            out[o] += share
+        count += delta[a]
+        F[b] = F[a] + ((b - a) * rate_per_sec / count if count > 0 else 0.0)
+    for s, e, o in ivs:
+        out[o] += F[e] - F[s]
     return out
+
+
+# Runs on the shared endpoint can fall in DISJOINT episodes (e.g. a re-run days later). Pricing them
+# all against one global rate lets an expensive (autoscaled) hour in a later episode inflate earlier
+# runs' cost — and a run leaving one episode shifts the split for setups that only ran in another.
+# So we attribute PER EPISODE: activity separated by more than this gap is billed independently,
+# each episode against only the bill incurred during it. 24h cleanly separates same-session pauses
+# (hours) from separate-day re-runs, and keeps a multi-hour mid-study idle gap in one episode.
+EPISODE_GAP_S = 24 * 3600.0
+
+
+def _episode_clusters(owned, gap=EPISODE_GAP_S):
+    """[(start, end), ...] activity episodes: generation windows merged across gaps <= `gap`."""
+    clusters = []
+    for s, e in sorted((s, e) for s, e, _o in owned):
+        if clusters and s - clusters[-1][1] <= gap:
+            clusters[-1][1] = max(clusters[-1][1], e)
+        else:
+            clusters.append([s, e])
+    return clusters
+
+
+def _hour_ts(iso):
+    from datetime import datetime
+    return datetime.fromisoformat(iso).timestamp()
+
+
+def attribute_by_episode(owned, by_hour, fallback_rate, gap=EPISODE_GAP_S):
+    """Concurrency attribution done PER EPISODE. Returns (billed, sole): {label: $}.
+      billed — real bill split by who was generating when, WITHIN each episode (so a later isolated
+               run can't re-price earlier runs through one blended rate). Each episode's rate is its
+               own real cost (sum of its billing.json hours) ÷ its generation-union; sum over labels
+               == sum of by_hour 'billed' (the real bill). Without by_hour, falls back to
+               `fallback_rate` (modeled) per episode → sum == fallback_rate × total union.
+      sole   — each run's as-if-alone cost at ITS episode's rate (generation-seconds × rate), so the
+               'concurrency only ever discounts' invariant (billed <= sole) holds per episode."""
+    billed, sole = defaultdict(float), defaultdict(float)
+    for cs, ce in _episode_clusters(owned, gap):
+        cown = [(s, e, o) for (s, e, o) in owned if e > cs and s < ce]
+        u = union_seconds([(s, e) for (s, e, _o) in cown])
+        if u <= 0:
+            continue
+        if by_hour:
+            cbill = sum(float(h.get("billed", 0) or 0) for h in by_hour
+                        if _hour_ts(h["hour"]) < ce and _hour_ts(h["hour"]) + 3600.0 > cs)
+            rate = cbill / u
+        else:
+            rate = fallback_rate
+        for o, v in attribute_cost(cown, rate).items():
+            billed[o] += v
+        for s, e, o in cown:          # a run sits in one episode; its clipped ivs sum to its gen-seconds
+            sole[o] += (e - s) * rate
+    return billed, sole
 
 
 def task_complexity(task_stat):
@@ -334,6 +391,7 @@ def refresh_billing(run_dir, app="ep-Modal-Auto-Endpoints"):
         active_s += cov
         by_hour.append({"hour": h0.isoformat(), "hour_cost": round(hour_cost, 4),
                         "glm_seconds_in_hour": round(cov), "billed": round(billed, 4)})
+    by_hour.sort(key=lambda r: r["hour"])   # Modal returns hours unordered; keep the file chronological
     active_h = active_s / 3600.0
     out = {"app": app, "window_start": start.isoformat(), "window_end": end.isoformat(),
            "window_hours": round(active_h, 3), "cost": round(total, 4),
@@ -628,9 +686,15 @@ def main():
     # bills only GLM-active time so far. On any failure the report falls back to modeled cost.
     if not no_billing:
         try:
-            refresh_billing(run_dir)
-        except Exception:
-            pass
+            if refresh_billing(run_dir) is None:
+                print("  ! billing: no GLM job windows in manifest — keeping any existing billing.json",
+                      file=sys.stderr)
+        except Exception as ex:
+            # never fatal (report falls back to modeled cost), but must not be invisible: a swallowed
+            # failure here silently keeps a STALE billing.json that looks current (e.g. `modal` missing).
+            print(f"  ! billing refresh failed ({type(ex).__name__}: {ex}) — keeping existing "
+                  f"billing.json (may be stale); install modal + creds, or pass --no-billing",
+                  file=sys.stderr)
     _step(1, STEPS, "billing")
 
     runs, task_stat, cell, cost_is_real = collect(run_dir)
@@ -649,19 +713,22 @@ def main():
     # rate (still concurrency-split). Opus is per-token (its own real charge) and is left untouched.
     owned = [(s, e, r["label"]) for r in runs if r["model"] != "opus" for (s, e) in r["ivs"]]
     gen_union = union_seconds([(s, e) for (s, e, _o) in owned])
-    bill = None
+    bill, by_hour = None, []
     if cost_is_real:
         try:
             with open(os.path.join(run_dir, "billing.json")) as bf:
-                bill = float(json.load(bf)["cost"])
+                bj = json.load(bf)
+            bill = float(bj["cost"])
+            by_hour = bj.get("by_hour", [])   # per-hour real cost -> per-episode rates below
         except Exception:
             pass
     if gen_union > 0:
-        rate_per_sec = (bill / gen_union) if bill else (GPU_HOURLY_USD / 3600.0)
-        billed = attribute_cost(owned, rate_per_sec)   # {run label: $}, sums to rate×gen_union
+        fallback_rate = (bill / gen_union) if bill else (GPU_HOURLY_USD / 3600.0)
+        billed, sole = attribute_by_episode(owned, by_hour, fallback_rate)   # per-episode, sums to bill
         for r in runs:
             if r["model"] != "opus":
                 r["cost"] = billed.get(r["label"], 0.0)
+                r["sole"] = sole.get(r["label"], 0.0)   # as-if-alone at this run's episode rate
         # rebuild task_stat's per-task cost from the attributed run costs so the difficulty csv agrees
         for a in task_stat.values():
             a["cost"], a["cost_n"] = 0.0, 0
