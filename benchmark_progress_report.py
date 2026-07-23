@@ -854,16 +854,12 @@ def main():
                         round(sole_tot.get(m, 0.0), 4), basis])
     _step(4, STEPS, "write csv")
 
-    # ---- concurrency: how many runs overlapped in time (packing on the shared box/endpoint) ----
-    ivals = []
-    mpath = os.path.join(run_dir, "manifest.csv")
-    if os.path.exists(mpath):
-        with open(mpath) as mf:
-            for row in csv.DictReader(mf):
-                try:
-                    ivals.append((float(row["start"]), float(row["end"])))
-                except (TypeError, ValueError, KeyError):
-                    pass
+    # ---- concurrency: how many GLM runs were GENERATING on the endpoint at the same instant ----
+    # This is the split that actually prices the bill, so it must use the SAME windows as the cost
+    # attribution: GLM generation intervals only (`owned`). Using manifest orchestration windows or
+    # including Opus (never on the GPU) would overstate it and stop reconciling with $/attempt —
+    # avg_c here equals total_sole / total_billed by construction.
+    ivals = [(s, e) for (s, e, _o) in owned]
     peak_c = peak_concurrency(ivals) if ivals else 0
     avg_c = round(avg_concurrency(ivals), 1) if ivals else 0.0
 

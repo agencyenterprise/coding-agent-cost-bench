@@ -15,10 +15,10 @@ Our study — **4 runs × 33 DeepSWE v1.1 tasks** — is in [`results/deepswe-v1
 | Setup | pass@k (tasks solved) | $/attempt | $/completed task |
 |---|---|---|---|
 | Claude Opus 4.8 · Claude Code | 24/33 | $6.68 | $36.72 |
-| GLM-5.2 · high reasoning · Modal | 23/33 | **$1.88** | **$10.77** |
+| GLM-5.2 · high reasoning · Modal | 23/33 | **$1.96** | **$11.27** |
 
-GLM-5.2 (high) finished the same work at **~72% lower cost** while solving nearly as many tasks —
-when the endpoint stays busy (a task alone on the GPU is ~$9). Full numbers and method in the
+GLM-5.2 (high) finished the same work at **~70% lower cost** while solving nearly as many tasks —
+when the endpoint stays busy (a task alone on the GPU is ~$9.61). Full numbers and method in the
 `results/deepswe-v1.1-33task/` folder.
 
 ## Setups
