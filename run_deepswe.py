@@ -37,6 +37,12 @@ from datetime import datetime
 from pathlib import Path
 
 GLM_MODEL = "zai-org/GLM-5.2-FP8"   # opencode provider model id (the tier lives in the baseURL, not here)
+# A SECOND self-hosted model (e.g. Kimi) should run as its OWN experiment: its own endpoint + run-id, so
+# its Modal bill attributes only to its runs (point MODAL_ENDPOINT at that endpoint, report with
+# --billing-app <that endpoint's app>). NB: "Kimi-K3" is not a released model — the line is at K2.6 /
+# K2.7-Code; set the REAL served id here. Kimi has no reasoning-effort tiers (thinking vs instruct are
+# separate checkpoints), so run it as one flat setup, not the GLM 3-tier structure.
+K3_MODEL = "moonshotai/Kimi-K2.7-Code"
 
 # setup -> how to configure pier. model/harness are REPORTING labels (benchmark_progress_report.py keys
 # off the `modal*` prefix for self-hosted GPU billing and `claude` for the Anthropic token path).
@@ -49,6 +55,11 @@ SETUPS = {
                     "model": f"modal-nothink/{GLM_MODEL}"},
     "opus":        {"agent": "claude-code", "harness": "claude", "tier": None,
                     "model": "claude-code/claude-opus-4-8"},
+    # Second self-hosted model — flat setup (no reasoning tiers). Run it ALONE (--setups k3) as its own
+    # experiment against its own endpoint. oc_model/oc_limit override the GLM defaults in build_config.
+    "k3":          {"agent": "opencode", "harness": "opencode", "tier": None,
+                    "model": f"modal/{K3_MODEL}", "oc_model": K3_MODEL,
+                    "oc_limit": {"context": 262144, "output": 262144}},
 }
 
 MANIFEST_FIELDS = ["task", "harness", "model", "prompt", "run", "status",
@@ -83,13 +94,15 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
         "datasets": [{"path": tasks_dir, "task_names": [task]}],
     }
     if s["agent"] == "opencode":
+        oc_model = s.get("oc_model", GLM_MODEL)                    # opencode provider model id for this setup
+        oc_limit = s.get("oc_limit", {"context": 262144, "output": 131072})
         cfg["agents"] = [{
             "name": "opencode",
-            "model_name": f"modal/{GLM_MODEL}",
-            # opencode hard-clamps output to OUTPUT_TOKEN_MAX (32000) via Math.min(limit.output, MAX);
-            # the ONLY way to lift it is this experimental env var. Without it, long GLM generations get
-            # cut at 32k with reason:length. 131072 = GLM-5.2's real output limit (endpoint imposes none).
-            "env": {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "131072"},
+            "model_name": f"modal/{oc_model}",
+            # opencode hard-clamps output to OUTPUT_TOKEN_MAX (32000) via Math.min(limit.output, MAX); the
+            # ONLY way to lift it is this experimental env var. Match it to the served model's real output
+            # limit so long generations aren't cut at 32k with reason:length.
+            "env": {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(oc_limit.get("output", 131072))},
             "kwargs": {"opencode_config": {"provider": {"modal": {
                 "npm": "@ai-sdk/openai-compatible",
                 "options": {
@@ -97,7 +110,7 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
                     "apiKey": "dummy",
                     "headers": {"Modal-Key": env["MODAL_KEY"], "Modal-Secret": env["MODAL_SECRET"]},
                 },
-                "models": {GLM_MODEL: {"limit": {"context": 262144, "output": 131072}}},
+                "models": {oc_model: {"limit": oc_limit}},
             }}}},
         }]
     else:  # claude-code (Opus)
