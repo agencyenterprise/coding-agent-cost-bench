@@ -38,16 +38,16 @@ from pathlib import Path
 
 GLM_MODEL = "zai-org/GLM-5.2-FP8"          # opencode provider model id (reasoning tier is in `tier`, below)
 GLM_LIMIT = {"context": 262144, "output": 131072}   # GLM-5.2's real context / output (opencode limit.*)
-# A SECOND self-hosted model (e.g. Kimi K3) runs as its OWN experiment: its own endpoint + run-id, so its
-# Modal bill attributes only to its runs (point MODAL_ENDPOINT at that endpoint, report with
-# --billing-app <that endpoint's app>). Kimi K3 DOES have reasoning effort — a TOP-LEVEL
-# `reasoning_effort` of low/high/max (max = default), unlike GLM's chat_template_kwargs. opencode sets it
-# natively via the model's `reasoningEffort` option (no proxy). ⚠ UNTESTED for a custom openai-compatible
-# Modal provider: opencode uses camelCase `reasoningEffort` but Kimi's wire param is snake_case
-# `reasoning_effort` — the adapter should translate; if it doesn't, switch the key in build_config. Verify
-# on this branch (check the endpoint receives reasoning_effort and reasoning scales low<high<max).
-K3_MODEL = "moonshotai/Kimi-K3"            # verify the exact served-model-name on your endpoint
-K3_LIMIT = {"context": 262144, "output": 262144}   # verify Kimi K3's real context / output
+# A SECOND self-hosted model runs as its OWN experiment: its own endpoint + run-id, so its Modal bill
+# attributes only to its runs (point MODAL_ENDPOINT at that endpoint, report with --billing-app <app>).
+# NB: Kimi-K3 is NOT available on Modal dedicated endpoints — the available Kimi is nvidia/Kimi-K2.6-NVFP4,
+# used here. Kimi's reasoning effort is a TOP-LEVEL `reasoning_effort` of low/high/max (max=default),
+# unlike GLM's chat_template_kwargs; opencode sets it natively via the model's `reasoningEffort` option
+# (no proxy). ⚠ UNTESTED here: (1) opencode uses camelCase `reasoningEffort` but the wire param is
+# snake_case `reasoning_effort` — the adapter should translate; if not, flip the key in build_config;
+# (2) reasoning_effort is documented for K3 — confirm K2.6 honors it (reasoning scales low<high<max).
+KIMI_MODEL = "nvidia/Kimi-K2.6-NVFP4"      # only Kimi on Modal dedicated endpoints (K3 not available)
+KIMI_LIMIT = {"context": 262144, "output": 262144}   # verify K2.6's real context / output
 
 # setup -> how to configure pier. model/harness are REPORTING labels (benchmark_progress_report.py keys
 # off the `modal*` prefix for self-hosted GPU billing and `claude` for the Anthropic token path).
@@ -63,15 +63,15 @@ SETUPS = {
                     "model": f"modal-nothink/{GLM_MODEL}", "oc_model": GLM_MODEL, "oc_limit": GLM_LIMIT},
     "opus":        {"agent": "claude-code", "harness": "claude", "tier": None,
                     "model": "claude-code/claude-opus-4-8"},
-    # Second self-hosted model (Kimi K3). `tier`=None (no GLM-style proxy); reasoning is set natively via
+    # Second self-hosted model (Kimi K2.6). `tier`=None (no GLM-style proxy); reasoning is set natively via
     # `reasoning_effort` (low/high/max) in the opencode model config. Three tiers, mirroring GLM. Run each
-    # ALONE (--setups k3 / k3-high / k3-low) as its own experiment against the Kimi endpoint.
-    "k3":          {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "max",
-                    "model": f"modal/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
-    "k3-high":     {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "high",
-                    "model": f"modal-high/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
-    "k3-low":      {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "low",
-                    "model": f"modal-low/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
+    # ALONE (--setups kimi / kimi-high / kimi-low) as its own experiment against the Kimi endpoint.
+    "kimi":        {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "max",
+                    "model": f"modal/{KIMI_MODEL}", "oc_model": KIMI_MODEL, "oc_limit": KIMI_LIMIT},
+    "kimi-high":   {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "high",
+                    "model": f"modal-high/{KIMI_MODEL}", "oc_model": KIMI_MODEL, "oc_limit": KIMI_LIMIT},
+    "kimi-low":    {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "low",
+                    "model": f"modal-low/{KIMI_MODEL}", "oc_model": KIMI_MODEL, "oc_limit": KIMI_LIMIT},
 }
 
 MANIFEST_FIELDS = ["task", "harness", "model", "prompt", "run", "status",
