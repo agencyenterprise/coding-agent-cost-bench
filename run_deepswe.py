@@ -36,30 +36,34 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-GLM_MODEL = "zai-org/GLM-5.2-FP8"   # opencode provider model id (the tier lives in the baseURL, not here)
+GLM_MODEL = "zai-org/GLM-5.2-FP8"          # opencode provider model id (reasoning tier is in `tier`, below)
+GLM_LIMIT = {"context": 262144, "output": 131072}   # GLM-5.2's real context / output (opencode limit.*)
 # A SECOND self-hosted model (e.g. Kimi) should run as its OWN experiment: its own endpoint + run-id, so
 # its Modal bill attributes only to its runs (point MODAL_ENDPOINT at that endpoint, report with
 # --billing-app <that endpoint's app>). NB: "Kimi-K3" is not a released model — the line is at K2.6 /
 # K2.7-Code; set the REAL served id here. Kimi has no reasoning-effort tiers (thinking vs instruct are
-# separate checkpoints), so run it as one flat setup, not the GLM 3-tier structure.
+# separate checkpoints), so run it as one flat setup (tier=None), not the GLM 3-tier structure.
 K3_MODEL = "moonshotai/Kimi-K2.7-Code"
+K3_LIMIT = {"context": 262144, "output": 262144}
 
 # setup -> how to configure pier. model/harness are REPORTING labels (benchmark_progress_report.py keys
 # off the `modal*` prefix for self-hosted GPU billing and `claude` for the Anthropic token path).
+# `tier` = reasoning tier: None -> endpoint direct (GLM default/max); "high"/"nothink" -> reasoning-proxy
+# sidecar injects the chat_template_kwargs (see base_url). `oc_model`/`oc_limit` are the opencode provider
+# model id + its real {context, output} limits — required on every opencode setup (claude-code omits them).
 SETUPS = {
     "glm-default": {"agent": "opencode", "harness": "opencode", "tier": None,
-                    "model": f"modal/{GLM_MODEL}"},
+                    "model": f"modal/{GLM_MODEL}", "oc_model": GLM_MODEL, "oc_limit": GLM_LIMIT},
     "glm-high":    {"agent": "opencode", "harness": "opencode", "tier": "high",
-                    "model": f"modal-high/{GLM_MODEL}"},
+                    "model": f"modal-high/{GLM_MODEL}", "oc_model": GLM_MODEL, "oc_limit": GLM_LIMIT},
     "glm-nothink": {"agent": "opencode", "harness": "opencode", "tier": "nothink",
-                    "model": f"modal-nothink/{GLM_MODEL}"},
+                    "model": f"modal-nothink/{GLM_MODEL}", "oc_model": GLM_MODEL, "oc_limit": GLM_LIMIT},
     "opus":        {"agent": "claude-code", "harness": "claude", "tier": None,
                     "model": "claude-code/claude-opus-4-8"},
-    # Second self-hosted model — flat setup (no reasoning tiers). Run it ALONE (--setups k3) as its own
-    # experiment against its own endpoint. oc_model/oc_limit override the GLM defaults in build_config.
+    # Second self-hosted model — one flat setup, no reasoning tier (Kimi has none). Run ALONE
+    # (--setups k3) as its own experiment against its own endpoint.
     "k3":          {"agent": "opencode", "harness": "opencode", "tier": None,
-                    "model": f"modal/{K3_MODEL}", "oc_model": K3_MODEL,
-                    "oc_limit": {"context": 262144, "output": 262144}},
+                    "model": f"modal/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
 }
 
 MANIFEST_FIELDS = ["task", "harness", "model", "prompt", "run", "status",
@@ -94,8 +98,8 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
         "datasets": [{"path": tasks_dir, "task_names": [task]}],
     }
     if s["agent"] == "opencode":
-        oc_model = s.get("oc_model", GLM_MODEL)                    # opencode provider model id for this setup
-        oc_limit = s.get("oc_limit", {"context": 262144, "output": 131072})
+        oc_model = s["oc_model"]      # opencode provider model id — explicit per setup (see SETUPS)
+        oc_limit = s["oc_limit"]      # {context, output} — the served model's real limits
         cfg["agents"] = [{
             "name": "opencode",
             "model_name": f"modal/{oc_model}",
