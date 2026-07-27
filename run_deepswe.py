@@ -38,13 +38,16 @@ from pathlib import Path
 
 GLM_MODEL = "zai-org/GLM-5.2-FP8"          # opencode provider model id (reasoning tier is in `tier`, below)
 GLM_LIMIT = {"context": 262144, "output": 131072}   # GLM-5.2's real context / output (opencode limit.*)
-# A SECOND self-hosted model (e.g. Kimi) should run as its OWN experiment: its own endpoint + run-id, so
-# its Modal bill attributes only to its runs (point MODAL_ENDPOINT at that endpoint, report with
-# --billing-app <that endpoint's app>). NB: "Kimi-K3" is not a released model — the line is at K2.6 /
-# K2.7-Code; set the REAL served id here. Kimi has no reasoning-effort tiers (thinking vs instruct are
-# separate checkpoints), so run it as one flat setup (tier=None), not the GLM 3-tier structure.
-K3_MODEL = "moonshotai/Kimi-K2.7-Code"
-K3_LIMIT = {"context": 262144, "output": 262144}
+# A SECOND self-hosted model (e.g. Kimi K3) runs as its OWN experiment: its own endpoint + run-id, so its
+# Modal bill attributes only to its runs (point MODAL_ENDPOINT at that endpoint, report with
+# --billing-app <that endpoint's app>). Kimi K3 DOES have reasoning effort — a TOP-LEVEL
+# `reasoning_effort` of low/high/max (max = default), unlike GLM's chat_template_kwargs. opencode sets it
+# natively via the model's `reasoningEffort` option (no proxy). ⚠ UNTESTED for a custom openai-compatible
+# Modal provider: opencode uses camelCase `reasoningEffort` but Kimi's wire param is snake_case
+# `reasoning_effort` — the adapter should translate; if it doesn't, switch the key in build_config. Verify
+# on this branch (check the endpoint receives reasoning_effort and reasoning scales low<high<max).
+K3_MODEL = "moonshotai/Kimi-K3"            # verify the exact served-model-name on your endpoint
+K3_LIMIT = {"context": 262144, "output": 262144}   # verify Kimi K3's real context / output
 
 # setup -> how to configure pier. model/harness are REPORTING labels (benchmark_progress_report.py keys
 # off the `modal*` prefix for self-hosted GPU billing and `claude` for the Anthropic token path).
@@ -60,10 +63,15 @@ SETUPS = {
                     "model": f"modal-nothink/{GLM_MODEL}", "oc_model": GLM_MODEL, "oc_limit": GLM_LIMIT},
     "opus":        {"agent": "claude-code", "harness": "claude", "tier": None,
                     "model": "claude-code/claude-opus-4-8"},
-    # Second self-hosted model — one flat setup, no reasoning tier (Kimi has none). Run ALONE
-    # (--setups k3) as its own experiment against its own endpoint.
-    "k3":          {"agent": "opencode", "harness": "opencode", "tier": None,
+    # Second self-hosted model (Kimi K3). `tier`=None (no GLM-style proxy); reasoning is set natively via
+    # `reasoning_effort` (low/high/max) in the opencode model config. Three tiers, mirroring GLM. Run each
+    # ALONE (--setups k3 / k3-high / k3-low) as its own experiment against the Kimi endpoint.
+    "k3":          {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "max",
                     "model": f"modal/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
+    "k3-high":     {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "high",
+                    "model": f"modal-high/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
+    "k3-low":      {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "low",
+                    "model": f"modal-low/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
 }
 
 MANIFEST_FIELDS = ["task", "harness", "model", "prompt", "run", "status",
@@ -100,6 +108,12 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
     if s["agent"] == "opencode":
         oc_model = s["oc_model"]      # opencode provider model id — explicit per setup (see SETUPS)
         oc_limit = s["oc_limit"]      # {context, output} — the served model's real limits
+        model_cfg = {"limit": oc_limit}
+        if s.get("reasoning_effort"):
+            # Kimi-style effort. opencode config key is camelCase `reasoningEffort`; the openai-compatible
+            # adapter is expected to send it on the wire as `reasoning_effort`. ⚠ UNTESTED for the custom
+            # Modal provider — if the endpoint doesn't see `reasoning_effort`, change this key to snake_case.
+            model_cfg["reasoningEffort"] = s["reasoning_effort"]
         cfg["agents"] = [{
             "name": "opencode",
             "model_name": f"modal/{oc_model}",
@@ -114,7 +128,7 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
                     "apiKey": "dummy",
                     "headers": {"Modal-Key": env["MODAL_KEY"], "Modal-Secret": env["MODAL_SECRET"]},
                 },
-                "models": {oc_model: {"limit": oc_limit}},
+                "models": {oc_model: model_cfg},
             }}}},
         }]
     else:  # claude-code (Opus)
