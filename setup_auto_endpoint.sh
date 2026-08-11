@@ -24,6 +24,7 @@ Usage: ./setup_auto_endpoint.sh [options]
       --model ID            model id on the endpoint     [$MODEL]
       --volume NAME         pre-downloaded weights vol   [$VOLUME]
       --volume-path PATH    mount path inside container  [$VOLUME_PATH]
+      --no-volume           omit custom volume (Modal pulls model from HF)
       --env NAME            proxy-token allowed env      [$ENV_NAME]
       --env-file PATH       file with MODAL_KEY/SECRET   [$ENV_FILE]
       --wait-tries N        provisioning poll attempts   [$WAIT_TRIES]
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
     --model)       MODEL="$2";       shift 2;;
     --volume)      VOLUME="$2";      shift 2;;
     --volume-path) VOLUME_PATH="$2"; shift 2;;
+    --no-volume)   VOLUME="";        shift;;
     --env)         ENV_NAME="$2";    shift 2;;
     --env-file)    ENV_FILE="$2";    shift 2;;
     --wait-tries)  WAIT_TRIES="$2";  shift 2;;
@@ -107,18 +109,20 @@ print("")
 PY
 }
 
-# 3. endpoint — create only if missing (idempotent), reusing the weights volume
+# 3. endpoint — create only if missing (idempotent); optional pre-downloaded weights volume
 tmp="$(mktemp)"
 modal endpoint list --json > "$tmp" 2>/dev/null || true
 if [ -n "$(_endpoint_status "$tmp")" ]; then
   :   # already exists — reuse silently
 else
-  echo "creating auto-endpoint '$NAME' for $MODEL (reusing volume '$VOLUME')..."
-  modal endpoint create \
-    --name "$NAME" \
-    --model "$MODEL" \
-    --custom-volume-name "$VOLUME" \
-    --custom-volume-path "$VOLUME_PATH"
+  create_args=(--name "$NAME" --model "$MODEL")
+  if [ -n "$VOLUME" ]; then
+    echo "creating auto-endpoint '$NAME' for $MODEL (reusing volume '$VOLUME')..."
+    create_args+=(--custom-volume-name "$VOLUME" --custom-volume-path "$VOLUME_PATH")
+  else
+    echo "creating auto-endpoint '$NAME' for $MODEL (no custom volume — Modal pulls from HF)..."
+  fi
+  modal endpoint create "${create_args[@]}"
 fi
 
 # 4. wait until the endpoint leaves 'provisioning' (endpoint list --json has no URL — only status)
