@@ -50,12 +50,17 @@ if not args.upstream:
 BASE = args.upstream[:-3] if args.upstream.endswith("/v1") else args.upstream.rstrip("/")
 
 # tier -> the chat_template_kwargs to merge in. "max"/None = passthrough (no injection).
+# tier -> (where, kwargs). where "ct" merges into chat_template_kwargs (GLM); "top" merges at the request
+# ROOT (Kimi's `reasoning_effort` is a top-level field, not chat_template_kwargs). Empty kwargs = passthrough.
 _TIERS = {
-    "off": {"enable_thinking": False},
-    "nothink": {"enable_thinking": False},
-    "high": {"reasoning_effort": "high"},
-    "max": {},
-    "default": {},
+    "off":      ("ct",  {"enable_thinking": False}),
+    "nothink":  ("ct",  {"enable_thinking": False}),
+    "high":     ("ct",  {"reasoning_effort": "high"}),      # GLM
+    "max":      ("ct",  {}),
+    "default":  ("ct",  {}),
+    "eff-low":  ("top", {"reasoning_effort": "low"}),       # Kimi (top-level)
+    "eff-high": ("top", {"reasoning_effort": "high"}),      # Kimi
+    "eff-max":  ("top", {"reasoning_effort": "max"}),       # Kimi
 }
 
 
@@ -72,8 +77,13 @@ def _split_tier(path):
 
 
 def _inject(obj, tier):
-    kw = _TIERS.get(tier) or {}
-    if kw:
+    where, kw = _TIERS.get(tier, ("ct", {}))
+    if not kw:
+        return obj
+    if where == "top":                              # Kimi: reasoning_effort at the request root
+        for k, v in kw.items():
+            obj.setdefault(k, v)
+    else:                                           # GLM: nested under chat_template_kwargs
         ck = obj.setdefault("chat_template_kwargs", {})
         for k, v in kw.items():
             ck.setdefault(k, v)
@@ -97,7 +107,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(n) if n else None
         injected = False
-        if body and "chat/completions" in fwd_path and tier in _TIERS and _TIERS[tier]:
+        if body and "chat/completions" in fwd_path and _TIERS.get(tier, ("ct", {}))[1]:
             try:
                 body = json.dumps(_inject(json.loads(body), tier)).encode()
                 injected = True

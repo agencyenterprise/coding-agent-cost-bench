@@ -64,14 +64,15 @@ SETUPS = {
                     "model": f"modal-nothink/{GLM_MODEL}", "oc_model": GLM_MODEL, "oc_limit": GLM_LIMIT},
     "opus":        {"agent": "claude-code", "harness": "claude", "tier": None,
                     "model": "claude-code/claude-opus-4-8"},
-    # Second self-hosted model (Kimi K2.6). `tier`=None (no GLM-style proxy); reasoning is set natively via
-    # `reasoning_effort` (low/high/max) in the opencode model config. Three tiers, mirroring GLM. Run each
-    # ALONE (--setups k3 / k3-high / k3-low) as its own experiment against the Kimi endpoint.
-    "k3":          {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "max",
+    # Second self-hosted model (Kimi K3). Effort = top-level `reasoning_effort` injected by the reasoning
+    # proxy via the "eff-*" tier (opencode won't send it from config — confirmed). k3 (max) is Kimi's
+    # DEFAULT so it goes direct (tier=None, no proxy); k3-high/k3-low route through the sidecar, so those
+    # two need the -p 80:80 / HOST_IP wiring (like GLM high/nothink). Run each ALONE as its own experiment.
+    "k3":          {"agent": "opencode", "harness": "opencode", "tier": None,
                     "model": f"modal/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
-    "k3-high":     {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "high",
+    "k3-high":     {"agent": "opencode", "harness": "opencode", "tier": "eff-high",
                     "model": f"modal-high/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
-    "k3-low":      {"agent": "opencode", "harness": "opencode", "tier": None, "reasoning_effort": "low",
+    "k3-low":      {"agent": "opencode", "harness": "opencode", "tier": "eff-low",
                     "model": f"modal-low/{K3_MODEL}", "oc_model": K3_MODEL, "oc_limit": K3_LIMIT},
 }
 
@@ -109,13 +110,10 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
     if s["agent"] == "opencode":
         oc_model = s["oc_model"]      # opencode provider model id — explicit per setup (see SETUPS)
         oc_limit = s["oc_limit"]      # {context, output} — the served model's real limits
+        # Kimi effort is NOT set here: opencode drops model-level reasoning_effort/reasoningEffort from the
+        # request (confirmed — tiers came out identical). Instead the k3-high/k3-low setups route through
+        # the reasoning proxy (tier "eff-high"/"eff-low"), which injects top-level `reasoning_effort`.
         model_cfg = {"limit": oc_limit}
-        if s.get("reasoning_effort"):
-            # Kimi effort. First attempt used camelCase `reasoningEffort` and the tiers came out identical
-            # (the adapter didn't translate it to the wire), so we send the snake_case wire param directly.
-            # If this STILL doesn't scale reasoning low<high<max, the model-level option isn't reaching the
-            # request body — fall back to injecting top-level `reasoning_effort` via the reasoning proxy.
-            model_cfg["reasoning_effort"] = s["reasoning_effort"]
         cfg["agents"] = [{
             "name": "opencode",
             "model_name": f"modal/{oc_model}",
