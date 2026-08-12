@@ -2,9 +2,11 @@
 # Pull a benchmark run from the AWS box, replace the local copy under ./runs/, and
 # render the interim progress report — safe to run while the benchmark is still going.
 #
-# Usage:  ./pull_run_from_server.sh [RUN_ID]
+# Usage:  ./pull_run_from_server.sh [RUN_ID] [report flags...]
 #   RUN_ID  runs-folder name on the remote (default: newest dir under the remote runs/).
-# Config comes from .env (REMOTE, REMOTE_RUNS); env vars override.
+# Extra args are forwarded to benchmark_progress_report.py (e.g. --billing-app NAME,
+# --no-billing). For a non-GLM endpoint, pass --billing-app or set MODAL_BILLING_APP
+# (default is ep-Modal-Auto-Endpoints). Config: .env (REMOTE, REMOTE_RUNS); env overrides.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -20,7 +22,14 @@ step() {
   printf '[ %s ] %d/%d %s (done)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$STEPS" "$2"
 }
 
-RUN="${1:-}"
+# Optional RUN_ID if the first arg is positional; everything else goes to the report.
+RUN=""
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+  RUN="$1"
+  shift
+fi
+REPORT_ARGS=("$@")
+
 if [ -z "$RUN" ]; then
   RUN="$(ssh "$REMOTE" "ls -1dt $REMOTE_RUNS/*/ 2>/dev/null | head -1 | xargs -n1 basename")"
 fi
@@ -66,4 +75,4 @@ tar xzf "$TARBALL" -C "$LOCAL_RUNS"
 rm -f "$TARBALL"
 step 3 "extract → $LOCAL_RUNS/$RUN"
 
-python3 "$HERE/benchmark_progress_report.py" "$LOCAL_RUNS/$RUN"
+python3 "$HERE/benchmark_progress_report.py" "$LOCAL_RUNS/$RUN" "${REPORT_ARGS[@]}"
