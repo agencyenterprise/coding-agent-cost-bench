@@ -111,10 +111,11 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
         oc_limit = s["oc_limit"]      # {context, output} — the served model's real limits
         model_cfg = {"limit": oc_limit}
         if s.get("reasoning_effort"):
-            # Kimi-style effort. opencode config key is camelCase `reasoningEffort`; the openai-compatible
-            # adapter is expected to send it on the wire as `reasoning_effort`. ⚠ UNTESTED for the custom
-            # Modal provider — if the endpoint doesn't see `reasoning_effort`, change this key to snake_case.
-            model_cfg["reasoningEffort"] = s["reasoning_effort"]
+            # Kimi effort. First attempt used camelCase `reasoningEffort` and the tiers came out identical
+            # (the adapter didn't translate it to the wire), so we send the snake_case wire param directly.
+            # If this STILL doesn't scale reasoning low<high<max, the model-level option isn't reaching the
+            # request body — fall back to injecting top-level `reasoning_effort` via the reasoning proxy.
+            model_cfg["reasoning_effort"] = s["reasoning_effort"]
         cfg["agents"] = [{
             "name": "opencode",
             "model_name": f"modal/{oc_model}",
