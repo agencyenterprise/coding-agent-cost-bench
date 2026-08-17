@@ -402,12 +402,18 @@ def refresh_billing(run_dir, app="ep-Modal-Auto-Endpoints"):
 # dir-name model prefix -> display label (matches the report image)
 MODEL_LABEL = {
     "opus": "Claude Opus 4.8",
+    "opus5": "Claude Opus 5",
     "glm-default": "GLM-5.2 (default)",
     "glm-high": "GLM-5.2 (high reasoning)",
     "glm-nothink": "GLM-5.2 (no thinking)",
 }
 # stable row order for the per-model table
-MODEL_ORDER = ["opus", "glm-default", "glm-high", "glm-nothink"]
+MODEL_ORDER = ["opus", "opus5", "glm-default", "glm-high", "glm-nothink"]
+
+
+def is_claude_setup(model):
+    """Claude Code runs (Anthropic API) — dirname prefix from run_deepswe setup name."""
+    return model.startswith("opus")
 
 
 def parse_dirname(name):
@@ -479,7 +485,7 @@ def collect(run_dir):
         if not os.path.isdir(rundir) or not os.path.exists(os.path.join(rundir, "reward.json")):
             continue
         model, task, _run = parse_dirname(entry)
-        is_claude = model == "opus"
+        is_claude = is_claude_setup(model)
         pm = claude_stats(rundir) if is_claude else log_stats(rundir)
         dur = run_duration_s(rundir, is_claude)
         # Claude reports its own $ (None if the run was killed before its result event);
@@ -719,7 +725,7 @@ def main():
     # double-counted for parallelism. The per-second rate is PINNED so the GLM total equals the real
     # bill (billing.json `cost`) to the cent when it exists; otherwise it falls back to the modeled GPU
     # rate (still concurrency-split). Opus is per-token (its own real charge) and is left untouched.
-    owned = [(s, e, r["label"]) for r in runs if r["model"] != "opus" for (s, e) in r["ivs"]]
+    owned = [(s, e, r["label"]) for r in runs if not is_claude_setup(r["model"]) for (s, e) in r["ivs"]]
     gen_union = union_seconds([(s, e) for (s, e, _o) in owned])
     bill, by_hour = None, []
     if cost_is_real:
@@ -734,7 +740,7 @@ def main():
         fallback_rate = (bill / gen_union) if bill else (GPU_HOURLY_USD / 3600.0)
         billed, sole = attribute_by_billing_hour(owned, by_hour, fallback_rate)   # per hour, sums to bill
         for r in runs:
-            if r["model"] != "opus":
+            if not is_claude_setup(r["model"]):
                 r["cost"] = billed.get(r["label"], 0.0)
                 r["sole"] = sole.get(r["label"], 0.0)   # as-if-alone at this run's episode rate
         # rebuild task_stat's per-task cost from the attributed run costs so the difficulty csv agrees
@@ -861,7 +867,7 @@ def main():
             n, pr = rs["runs"], rs["pass"]
             solved_t, tot_t = per_model[m]["pass"], per_model[m]["pass"] + per_model[m]["fail"]
             tot = model_cost.get(m, 0.0)
-            basis = "claude_code" if m == "opus" else ("real" if cost_is_real else "modeled")
+            basis = "claude_code" if is_claude_setup(m) else ("real" if cost_is_real else "modeled")
             w.writerow([m, n, pr, round(100 * pr / n, 1) if n else "",
                         solved_t, tot_t, round(100 * solved_t / tot_t, 1) if tot_t else "",
                         round(tot, 4), round(tot / n, 4) if n else "",

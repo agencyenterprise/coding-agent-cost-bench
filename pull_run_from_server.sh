@@ -75,4 +75,5 @@ tar xzf "$TARBALL" -C "$LOCAL_RUNS"
 rm -f "$TARBALL"
 step 3 "extract → $LOCAL_RUNS/$RUN"
 
-python3 "$HERE/benchmark_progress_report.py" "$LOCAL_RUNS/$RUN" "${REPORT_ARGS[@]}"
+# macOS bash 3.2 + set -u: "${arr[@]}" on an empty array is "unbound"
+python3 "$HERE/benchmark_progress_report.py" "$LOCAL_RUNS/$RUN" ${REPORT_ARGS+"${REPORT_ARGS[@]}"}
