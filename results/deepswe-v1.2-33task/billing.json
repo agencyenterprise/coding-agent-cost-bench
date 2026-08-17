@@ -1,0 +1,70 @@
+{
+  "app": "ep-kimi-k3",
+  "window_start": "2026-08-12T12:56:15.896000+00:00",
+  "window_end": "2026-08-12T21:16:53.546000+00:00",
+  "window_hours": 8.344,
+  "cost": 1068.419,
+  "effective_hourly": 128.0496,
+  "by_hour": [
+    {
+      "hour": "2026-08-12T12:00:00+00:00",
+      "hour_cost": 69.2554,
+      "glm_seconds_in_hour": 224,
+      "billed": 4.3112
+    },
+    {
+      "hour": "2026-08-12T13:00:00+00:00",
+      "hour_cost": 131.4635,
+      "glm_seconds_in_hour": 3600,
+      "billed": 131.4635
+    },
+    {
+      "hour": "2026-08-12T14:00:00+00:00",
+      "hour_cost": 164.8908,
+      "glm_seconds_in_hour": 3600,
+      "billed": 164.8908
+    },
+    {
+      "hour": "2026-08-12T15:00:00+00:00",
+      "hour_cost": 131.4976,
+      "glm_seconds_in_hour": 3600,
+      "billed": 131.4976
+    },
+    {
+      "hour": "2026-08-12T16:00:00+00:00",
+      "hour_cost": 95.9509,
+      "glm_seconds_in_hour": 3600,
+      "billed": 95.9509
+    },
+    {
+      "hour": "2026-08-12T17:00:00+00:00",
+      "hour_cost": 131.4717,
+      "glm_seconds_in_hour": 3600,
+      "billed": 131.4717
+    },
+    {
+      "hour": "2026-08-12T18:00:00+00:00",
+      "hour_cost": 121.6357,
+      "glm_seconds_in_hour": 3600,
+      "billed": 121.6357
+    },
+    {
+      "hour": "2026-08-12T19:00:00+00:00",
+      "hour_cost": 131.4915,
+      "glm_seconds_in_hour": 3600,
+      "billed": 131.4915
+    },
+    {
+      "hour": "2026-08-12T20:00:00+00:00",
+      "hour_cost": 131.4978,
+      "glm_seconds_in_hour": 3600,
+      "billed": 131.4978
+    },
+    {
+      "hour": "2026-08-12T21:00:00+00:00",
+      "hour_cost": 85.9848,
+      "glm_seconds_in_hour": 1014,
+      "billed": 24.2082
+    }
+  ]
+}

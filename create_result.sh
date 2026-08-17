@@ -79,15 +79,16 @@ PY
 python3 - "$DST" "$NAME" <<'PY'
 import csv, os, sys
 dst, name = sys.argv[1], sys.argv[2]
-rows = {r["setup"]: r for r in csv.DictReader(open(os.path.join(dst, "summary.csv")))}
+# Preserve summary.csv row order (whatever setups this result actually ran).
+rows = list(csv.DictReader(open(os.path.join(dst, "summary.csv"))))
 out = [f"# {name}", "",
        "Frozen, committable result (light artifacts). The raw per-run logs stay under `runs/` "
        "(gitignored); regenerate them by re-running the benchmark.", "",
        "| Setup | pass@k (tasks) | pass@1 (attempts) | $/attempt | $/completed task |",
        "|---|---|---|---|---|"]
-for s in ("opus", "glm-default", "glm-high", "glm-nothink"):
-    r = rows.get(s)
-    if not r:
+for r in rows:
+    s = r.get("setup") or ""
+    if not s:
         continue
     out.append(f"| {s} | {r['tasks_solved']}/{r['tasks_total']} | {r['pass_runs']}/{r['runs']} "
                f"| ${float(r['avg_usd_per_run']):.2f} | ${float(r['usd_per_task_solved']):.2f} |")
