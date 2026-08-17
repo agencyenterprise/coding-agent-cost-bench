@@ -9,6 +9,7 @@ proxy, and grades with the task's tests -> verifier/reward.json. We drive four s
     glm-high      opencode -> reasoning-proxy /high/v1     (reasoning_effort:high)
     glm-nothink   opencode -> reasoning-proxy /nothink/v1  (enable_thinking:false)
     opus          claude-code -> Anthropic API            (Claude Opus 4.8)
+    opus5         claude-code -> Anthropic API            (Claude Opus 5)
 
 The GLM tiers share ONE reasoning-proxy sidecar on http://<HOST_IP>:80 (pier's Squid only allows
 ports 80/443, so tiers are distinguished by URL path, not port). --host-ip is the address Squid uses
@@ -63,7 +64,9 @@ SETUPS = {
     "glm-nothink": {"agent": "opencode", "harness": "opencode", "tier": "nothink",
                     "model": f"modal-nothink/{GLM_MODEL}", "oc_model": GLM_MODEL, "oc_limit": GLM_LIMIT},
     "opus":        {"agent": "claude-code", "harness": "claude", "tier": None,
-                    "model": "claude-code/claude-opus-4-8"},
+                    "model": "claude-code/claude-opus-4-8", "cc_model": "claude-opus-4-8"},
+    "opus5":       {"agent": "claude-code", "harness": "claude", "tier": None,
+                    "model": "claude-code/claude-opus-5", "cc_model": "claude-opus-5"},
     # Second self-hosted model (Kimi K3). Effort = top-level `reasoning_effort` injected by the reasoning
     # proxy via the "eff-*" tier (opencode won't send it from config — confirmed). k3 (max) is Kimi's
     # DEFAULT so it goes direct (tier=None, no proxy); k3-high/k3-low route through the sidecar, so those
@@ -131,10 +134,10 @@ def build_config(setup, task, tasks_dir, env, host_ip, timeout_mult):
                 "models": {oc_model: model_cfg},
             }}}},
         }]
-    else:  # claude-code (Opus)
+    else:  # claude-code (Opus) — cc_model is the Anthropic model id, explicit per setup
         cfg["agents"] = [{
             "name": "claude-code",
-            "model_name": "claude-opus-4-8",
+            "model_name": s["cc_model"],
             "env": {"ANTHROPIC_API_KEY": env.get("ANTHROPIC_API_KEY", "")},
         }]
     return cfg
@@ -310,8 +313,8 @@ def main():
             sys.exit(f"{var} is required for GLM setups (set it in the environment / .env)")
     if need_sidecar and not args.host_ip:
         sys.exit("high/nothink setups need --host-ip (the box IP Squid uses to reach the sidecar)")
-    if "opus" in setups and not env.get("ANTHROPIC_API_KEY"):
-        sys.exit("opus needs ANTHROPIC_API_KEY")
+    if any(SETUPS[s]["agent"] == "claude-code" for s in setups) and not env.get("ANTHROPIC_API_KEY"):
+        sys.exit("claude-code setups (opus/opus5) need ANTHROPIC_API_KEY")
 
     # each invocation gets its own timestamped folder under --out, so repeated runs never clobber.
     # the pier job tree lives inside it too — so a single host-aligned mount of --out holds everything
