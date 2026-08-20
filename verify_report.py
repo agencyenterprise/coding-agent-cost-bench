@@ -147,7 +147,9 @@ def test_against_report(run_dir):
         check("manifest status == reward.json (all runs)", mism == 0, f"{mism} mismatches")
 
     # 2c. cost invariants: apply the SAME attribution the report does, then check reconciliation
-    owned = [(s, e, r["label"]) for r in runs if r["model"] != "opus" for (s, e) in r["ivs"]]
+    # "self-hosted" = anything not billed per token by an API harness. Use the report's own predicate
+    # so a second claude-code setup (e.g. opus5) is never mistaken for a GPU-billed run.
+    owned = [(s, e, r["label"]) for r in runs if not R.is_claude_setup(r["model"]) for (s, e) in r["ivs"]]
     gen_union = aggregate.union_seconds([(s, e) for (s, e, _o) in owned])
     bill = None
     if cost_is_real:
@@ -166,15 +168,19 @@ def test_against_report(run_dir):
         # no GLM run should exceed its own sole cost (concurrency only ever discounts)
         sole = {}
         for r in runs:
-            if r["model"] != "opus":
+            if not R.is_claude_setup(r["model"]):
                 sole[r["label"]] = aggregate.union_seconds(r["ivs"]) * rate
         over = [k for k, v in billed.items() if v > sole.get(k, 0) + CENT]
         check("no run billed above its sole cost (split only discounts)", not over,
               f"{len(over)} over: {over[:3]}")
 
-    # 2d. Opus cost must be its own per-token charge, untouched by attribution
-    opus_costs = [r["cost"] for r in runs if r["model"] == "opus" and r["cost"] is not None]
-    check("opus costs present and non-negative", all(c >= -EPS for c in opus_costs) and opus_costs != [])
+    # 2d. Claude-harness cost must be its own per-token charge, untouched by attribution. Skipped on a
+    # model-only study (e.g. K3 tiers) — no claude-code setup ran, so there is nothing to assert.
+    claude_setups = sorted({r["model"] for r in runs if R.is_claude_setup(r["model"])})
+    if claude_setups:
+        costs = [r["cost"] for r in runs if R.is_claude_setup(r["model"]) and r["cost"] is not None]
+        check(f"claude-code costs present and non-negative {claude_setups}",
+              all(c >= -EPS for c in costs) and costs != [])
 
     # 2e. exported CSVs (if the report has run) must reconcile to the bill and to each other
     pr = os.path.join(run_dir, "per_run.csv")
