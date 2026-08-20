@@ -9,17 +9,33 @@ against **Claude Opus** across GLM's reasoning tiers.
 
 ## Results
 
-Our study — **4 runs × 33 DeepSWE v1.1 tasks** — is in [`results/deepswe-v1.1-33task/`](results/deepswe-v1.1-33task/)
-(task list, per-run CSVs, billing, and the rendered report). Headline, under the observed concurrency:
+Three studies, each **4 runs × the same 33 DeepSWE v1.1 tasks** (132 attempts per setup). The `33`
+in each folder name is that task count — these are *not* benchmark versions, and all three ran the
+identical task list (`tasks.txt` is in every folder alongside per-run CSVs, billing, and the report):
+
+| Study | Setups | What it measures |
+|---|---|---|
+| [`results/deepswe33-glm-opus48/`](results/deepswe33-glm-opus48/) | GLM-5.2 × 3 reasoning tiers + Opus 4.8 | self-hosted vs the API baseline |
+| [`results/deepswe33-kimi-k3/`](results/deepswe33-kimi-k3/) | Kimi K3 × 3 reasoning efforts | a second self-hosted model |
+| [`results/deepswe33-opus5/`](results/deepswe33-opus5/) | Opus 5 | the newer frontier baseline |
+
+Headline, cheapest to most expensive per completed task, under the observed concurrency:
 
 | Setup | pass@k (tasks solved) | $/attempt | $/completed task |
 |---|---|---|---|
+| Kimi K3 · low reasoning · Modal | 29/33 | **$1.32** | **$6.00** |
+| Kimi K3 · high reasoning · Modal | 28/33 | $2.30 | $10.86 |
+| GLM-5.2 · high reasoning · Modal | 23/33 | $1.96 | $11.27 |
 | Claude Opus 4.8 · Claude Code | 24/33 | $6.68 | $36.72 |
-| GLM-5.2 · high reasoning · Modal | 23/33 | **$1.96** | **$11.27** |
+| Claude Opus 5 · Claude Code | 28/33 | $7.96 | $37.51 |
 
-GLM-5.2 (high) finished the same work at **~70% lower cost** while solving nearly as many tasks —
-when the endpoint stays busy (a task alone on the GPU is ~$9.61). Full numbers and method in the
-`results/deepswe-v1.1-33task/` folder.
+Every self-hosted setting beat both Opus models on cost per completed task — when the endpoint stays
+busy (a GLM task alone on the GPU is ~$9.61). K3 at low reasoning solved the most tasks of anything
+tested, for ~6× less than Opus. Full numbers and method in each folder.
+
+**Self-hosted rows** are the real Modal bill split across overlapping tasks by concurrency; **Opus
+rows** are Claude Code's own per-token cost. GLM ran on 8×B200, K3 on B300s (its default serving
+config spilled to a second container under our load).
 
 ## Setups
 

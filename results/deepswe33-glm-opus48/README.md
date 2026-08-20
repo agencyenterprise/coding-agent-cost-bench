@@ -1,4 +1,4 @@
-# deepswe-v1.1-33task
+# deepswe33-glm-opus48
 
 Frozen, committable result (light artifacts). The raw per-run logs stay under `runs/` (gitignored); regenerate them by re-running the benchmark.
 
